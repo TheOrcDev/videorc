@@ -14,6 +14,7 @@ import {
   launchDevApp,
   performanceAppSpawnSpec,
   repoRoot,
+  smokeAppIsGpui,
   stopProcess
 } from './lib/app-launcher.mjs'
 import {
@@ -59,6 +60,13 @@ import {
   windowsPreviewLifecycleOpenFailures
 } from './lib/windows-preview-lifecycle-gates.mjs'
 import { configureWindowsD3d11ProbeSources } from './lib/windows-d3d11-preview-sources.mjs'
+
+// Plan 260 Phase 3: VIDEORC_APP=gpui runs the GPUI app's own lifecycle probe
+// (its native preview has no detached Electron window to budget).
+if (smokeAppIsGpui()) {
+  const { runGpuiPreviewLifecycleProbe } = await import('./gpui-preview-lifecycle-probe.mjs')
+  process.exit(await runGpuiPreviewLifecycleProbe())
+}
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const windowsPreviewMode = parseWindowsPreviewLifecycleMode(process.argv.slice(2), process.env)
@@ -485,9 +493,13 @@ async function main() {
     state: hiddenForRoom.last
   })
   const cardShown = await smokeCommand('eval-js', {
-    code: "return Boolean(document.querySelector('[data-testid=\"preview-replaced-by-show-stage\"]'))"
+    code: 'return Boolean(document.querySelector(\'[data-testid="preview-replaced-by-show-stage"]\'))'
   })
-  assertProbe(cardShown?.result === true, 'talk show: the Preview card names the Show stage', cardShown)
+  assertProbe(
+    cardShown?.result === true,
+    'talk show: the Preview card names the Show stage',
+    cardShown
+  )
   lifecycleEvidence.setContext({ cycle: null, action: 'talk-show-room-close' })
   await setTalkShowRoom(false, 'talk show: room close')
   const backAfterRoom = await waitForState(

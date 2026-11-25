@@ -7,6 +7,8 @@ use videorc_kit::{
     dialog::Dialog,
     list_row::{GroupedList, ListRow},
     panel_section::PanelSection,
+    section_label::SectionLabel,
+    settings_row::SettingsRow,
     switch::Switch,
 };
 
@@ -20,6 +22,28 @@ pub(super) struct Confirmation {
 }
 
 impl SettingsScreen {
+    /// P1421: Connect an agent… opens the dialog (made on first use).
+    fn open_connect_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let enabled = self.agents.as_ref().is_some_and(|status| status.enabled);
+        let dialog = match &self.connect_agent {
+            Some(dialog) => dialog.clone(),
+            None => {
+                let dialog = super::connect_agent::dialog(
+                    self.studio.clone(),
+                    self.backend.clone(),
+                    self.runtime.clone(),
+                    window,
+                    cx,
+                );
+                cx.observe(&dialog, |_, _, cx| cx.notify()).detach();
+                self.connect_agent = Some(dialog.clone());
+                dialog
+            }
+        };
+        dialog.update(cx, |dialog, cx| dialog.open(enabled, window, cx));
+        cx.notify();
+    }
+
     fn ask(&mut self, confirmation: Confirmation, window: &mut Window, cx: &mut Context<Self>) {
         self.confirmation = Some(confirmation);
         self.confirm.open(window, cx);
@@ -99,8 +123,15 @@ impl SettingsScreen {
                     }
                 })
             });
-        let mut controls = GroupedList::new()
-            .item(ListRow::new("remote-control-row", r::ENABLE_REMOTE_CONTROL).child(toggle));
+        // `remote-settings.tsx`: the switch is the section's action; off, a
+        // hint line (`text-xs text-muted-foreground`) stands for the rows.
+        let hint = |words: String| {
+            div()
+                .text_xs()
+                .text_color(hsla(t.muted_foreground))
+                .child(words)
+        };
+        let mut controls = GroupedList::new();
         if let Some(status) = &self.remote {
             if status.enabled {
                 let token = status.token.clone();
@@ -172,39 +203,37 @@ impl SettingsScreen {
                                     .child(r::new_token_description(platform)),
                             ),
                     );
-            } else {
-                controls =
-                    controls.item(ListRow::new("remote-off-hint", r::REMOTE_CONTROL_OFF_HINT));
             }
         }
         let remote = PanelSection::new(r::REMOTE_CONTROL_TITLE)
             .title(r::REMOTE_CONTROL_TITLE)
             .description(r::remote_control_description(platform))
-            .child(controls);
+            .action(toggle)
+            .when(enabled, |section| section.child(controls))
+            .when(!enabled, |section| {
+                section.child(hint(r::REMOTE_CONTROL_OFF_HINT.to_string()))
+            });
         let entity = cx.entity();
         let phone_enabled = self.phone.as_ref().is_some_and(|status| status.enabled);
-        let mut phones = GroupedList::new().item(
-            ListRow::new("phone-enable", "Enable phone remote").child(
-                Switch::new("phone-remote")
-                    .accessibility_label("Enable phone remote")
-                    .checked(phone_enabled)
-                    .disabled(self.disabled() || self.phone.is_none())
-                    .on_change(move |enabled, _, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.request(
-                                if enabled {
-                                    "remote.lan.enable"
-                                } else {
-                                    "remote.lan.disable"
-                                },
-                                json!({}),
-                                "Couldn't change phone remote. Try again.",
-                                cx,
-                            );
-                        })
-                    }),
-            ),
-        );
+        let phone_switch = Switch::new("phone-remote")
+            .accessibility_label("Enable phone remote")
+            .checked(phone_enabled)
+            .disabled(self.disabled() || self.phone.is_none())
+            .on_change(move |enabled, _, cx| {
+                entity.update(cx, |this, cx| {
+                    this.request(
+                        if enabled {
+                            "remote.lan.enable"
+                        } else {
+                            "remote.lan.disable"
+                        },
+                        json!({}),
+                        "Couldn't change phone remote. Try again.",
+                        cx,
+                    );
+                })
+            });
+        let mut phones = GroupedList::new();
         if let Some(status) = &self.phone {
             if status.enabled {
                 let (tone, summary) = r::phone_remote_summary(status);
@@ -256,13 +285,12 @@ impl SettingsScreen {
                         .child(div().px(px(12.)).pb(px(8.)).type_scale(text::META).text_color(hsla(t.muted_foreground))
                             .child(r::device_activity_label(phone, chrono::Utc::now().timestamp_millis()))));
                 }
-            } else {
-                phones = phones.item(ListRow::new("phone-off-hint", r::PHONE_REMOTE_OFF_HINT));
             }
         }
         let phone = PanelSection::new(r::PHONE_REMOTE_TITLE)
             .title(r::PHONE_REMOTE_TITLE)
             .description(r::PHONE_REMOTE_DESCRIPTION)
+            .action(phone_switch)
             .children(
                 self.phone
                     .as_ref()
@@ -271,43 +299,56 @@ impl SettingsScreen {
                         Alert::new("phone-blocked").title(r::phone_remote_summary(status).1)
                     }),
             )
-            .child(phones);
+            .when(phone_enabled, |section| section.child(phones))
+            .when(!phone_enabled, |section| {
+                section.child(hint(r::PHONE_REMOTE_OFF_HINT.to_string()))
+            })
+            .last(true);
+        // `agents-section.tsx`: the switch is the action; on, Agent apps with
+        // the summary and Connect; off, a hint line. Your agents and Activity
+        // show once there are any.
         let entity = cx.entity();
-        let mut agents_list = GroupedList::new()
-            .item(
-                ListRow::new("agents-enabled", agents::copy::SWITCH_LABEL).child(
-                    Switch::new("agents-switch")
-                        .accessibility_label(agents::copy::SWITCH_LABEL)
-                        .checked(self.agents.as_ref().is_some_and(|s| s.enabled))
-                        .disabled(self.disabled() || self.agents.is_none())
-                        .on_change(move |enabled, _, cx| {
-                            entity.update(cx, |this, cx| {
-                                this.request(
-                                    if enabled {
-                                        "agents.enable"
-                                    } else {
-                                        "agents.disable"
-                                    },
-                                    json!({}),
-                                    "Couldn't change Agents. Try again.",
-                                    cx,
-                                )
-                            })
-                        }),
-                ),
-            )
-            .item(
-                ListRow::new("agent-apps", agents::copy::AGENT_APPS).child(
+        let agents_on = self.agents.as_ref().is_some_and(|s| s.enabled);
+        let has_agents = self.agents.as_ref().is_some_and(|s| !s.agents.is_empty());
+        let has_activity = self.activity.as_ref().is_some_and(|a| !a.is_empty());
+        let agents_switch = Switch::new("agents-switch")
+            .accessibility_label(agents::copy::SWITCH_LABEL)
+            .checked(agents_on)
+            .disabled(self.disabled() || self.agents.is_none())
+            .on_change(move |enabled, _, cx| {
+                entity.update(cx, |this, cx| {
+                    this.request(
+                        if enabled {
+                            "agents.enable"
+                        } else {
+                            "agents.disable"
+                        },
+                        json!({}),
+                        "Couldn't change Agents. Try again.",
+                        cx,
+                    )
+                })
+            });
+        let apps = GroupedList::new().item(
+            SettingsRow::new("agent-apps", agents::copy::AGENT_APPS)
+                .description(
+                    self.agents
+                        .as_ref()
+                        .map(agents::summary_line)
+                        .unwrap_or_default(),
+                )
+                .child(
                     Button::new("connect-agent")
                         .label(agents::copy::CONNECT_COMMAND)
                         .variant(ButtonVariant::Outline)
-                        .disabled(true)
-                        .tooltip(view::NOT_IN_THIS_BUILD),
+                        .disabled(self.disabled() || self.agents.is_none())
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_connect_agent(window, cx)),
+                        ),
                 ),
-            );
+        );
+        let mut agents_list = GroupedList::new().label(agents::copy::YOUR_AGENTS);
         if let Some(status) = &self.agents {
-            agents_list =
-                agents_list.item(ListRow::new("agents-summary", agents::summary_line(status)));
             for (index, agent) in status.agents.iter().enumerate() {
                 let id = agent.id.clone();
                 let name = agent.name.clone();
@@ -346,16 +387,27 @@ impl SettingsScreen {
                 );
             }
         }
+        let off_words = if has_agents {
+            agents::copy::OFF_WITH_AGENTS
+        } else {
+            agents::copy::OFF_HINT
+        };
         let agents = PanelSection::new(agents::copy::AGENTS)
             .title(agents::copy::AGENTS)
             .description(agents::copy::HELP)
+            .action(agents_switch)
+            .last(true)
             .children(
                 self.agents
                     .as_ref()
                     .and_then(|s| s.bind_error_kind.as_deref())
                     .map(|kind| Alert::new("agents-error").title(agents::bind_error_copy(kind))),
             )
-            .child(agents_list);
+            .when(agents_on, |section| section.child(apps))
+            .when(!agents_on, |section| {
+                section.child(hint(off_words.to_string()))
+            })
+            .when(has_agents, |section| section.child(agents_list));
         let entity = cx.entity();
         let mut filter = videorc_kit::select::Select::new("activity-filter")
             .accessibility_label(agents::copy::ACTIVITY_FROM)
@@ -405,16 +457,40 @@ impl SettingsScreen {
                 agents::copy::LOADING_ACTIVITY,
             ));
         }
-        let activity = PanelSection::new("agent-activity")
-            .title(agents::copy::ACTIVITY)
-            .action(filter)
-            .child(activity_rows);
+        // Activity sits in the Agents section: its label and the "Activity
+        // from" select (`w-44`) over the list.
+        let agents = agents.when(has_agents || has_activity, |section| {
+            section.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.))
+                            .px(px(4.))
+                            .child(SectionLabel::new(agents::copy::ACTIVITY))
+                            .child(div().flex_none().w(px(176.)).child(filter)),
+                    )
+                    .child(activity_rows),
+            )
+        });
         div()
             .flex()
             .flex_wrap()
             .items_start()
             .child(div().flex_1().min_w(px(360.)).child(remote).child(phone))
-            .child(div().flex_1().min_w(px(360.)).child(agents).child(activity))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(360.))
+                    .border_l_1()
+                    .border_color(hsla(t.border))
+                    .child(agents),
+            )
             .into_any_element()
     }
 }

@@ -9,10 +9,11 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde_json::{Value, json};
 
-/// Local X account id used only by the scheduling smoke fixture. Declared in
-/// every build: release code names it in a branch that only debug builds can
-/// take (the loopback `smoke_api_base` is debug-only), and a debug-only const
-/// broke `cargo build --release`.
+/// Local X account id used only by the scheduling smokes' fixture. Declared in
+/// every build (a debug-only const once broke `cargo build --release`); every
+/// use is debug-only now (`x_smoke_fixture_api` in main.rs), so release
+/// builds allow it unused.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub const X_SMOKE_ACCOUNT_ID: &str = "scheduled-smoke-x";
 
 pub enum ProviderApi {

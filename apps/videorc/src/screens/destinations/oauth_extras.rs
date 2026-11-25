@@ -198,7 +198,7 @@ impl DestinationsPanel {
         let job = self
             .runtime
             .spawn(async move { studio.start_x_live_authorization().await });
-        cx.spawn(async move |cx| {
+        cx.spawn(async move |_, cx| {
             if let Ok(Some(url)) = job.await {
                 let _ = cx.update(|cx| cx.open_url(&url));
             }

@@ -41,6 +41,7 @@ use tokio::sync::watch;
 
 use super::{CommandFuture, SmokeCommandHandler};
 use crate::desktop::global_shortcuts::scene_for_action;
+use crate::editor::inspector::camera_shape_patch;
 use crate::scenes::model::SavedScene;
 use crate::scenes::section::scene_slot_accelerator;
 use crate::scenes::store::normalize_scene;
@@ -56,6 +57,7 @@ use videorc_protocol::{Device, DeviceKind, DeviceStatus};
 pub const STUDIO_SMOKE_COMMANDS: &[&str] = &[
     "enable-synthetic-source",
     "select-camera-device",
+    "select-camera-shape",
     "select-layout-preset",
     "select-screen-device",
     "preview-surface-scene-state",
@@ -518,6 +520,34 @@ impl StudioSmoke {
         Ok(json!({ "cameraId": device.id }))
     }
 
+    async fn select_camera_shape(&self, params: Map<String, Value>) -> Result<Value, String> {
+        let shape = text_param(&params, "shape").unwrap_or("circle").to_string();
+        let settle = Duration::from_millis(millis(&params, "settleMs", DEFAULT_SETTLE_MS));
+        let patch = camera_shape_patch(&shape);
+        if !self.studio.apply_camera_preset(patch, false).await {
+            return Err(format!("Could not apply camera shape {shape}."));
+        }
+        let shown = |snapshot: &StudioSnapshot| {
+            snapshot.settings.capture_doc["layout"]["cameraShape"].as_str() == Some(shape.as_str())
+        };
+        if !shown(&self.studio.snapshot()) {
+            wait_for(
+                self.studio.watch(),
+                SWITCH_WAIT,
+                &format!("camera shape {shape} to become active"),
+                shown,
+            )
+            .await?;
+        }
+        tokio::time::sleep(settle).await;
+        Ok(json!({
+            "shape": shape,
+            "pressed": true,
+            "editModeActivated": false,
+            "label": shape,
+        }))
+    }
+
     async fn select_layout_preset(&self, params: Map<String, Value>) -> Result<Value, String> {
         let preset = text_param(&params, "preset")
             .unwrap_or("screen-only")
@@ -821,6 +851,7 @@ impl SmokeCommandHandler for StudioSmoke {
                 "studio-performance-check" => self.performance_check(params),
                 "select-screen-device" => self.select_screen(params).await,
                 "select-camera-device" => self.select_camera(params).await,
+                "select-camera-shape" => self.select_camera_shape(params).await,
                 "select-layout-preset" => self.select_layout_preset(params).await,
                 "studio-scenes-state" => Ok(scenes_json(&self.studio.snapshot())),
                 "preview-surface-scene-state" => Ok(surface_scene_json(&self.studio.snapshot())),

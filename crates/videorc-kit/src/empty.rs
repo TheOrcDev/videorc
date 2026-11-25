@@ -6,10 +6,7 @@
 use gpui::{AnyElement, App, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px};
 use smallvec::SmallVec;
 
-use crate::{
-    theme::{Appearance, hsla, resolve},
-    tokens::text,
-};
+use crate::theme::{Appearance, hsla, resolve};
 
 #[derive(IntoElement)]
 pub struct Empty {
@@ -80,10 +77,11 @@ impl RenderOnce for Empty {
                 )
             })
             .when_some(self.description, |header, description| {
+                // Electron Empty: `text-sm` 14/20 (not META 12/16).
                 header.child(
                     div()
-                        .text_size(px(text::META.size))
-                        .line_height(px(text::META.line_height))
+                        .text_size(px(14.0))
+                        .line_height(px(20.0))
                         .text_color(hsla(t.muted_foreground))
                         .child(description),
                 )

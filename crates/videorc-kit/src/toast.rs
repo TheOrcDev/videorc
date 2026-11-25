@@ -7,7 +7,11 @@
 //! - One id per kind of toast: a newer one replaces the older.
 //! - At most three show, each dismissible, above the status bar.
 //! - A one-line toast stays 4 s; one with a description at least 8 s; one
-//!   with an action until it is acted on or closed.
+//!   with an action or cancel until it is acted on or closed.
+//!
+//! Layout matches sonner 2.0.7 (L7 design-parity K1–K9): 16 px pad, centred
+//! icon row, description near-title strength, close as a 20 px circle on the
+//! top-left corner, inverted action chip, optional cancel before the action.
 //!
 //! A window hosts one `Toaster` entity as its top layer and calls `show`.
 
@@ -24,10 +28,9 @@ use gpui::{
 use gpui_base::{ToastManager, ToastMotion, ToastOptions, ToastStack, ToastStackState};
 
 use crate::{
-    button::{Button, ButtonSize, ButtonVariant},
     icon::{IconName, icon},
     popover::popup_surface,
-    theme::{Appearance, FONT, current, hsla},
+    theme::{Appearance, FONT, current, hsla, is_dark, with_alpha},
     tokens::{Color, Theme, size},
 };
 
@@ -47,16 +50,18 @@ pub enum ToastKind {
     Error,
 }
 
-/// A click handler: a toast's action, or its close button.
+/// A click handler: a toast's action, cancel, or its close button.
 pub type ActionHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
-/// One toast's words and its optional action.
+/// One toast's words and its optional action / cancel.
 #[derive(Clone)]
 pub struct ToastData {
     pub kind: ToastKind,
     pub title: SharedString,
     pub description: Option<SharedString>,
     pub action: Option<(SharedString, ActionHandler)>,
+    /// Drawn before the action (Electron sonner cancel / Copy beside Retry).
+    pub cancel: Option<(SharedString, ActionHandler)>,
     /// None uses the defaults; Some(None) waits until explicitly dismissed.
     pub timeout: Option<Option<Duration>>,
     /// Only a manual close; expiry and programmatic dismissal do not read news.
@@ -73,6 +78,7 @@ impl ToastData {
             title: title.into(),
             description: None,
             action: None,
+            cancel: None,
             timeout: None,
             on_close: None,
             on_auto_close: None,
@@ -93,13 +99,23 @@ impl ToastData {
         self
     }
 
-    /// `defaultToastDuration`: an action waits for the streamer, a
+    /// Cancel / secondary chip drawn before the action (Copy beside Retry).
+    pub fn cancel(
+        mut self,
+        label: impl Into<SharedString>,
+        handler: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.cancel = Some((label.into(), Rc::new(handler)));
+        self
+    }
+
+    /// `defaultToastDuration`: an action or cancel waits for the streamer; a
     /// description gets time to be read.
     fn timeout(&self) -> Option<Duration> {
         if let Some(timeout) = self.timeout {
             return timeout;
         }
-        if self.action.is_some() {
+        if self.action.is_some() || self.cancel.is_some() {
             None
         } else if self.description.is_some() {
             Some(Duration::from_secs(8))
@@ -113,6 +129,24 @@ impl ToastData {
 const TICK: Duration = Duration::from_millis(50);
 /// Each window shows at most three.
 const VISIBLE: usize = 3;
+
+/// Sonner's `[data-button]` radius for the action and cancel chips: 4 px,
+/// below the stylesheet's radius tiers, so it lives here rather than in the
+/// generated tokens.
+const ACTION_RADIUS: f32 = 4.0;
+
+/// Sonner description ink: near-title strength (not muted-foreground).
+/// Light `#3f3f3f`, dark hsl(0 0% 91%). Allowlisted in design guards.
+const DESC_LIGHT: Color = 0x3f3f3fff;
+const DESC_DARK: Color = 0xe8e8e8ff;
+
+/// Close-button rim / glyph (sonner light gray scale).
+const CLOSE_BORDER_LIGHT: Color = 0xedededff;
+const CLOSE_GLYPH_LIGHT: Color = 0x171717ff;
+const CLOSE_HOVER_BG_LIGHT: Color = 0xf8f8f8ff;
+const CLOSE_HOVER_BORDER_LIGHT: Color = 0xe8e8e8ff;
+const CLOSE_HOVER_BG_DARK: Color = 0x1f1f1fff;
+const CLOSE_HOVER_BORDER_DARK: Color = 0x404040ff;
 
 pub struct Toaster {
     toasts: ToastManager<SharedString, ToastData>,
@@ -228,14 +262,121 @@ fn kind_icon(kind: ToastKind, t: &Theme) -> Option<(IconName, Color)> {
     }
 }
 
-/// One toast card: the float glass, the tinted icon, the words, the action
-/// and the close button. Public so the gallery can show each kind still.
+fn description_color(t: &Theme) -> Color {
+    if is_dark(t) { DESC_DARK } else { DESC_LIGHT }
+}
+
+/// Sonner `[data-button]`: inverted chip (popover-foreground on glass-float).
+fn toast_action_chip(
+    id: SharedString,
+    label: SharedString,
+    handler: ActionHandler,
+    t: &Theme,
+) -> AnyElement {
+    div()
+        .id(id)
+        .flex_none()
+        .h(px(24.0))
+        .px(px(8.0))
+        .rounded(px(ACTION_RADIUS))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(hsla(t.popover_foreground))
+        .text_color(hsla(t.glass_float))
+        .text_size(px(12.0))
+        .font_weight(FontWeight::MEDIUM)
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .on_click(move |_, window, cx| handler(window, cx))
+        .child(label)
+        .into_any_element()
+}
+
+/// Sonner `[data-cancel]`: same height, quiet fill.
+fn toast_cancel_chip(
+    id: SharedString,
+    label: SharedString,
+    handler: ActionHandler,
+    t: &Theme,
+) -> AnyElement {
+    let fill = if is_dark(t) {
+        with_alpha(0xffffffff, 0.3)
+    } else {
+        with_alpha(0x000000ff, 0.08)
+    };
+    div()
+        .id(id)
+        .flex_none()
+        .h(px(24.0))
+        .px(px(8.0))
+        .rounded(px(ACTION_RADIUS))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(hsla(fill))
+        .text_color(hsla(t.popover_foreground))
+        .text_size(px(12.0))
+        .font_weight(FontWeight::MEDIUM)
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .on_click(move |_, window, cx| handler(window, cx))
+        .child(label)
+        .into_any_element()
+}
+
+/// Sonner close: 20×20 circle on the card's top-left corner.
+fn toast_close(id: SharedString, on_close: ActionHandler, t: &Theme) -> AnyElement {
+    let dark = is_dark(t);
+    let border = if dark {
+        t.glass_float_rim
+    } else {
+        CLOSE_BORDER_LIGHT
+    };
+    let glyph = if dark {
+        t.popover_foreground
+    } else {
+        CLOSE_GLYPH_LIGHT
+    };
+    let hover_bg = if dark {
+        CLOSE_HOVER_BG_DARK
+    } else {
+        CLOSE_HOVER_BG_LIGHT
+    };
+    let hover_border = if dark {
+        CLOSE_HOVER_BORDER_DARK
+    } else {
+        CLOSE_HOVER_BORDER_LIGHT
+    };
+    div()
+        .id(id)
+        .absolute()
+        .top(px(-7.0))
+        .left(px(-7.0))
+        .size(px(20.0))
+        .rounded_full()
+        .border_1()
+        .border_color(hsla(border))
+        .bg(hsla(t.glass_float))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|style| style.bg(hsla(hover_bg)).border_color(hsla(hover_border)))
+        .aria_label("Dismiss notification")
+        .on_click(move |_, window, cx| on_close(window, cx))
+        .child(icon(IconName::X, 14.0, hsla(glyph)))
+        .into_any_element()
+}
+
+/// One toast card: the float glass, the tinted icon, the words, cancel,
+/// action and the close button. Public so the gallery can show each kind still.
 pub fn toast_card(
     t: &'static Theme,
     id: SharedString,
     toast: &ToastData,
     on_close: Option<ActionHandler>,
-    appearance: Option<Appearance>,
+    _appearance: Option<Appearance>,
 ) -> AnyElement {
     let tone = kind_icon(toast.kind, t);
     let words = div()
@@ -247,54 +388,64 @@ pub fn toast_card(
         .child(
             div()
                 .text_size(px(13.0))
-                .line_height(px(18.0))
+                .line_height(px(19.5))
                 .font_weight(FontWeight::MEDIUM)
                 .child(toast.title.clone()),
         )
         .children(toast.description.clone().map(|description| {
             div()
                 .text_size(px(13.0))
-                .line_height(px(18.0))
-                .text_color(hsla(t.muted_foreground))
+                .line_height(px(18.2))
+                .text_color(hsla(description_color(t)))
                 .child(description)
         }));
+
+    let cancel = toast.cancel.clone().map(|(label, handler)| {
+        toast_cancel_chip(
+            SharedString::from(format!("{id}-cancel")),
+            label,
+            handler,
+            t,
+        )
+    });
     let action = toast.action.clone().map(|(label, handler)| {
-        let mut button = Button::new(SharedString::from(format!("{id}-action")))
-            .label(label)
-            .variant(ButtonVariant::Secondary)
-            .size(ButtonSize::Xs)
-            .on_click(move |_, window, cx| handler(window, cx));
-        if let Some(appearance) = appearance {
-            button = button.appearance(appearance);
-        }
-        button
+        toast_action_chip(
+            SharedString::from(format!("{id}-action")),
+            label,
+            handler,
+            t,
+        )
     });
-    let close = on_close.map(|on_close| {
-        let mut button = Button::new(SharedString::from(format!("{id}-close")))
-            .variant(ButtonVariant::Ghost)
-            .size(ButtonSize::IconXs)
-            .accessibility_label("Dismiss notification")
-            .on_click(move |_, window, cx| on_close(window, cx))
-            .child(icon(IconName::X, 14.0, hsla(t.muted_foreground)));
-        if let Some(appearance) = appearance {
-            button = button.appearance(appearance);
-        }
-        button
-    });
+    let close = on_close
+        .map(|on_close| toast_close(SharedString::from(format!("{id}-close")), on_close, t));
+
     popup_surface(t)
+        .relative()
         .w_full()
         .flex()
-        .items_start()
-        .gap(px(8.0))
-        .px(px(16.0))
-        .py(px(14.0))
+        .items_center()
+        .gap(px(6.0))
+        .p(px(16.0))
         .font_family(FONT)
         .children(tone.map(|(name, tone)| {
-            // The one place a toast's type paints: its icon.
-            div().pt(px(1.0)).child(icon(name, 16.0, hsla(tone)))
+            // Sonner icon margins: -3 start, +4 end (gap already 6).
+            div()
+                .flex_none()
+                .ml(px(-3.0))
+                .mr(px(4.0))
+                .child(icon(name, 16.0, hsla(tone)))
         }))
         .child(words)
-        .children(action)
+        .child(
+            div()
+                .flex_none()
+                .ml_auto()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .children(cancel)
+                .children(action),
+        )
         .children(close)
         .into_any_element()
 }
@@ -317,6 +468,7 @@ impl Render for Toaster {
                     let _ = this.update(cx, |toaster, cx| toaster.dismiss(&close_id, window, cx));
                 });
                 let mut data = toast.clone();
+                // Action and cancel both dismiss, then run the handler.
                 if let Some((label, action)) = data.action.take() {
                     let entity = cx.entity().downgrade();
                     let action_id = id.clone();
@@ -326,6 +478,18 @@ impl Render for Toaster {
                             let _ = entity
                                 .update(cx, |toaster, cx| toaster.dismiss(&action_id, window, cx));
                             action(window, cx);
+                        }),
+                    ));
+                }
+                if let Some((label, cancel)) = data.cancel.take() {
+                    let entity = cx.entity().downgrade();
+                    let cancel_id = id.clone();
+                    data.cancel = Some((
+                        label,
+                        Rc::new(move |window, cx| {
+                            let _ = entity
+                                .update(cx, |toaster, cx| toaster.dismiss(&cancel_id, window, cx));
+                            cancel(window, cx);
                         }),
                     ));
                 }
@@ -350,6 +514,6 @@ impl Render for Toaster {
             .w(px(356.0))
             .absolute()
             .right(px(16.0))
-            .bottom(px(size::STATUS_BAR + 16.0))
+            .bottom(px(size::STATUS_BAR + 12.0))
     }
 }

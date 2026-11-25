@@ -2,15 +2,12 @@
 //! pagination and finalization; this entity owns only the window's choices.
 mod actions;
 mod cloud;
+mod cloud_markers;
 pub mod files;
 mod render;
 
 use gpui::{Context, Entity, FocusHandle, Focusable, Window, prelude::*};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    future::Future,
-    sync::Arc,
-};
+use std::{collections::BTreeSet, future::Future, sync::Arc};
 use videorc_app_core::library::{
     Library,
     page::{self as p, LibraryUi, LibraryView, MenuId},
@@ -24,6 +21,8 @@ use videorc_kit::{command::InputEvent, dialog::DialogHandle, input::InputState};
 use videorc_protocol::{CleanCutJob, RecordingStatus, SessionListItem};
 
 pub type Core = Library<BackendClient, files::Files>;
+/// The Library's name as a user of the app-wide poster cache.
+const POSTER_USER: &str = "library";
 #[derive(Clone)]
 pub struct Navigate(pub videorc_app_core::nav::PageId);
 pub struct LibraryScreen {
@@ -47,7 +46,11 @@ pub struct LibraryScreen {
     cloud_signed_in: Option<bool>,
     cloud_busy: BTreeSet<String>,
     cloud_epoch: u64,
-    posters: BTreeMap<(String, Option<i64>), Option<Arc<gpui::Image>>>,
+    /// The app-wide poster cache (`app::posters`), shared with Clean cut.
+    posters: Entity<crate::app::posters::Posters>,
+    /// Cloud → a row's Show markers (P1363).
+    markers_dialog: DialogHandle,
+    markers: Option<cloud_markers::MarkersState>,
 }
 impl gpui::EventEmitter<Navigate> for LibraryScreen {}
 impl Focusable for LibraryScreen {
@@ -85,6 +88,8 @@ impl LibraryScreen {
                 cx,
             )
         });
+        let posters = crate::app::posters::install(core.clone(), runtime.clone(), cx);
+        cx.observe(&posters, |_, _, cx| cx.notify()).detach();
         let search = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(videorc_app_core::library::copy::SEARCH_PLACEHOLDER)
@@ -140,8 +145,11 @@ impl LibraryScreen {
                 }
                 if entity
                     .update(cx, |this, cx| {
-                        this.posters.retain(|(id, _), _| {
-                            this.core.data().sessions.iter().any(|row| &row.id == id)
+                        let data = this.core.data();
+                        this.posters.update(cx, |posters, _| {
+                            posters.keep(POSTER_USER, |id| {
+                                data.sessions.iter().any(|row| row.id == id)
+                            })
                         });
                         cx.notify();
                     })
@@ -173,7 +181,9 @@ impl LibraryScreen {
             cloud_signed_in: None,
             cloud_busy: BTreeSet::new(),
             cloud_epoch: 0,
-            posters: BTreeMap::new(),
+            posters,
+            markers_dialog: DialogHandle::new(false),
+            markers: None,
         }
     }
     fn view(&self) -> LibraryView {

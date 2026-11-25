@@ -78,7 +78,7 @@ export const LOCAL_STORAGE_ALLOWLIST: readonly LocalStorageAllowance[] = [
     file: 'src/lib/buddy-tabs.ts',
     keys: [{ key: 'videorc.orcleTab' }],
     mentions: 2,
-    why: "Convenience: the Buddy page's tab used last on this device."
+    why: "Convenience: the Sidekick page's tab used last on this device."
   },
   {
     file: 'src/lib/livestream-tabs.ts',
@@ -134,7 +134,7 @@ export const LOCAL_STORAGE_ALLOWLIST: readonly LocalStorageAllowance[] = [
       { key: 'videorc.', prefix: true },
       { key: 'videorc.uiSettings.journal.v1:', prefix: true }
     ],
-    mentions: 10,
+    mentions: 14,
     why: 'The store itself: the one-time migration source and the per-window journal of writes the engine has not confirmed.'
   },
   {

@@ -160,6 +160,7 @@ test('the GPUI driver speaks the ui-* commands, each request outliving its wait'
             }
     }),
     'ui-click': { clicked: true },
+    'ui-drag': { dragged: true },
     'ui-type': { typed: 3 },
     'ui-key': { pressed: 'Escape' },
     'capture-page': { file: '/tmp/videorc-ui-shot.png' },
@@ -174,6 +175,21 @@ test('the GPUI driver speaks the ui-* commands, each request outliving its wait'
   assert.deepEqual(fake.calls.at(-1).params, { label: 'Record', role: 'button', timeoutMs: 2000 })
   assert.ok(fake.calls.at(-1).options.timeoutMs > 2000, 'the request outlives the wait')
   assert.equal(fake.calls.at(-1).smoke, SMOKE)
+
+  await ui.clickAt(120, 80)
+  assert.deepEqual(fake.calls.at(-1).command, 'ui-click')
+  assert.deepEqual(fake.calls.at(-1).params, { x: 120, y: 80, timeoutMs: 8000 })
+  await ui.drag(10, 20, 30, 40, { steps: 4, modifiers: ['alt'] })
+  assert.deepEqual(fake.calls.at(-1).command, 'ui-drag')
+  assert.deepEqual(fake.calls.at(-1).params, {
+    fromX: 10,
+    fromY: 20,
+    toX: 30,
+    toY: 40,
+    steps: 4,
+    modifiers: ['alt'],
+    timeoutMs: 8000
+  })
 
   await ui.click(
     {

@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use videorc_protocol::AudioSettings;
 
 use crate::guests::session::ControllerFacts;
+use crate::guests::wire::{HostShape, Stage};
 
 /// The backend's event for what the room publishes and who is in it.
 pub const PRESENTATION_EVENT: &str = "cloud.room.presentation";
@@ -30,6 +31,10 @@ pub const SCREEN_SET: &str = "cloud.room.screen.set";
 pub const MONITOR_SET: &str = "cloud.room.monitor.set";
 /// The runner's return: opened for the Program monitor (a node show's).
 pub const RETURN_SET: &str = "cloud.return.set";
+pub const AVATAR_SET: &str = "cloud.room.avatar.set";
+pub const PRESENTATION_SET: &str = "cloud.room.presentation.set";
+/// The whole stage in one frame (`CloudStage` / Electron `setStage`).
+pub const STAGE_SET: &str = "cloud.stage.set";
 
 /// The room microphone's gain bounds (`room_microphone::Settings`).
 const GAIN_DB_MIN: f64 = -24.0;
@@ -173,11 +178,13 @@ pub fn routing_params(program: &crate::soundboard::room::ProgramAudio) -> Value 
     })
 }
 
-/// `cloud.room.screen.set`'s params: a screen or window by its native id
-/// (`screen:…`, `window:…`, the device list's own), or `None` for anything
-/// else; [`stop_screen_params`] takes the share down.
+/// `cloud.room.screen.set`'s params: a screen or window by its device-list
+/// native id (`screen|window:screencapturekit:…`). Capturer forms and other
+/// ids are `None` — `TalkShowRoomHost::share_screen` answers
+/// "This screen can't be shared into the room here."
+/// [`stop_screen_params`] takes the share down.
 pub fn screen_params(source_id: &str) -> Option<Value> {
-    let native = (source_id.starts_with("screen:") || source_id.starts_with("window:"))
+    let native = super::room_screen_source::is_native_screen_id(source_id)
         && source_id.len() <= 512
         && !source_id.contains(['\0', '\r', '\n']);
     native.then(|| json!({ "screen": { "sourceId": source_id } }))
@@ -185,6 +192,44 @@ pub fn screen_params(source_id: &str) -> Option<Value> {
 
 pub fn stop_screen_params() -> Value {
     json!({ "screen": null })
+}
+
+/// Whether the stage already names a screen (Electron's
+/// `room.stage.screen !== undefined`).
+pub fn stage_has_screen(stage: &Stage) -> bool {
+    stage.screen.as_ref().is_some_and(|id| !id.is_empty())
+}
+
+/// Host camera shape for `cloud.stage.set`, from Sources' `cameraShape`.
+pub fn host_shape_for_camera(camera_shape: Option<&str>) -> HostShape {
+    match camera_shape {
+        Some("circle") => HostShape::Circle,
+        _ => HostShape::Rounded,
+    }
+}
+
+/// `cloud.stage.set` params: the whole stage, with a host shape when the
+/// stage does not already name one (Electron's `setStage`).
+pub fn stage_set_params(stage: &Stage, host_shape: HostShape) -> Value {
+    let shape = stage.host_shape.unwrap_or(host_shape);
+    let mut params = json!({
+        "layout": stage.layout.as_str(),
+        "onStage": stage.on_stage,
+        "hostShape": match shape {
+            HostShape::Circle => "circle",
+            HostShape::Rounded => "rounded",
+        },
+    });
+    if let Some(spotlight) = stage.spotlight.as_ref().filter(|id| !id.is_empty()) {
+        params["spotlight"] = json!(spotlight);
+    }
+    if let Some(screen) = stage.screen.as_ref().filter(|id| !id.is_empty()) {
+        params["screen"] = json!(screen);
+    }
+    if !stage.screens.is_empty() {
+        params["screens"] = json!(stage.screens);
+    }
+    params
 }
 
 /// `cloud.room.monitor.set`'s params: the runner's return taken, and heard
@@ -197,6 +242,26 @@ pub fn monitor_params(enabled: bool, listening: bool) -> Value {
 /// return for the Program monitor.
 pub fn return_params(open: bool) -> Value {
     json!({ "open": open })
+}
+
+/// `cloud.room.avatar.set`'s params for a client that builds no avatar
+/// content: the backend builds it from the stream's own pet and bubble
+/// (`build: true`); `guests` is the host's opt-in to show it to guest pages.
+pub fn avatar_build_params(guests: bool) -> Value {
+    json!({ "content": null, "build": true, "guests": guests })
+}
+
+/// `cloud.room.presentation.set`'s params: the room's graphics and avatar
+/// switches (the Guests page's), each only when set.
+pub fn presentation_params(graphics: Option<bool>, avatar: Option<bool>) -> Option<Value> {
+    let mut params = serde_json::Map::new();
+    if let Some(graphics) = graphics {
+        params.insert("graphics".into(), Value::Bool(graphics));
+    }
+    if let Some(avatar) = avatar {
+        params.insert("avatar".into(), Value::Bool(avatar));
+    }
+    (!params.is_empty()).then_some(Value::Object(params))
 }
 
 /// Whether a `cloud.room.*` answer says the backend holds the seat.
@@ -328,6 +393,8 @@ mod tests {
             Some(json!({ "screen": { "sourceId": "screen:screencapturekit:1" } }))
         );
         assert_eq!(screen_params("camera:1"), None);
+        assert_eq!(screen_params("screen:5:0"), None);
+        assert_eq!(screen_params("screen:wgc:0"), None);
         assert_eq!(stop_screen_params(), json!({ "screen": null }));
         assert_eq!(
             monitor_params(false, true),
@@ -338,7 +405,38 @@ mod tests {
             json!({ "enabled": true, "listen": true })
         );
         assert!(held(&json!({ "held": true })));
+        assert_eq!(
+            avatar_build_params(true),
+            json!({ "content": null, "build": true, "guests": true })
+        );
+        assert_eq!(presentation_params(None, None), None);
+        assert_eq!(
+            presentation_params(Some(true), None),
+            Some(json!({ "graphics": true }))
+        );
+        assert_eq!(
+            presentation_params(Some(false), Some(true)),
+            Some(json!({ "graphics": false, "avatar": true }))
+        );
         assert!(!held(&json!({ "held": false })));
+        let stage = crate::guests::wire::Stage {
+            layout: crate::guests::wire::StageLayout::Solo,
+            on_stage: vec!["host:show-1".into()],
+            screen: Some("host:show-1".into()),
+            ..Default::default()
+        };
+        assert!(stage_has_screen(&stage));
+        assert_eq!(
+            stage_set_params(&stage, HostShape::Circle),
+            json!({
+                "layout": "solo",
+                "onStage": ["host:show-1"],
+                "hostShape": "circle",
+                "screen": "host:show-1",
+            })
+        );
+        assert_eq!(host_shape_for_camera(Some("circle")), HostShape::Circle);
+        assert_eq!(host_shape_for_camera(Some("rounded")), HostShape::Rounded);
     }
 
     #[test]

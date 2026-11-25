@@ -22,10 +22,16 @@ use videorc_app_core::chat::highlight_driver::{
     self as highlight, STATUS_EVENT as HIGHLIGHT_EVENT,
 };
 use videorc_app_core::chat::model::{CommentHighlightPhase, CommentHighlightState};
+/// Re-export for cohost_list's accelerator chip.
+pub(super) use videorc_app_core::stream_manager::buddy::REMOVE_FLAGGED_KEY;
 use videorc_app_core::stream_manager::buddy::{
     BuddyOverlaySnapshot, CohostSettingsView, CohostState, PaneGate, RowCommand, RowKey,
     apply_cohost_state, buddy_outputs, draft_for_question, enable_patch, grouped_delta_flash,
-    move_selection, pane_rows, row_command, say_text, with_buddy_on_stream, words as pane_words,
+    move_selection, pane_rows, resolve_selection, row_command, say_text, with_buddy_on_stream,
+    words as pane_words,
+};
+use videorc_app_core::stream_manager::removal::{
+    latest_by_message, remove_from_chat_available, remove_from_chat_blocked_reason,
 };
 use videorc_app_core::stream_manager::send::writable_providers;
 use videorc_app_core::studio::families;
@@ -46,6 +52,7 @@ actions!(
         ShowRowOnStream,
         MarkRowAnswered,
         DismissRow,
+        RemoveFlagged,
         OpenRow
     ]
 );
@@ -104,6 +111,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(ANSWERED_KEY, MarkRowAnswered, Some(LIST_CONTEXT)),
         KeyBinding::new(DISMISS_KEY, DismissRow, Some(LIST_CONTEXT)),
         KeyBinding::new("delete", DismissRow, Some(LIST_CONTEXT)),
+        KeyBinding::new("shift-backspace", RemoveFlagged, Some(LIST_CONTEXT)),
+        KeyBinding::new("shift-delete", RemoveFlagged, Some(LIST_CONTEXT)),
         KeyBinding::new(OPEN_KEY, OpenRow, Some(LIST_CONTEXT)),
     ]);
 }
@@ -117,6 +126,8 @@ pub enum SidekickEvent {
     ShowOnStream(String),
     /// Chat comes forward with this message in view.
     JumpTo(String),
+    /// Remove a flagged message from chat (P1268 / Shift+Backspace).
+    RemoveFromChat(String),
 }
 
 impl EventEmitter<SidekickEvent> for SidekickPane {}
@@ -468,6 +479,41 @@ impl SidekickPane {
         if let Some(command) = row_command(&rows, self.cohost.selected.as_deref(), key) {
             self.run_row(command, cx);
         }
+    }
+
+    /// P1268: Remove from chat on the selected flag (Shift+Backspace).
+    pub(super) fn remove_flagged(&mut self, cx: &mut Context<Self>) {
+        let rows = pane_rows(&self.state);
+        let Some(active) = resolve_selection(&rows, self.cohost.selected.as_deref()) else {
+            return;
+        };
+        let Some(row) = rows.iter().find(|row| row.key == active) else {
+            return;
+        };
+        if row.question {
+            return;
+        }
+        if !self.flag_removable(&row.id) {
+            return;
+        }
+        cx.emit(SidekickEvent::RemoveFromChat(row.id.clone()));
+    }
+
+    /// Whether the flagged message can still be removed (same rules as the
+    /// chat row's ⋯ menu).
+    pub(super) fn flag_removable(&self, message_id: &str) -> bool {
+        let chat = self.studio.live_chat_now();
+        if chat.session_id.is_none() {
+            return false;
+        }
+        let Some(message) = chat.messages.iter().find(|m| m.id == message_id) else {
+            return false;
+        };
+        let operations = self.studio.moderation_operations_now();
+        let latest = latest_by_message(&operations);
+        let operation = latest.get(message_id).copied();
+        remove_from_chat_available(message, operation, false)
+            && remove_from_chat_blocked_reason(message, &chat.providers).is_none()
     }
 
     pub(super) fn run_row(&mut self, command: RowCommand, cx: &mut Context<Self>) {

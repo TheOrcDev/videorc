@@ -15,6 +15,14 @@ const securitySourcePath = join(
   'smoke-command-security.ts'
 )
 const mainSourcePath = join(repoRoot, 'apps', 'desktop', 'src', 'main', 'index.ts')
+const gpuiStudioSourcePath = join(
+  repoRoot,
+  'crates',
+  'videorc-app-core',
+  'src',
+  'smoke',
+  'studio.rs'
+)
 
 test('the maintained preview-lifecycle probe uses its supported gate argument', () => {
   const packageDocument = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
@@ -121,7 +129,19 @@ test('the server allowlist covers literal commands used by smoke callers and nam
     )
   }
 
-  const unlisted = [...callers.keys()].filter((command) => !allowed.has(command)).sort()
+  // Smokes that also drive the GPUI app (plan 260) send its Studio handler's
+  // own commands from their `gpuiApp` branches. Those are served by
+  // videorc-app-core's STUDIO_SMOKE_COMMANDS, never by Electron's server.
+  const gpuiStudioBlock = readFileSync(gpuiStudioSourcePath, 'utf8').match(
+    /STUDIO_SMOKE_COMMANDS: &\[&str\] = &\[([\s\S]*?)\];/
+  )
+  assert.ok(gpuiStudioBlock, 'Could not locate STUDIO_SMOKE_COMMANDS.')
+  const gpuiStudio = new Set(
+    [...gpuiStudioBlock[1].replace(/\/\/.*$/gm, '').matchAll(/"([^"]+)"/g)].map((match) => match[1])
+  )
+  const unlisted = [...callers.keys()]
+    .filter((command) => !allowed.has(command) && !gpuiStudio.has(command))
+    .sort()
   assert.deepEqual(
     unlisted,
     [],

@@ -40,6 +40,7 @@ use gpui::{
 };
 use tokio::sync::watch;
 use videorc_app_core::StudioSnapshot;
+use videorc_app_core::cloud_scene::USE_SCENES;
 use videorc_app_core::nav::PageId;
 use videorc_app_core::scenes::list::{
     MoveKey, SceneGlyph, duplicated_scene, scene_with_audio, scene_with_follow,
@@ -94,6 +95,10 @@ pub fn columns(width: f32) -> usize {
     }
     (((width + CARD_GAP_PX) / (CARD_MIN_PX + CARD_GAP_PX)).floor() as usize).max(1)
 }
+
+/// A card's name: `text-sm font-medium` (`scene-card.tsx`
+/// `scene-card-label`).
+const NAME_TEXT_PX: f32 = 14.;
 
 /// Each card's width: the row shared out (`1fr`), never under the minimum.
 pub fn card_width(width: f32) -> f32 {
@@ -214,7 +219,8 @@ impl Render for SceneDrag {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .type_scale(text::LABEL)
+                    .text_size(px(NAME_TEXT_PX))
+                    .line_height(px(20.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(name_ink)
                     .child(card.name.clone()),
@@ -270,6 +276,9 @@ pub struct ScenesSection {
     studio: Arc<AppStudio>,
     runtime: tokio::runtime::Handle,
     talk_show: Entity<Mirror<TalkShowRoomView>>,
+    /// Room scene opt-in (`TalkShowRoomHost::scenes_enabled`); set after both
+    /// entities exist (`StudioPage::new` / `bind_room_host`).
+    room_host: Option<Entity<super::talk_show_host::TalkShowRoomHost>>,
     hotkeys: Hotkeys,
     permissions: Arc<Permissions>,
     view: ScenesSectionView,
@@ -351,6 +360,7 @@ impl ScenesSection {
             studio,
             runtime,
             talk_show,
+            room_host: None,
             hotkeys,
             permissions,
             view: ScenesSectionView::Loading,
@@ -371,6 +381,19 @@ impl ScenesSection {
         section.watch_privacy(cx);
         section.refresh(cx);
         section
+    }
+
+    /// Wire the talk-show host so the room-open Scenes line can toggle
+    /// `scenes_enabled` (C3 room-scene readiness).
+    pub fn bind_room_host(
+        &mut self,
+        host: Entity<super::talk_show_host::TalkShowRoomHost>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.observe(&host, |section, _, cx| section.refresh(cx))
+            .detach();
+        self.room_host = Some(host);
+        self.refresh(cx);
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -1191,7 +1214,8 @@ impl ScenesSection {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .type_scale(text::LABEL)
+                    .text_size(px(NAME_TEXT_PX))
+                    .line_height(px(20.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(name_ink)
                     .child(card.name.clone())
@@ -1260,7 +1284,7 @@ impl ScenesSection {
             && text_width(
                 window,
                 &card.name,
-                text::LABEL.size,
+                NAME_TEXT_PX,
                 FontWeight::MEDIUM,
                 name_ink,
             ) > name_room + 0.5;
@@ -1669,10 +1693,54 @@ impl Render for ScenesSection {
         }
         match self.view.clone() {
             // P272: while the room is open the Show stage's layouts are
-            // what goes on air.
-            ScenesSectionView::RoomOpen => PanelSection::new("studio-scenes")
-                .title(copy::TITLE)
-                .description(div().child(ScenesSectionView::room_open_line())),
+            // what goes on air. C3: Use scenes opt-in beside that line.
+            ScenesSectionView::RoomOpen => {
+                let scenes_on = self
+                    .room_host
+                    .as_ref()
+                    .is_some_and(|host| host.read(cx).scenes_enabled());
+                let host = self.room_host.clone();
+                let line = div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .w_full()
+                    .child(
+                        div()
+                            .type_scale(text::META)
+                            .text_color(hsla(t.muted_foreground))
+                            .child(ScenesSectionView::room_open_line()),
+                    )
+                    .when_some(host, |row, host| {
+                        row.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .type_scale(text::META)
+                                        .text_color(hsla(t.muted_foreground))
+                                        .child(USE_SCENES),
+                                )
+                                .child(
+                                    Switch::new("room-use-scenes")
+                                        .small(true)
+                                        .checked(scenes_on)
+                                        .accessibility_label(USE_SCENES)
+                                        .on_change(move |value, _, cx| {
+                                            host.update(cx, |host, cx| {
+                                                host.set_scenes_enabled(value, cx);
+                                            });
+                                        }),
+                                ),
+                        )
+                    });
+                PanelSection::new("studio-scenes")
+                    .title(copy::TITLE)
+                    .description(line)
+            }
             // P287: the section's room while the library is read.
             ScenesSectionView::Loading => PanelSection::new("studio-scenes")
                 .title(copy::TITLE)

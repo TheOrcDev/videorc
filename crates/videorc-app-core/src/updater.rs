@@ -27,8 +27,8 @@ pub use videorc_updater::chip::{
     ChipAction, ChipTone, UpdateChip, is_update_installable, update_chip,
 };
 pub use videorc_updater::status::{
-    UnsupportedReason, UpdateStatus, UpdaterEvent, settle_status_after_check,
-    update_status_from_event,
+    UnsupportedReason, UpdateReadyNotification, UpdateStatus, UpdaterEvent,
+    settle_status_after_check, update_ready_notification, update_status_from_event,
 };
 
 /// Settings → About's words around the row.

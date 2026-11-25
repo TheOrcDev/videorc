@@ -78,6 +78,7 @@ fn failed(logger: Logger) -> Preview {
         closed_from: WindowMode::Docked,
         studio: None,
         scrolled_away: false,
+        smoke_slots: [None, None],
     }
 }
 
@@ -190,6 +191,7 @@ pub(super) fn new(setup: PreviewSetup, window: &mut Window, cx: &mut App) -> Ent
             closed_from: WindowMode::Docked,
             studio: Some(words_studio),
             scrolled_away: false,
+            smoke_slots: [None, None],
         }
     })
 }
@@ -304,6 +306,9 @@ impl Preview {
         let visible = !self.closed && (self.mode == WindowMode::Floating || docked_visible);
         if let Some(native) = self.native.as_mut() {
             native.element.set_visible(visible);
+            // A closed Preview presents nothing and the backend renders no
+            // preview frames (Electron destroys its host on close).
+            native.element.park(self.closed);
         }
     }
 

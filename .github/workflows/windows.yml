@@ -12,6 +12,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     # PRs into spikes/gpui (plan 260 throwaway spikes) build nothing this
     # workflow checks, so they skip it.
     branches: [main]
@@ -29,20 +30,17 @@ jobs:
     needs: scope
     # Plan 242 S15: an app-only pull request (windows_js without
     # windows_heavy) runs the Windows JS gates and skips the Rust ones.
-    if: >-
-      ${{ needs.scope.result == 'success' &&
-      (needs.scope.outputs.windows_heavy == 'true' || needs.scope.outputs.windows_js == 'true') }}
+    if: ${{ needs.scope.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (needs.scope.outputs.windows_heavy == 'true' || needs.scope.outputs.windows_js == 'true') }}
     uses: ./.github/workflows/release-windows-gates.yml
     with:
       source_sha: ${{ github.sha }}
       rust: ${{ needs.scope.outputs.windows_heavy == 'true' }}
+      js: ${{ needs.scope.outputs.windows_js == 'true' && needs.scope.outputs.electron_tests == 'true' }}
 
   gates-skip:
     name: gates / Windows release source gates
     needs: scope
-    if: >-
-      ${{ needs.scope.result == 'success' &&
-      needs.scope.outputs.windows_heavy != 'true' && needs.scope.outputs.windows_js != 'true' }}
+    if: ${{ needs.scope.result == 'success' && (!(github.event_name != 'pull_request' || github.event.pull_request.draft == false) || (needs.scope.outputs.windows_heavy != 'true' && needs.scope.outputs.windows_js != 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -57,7 +55,7 @@ jobs:
     needs: scope
     # Plan 242 D7: code changes and app changes to main, preload or a window
     # entry page run it; other renderer-only changes skip it.
-    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.windows_installer == 'true' }}
+    if: ${{ needs.scope.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.scope.outputs.electron_tests == 'true' && needs.scope.outputs.windows_installer == 'true' }}
     runs-on: windows-latest
     # Recent green-step runs: 19-27 min (+~5 min for the separate recovery
     # test package). 45 keeps margin without an hour-long hang.
@@ -238,7 +236,7 @@ jobs:
   installer-skip:
     name: Windows installer artifact
     needs: scope
-    if: ${{ needs.scope.result == 'success' && needs.scope.outputs.windows_installer != 'true' }}
+    if: ${{ needs.scope.result == 'success' && (!(github.event_name != 'pull_request' || github.event.pull_request.draft == false) || !(needs.scope.outputs.electron_tests == 'true') || !(needs.scope.outputs.windows_installer == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -253,9 +251,7 @@ jobs:
     # Plan 242 S5: diagnostics only (plan 067), and no release reads it. It
     # runs on pushes to main and manual dispatch, and on a pull request only
     # when the pull request changes this job's own tooling.
-    if: >-
-      ${{ needs.scope.result == 'success' && needs.scope.outputs.windows_heavy == 'true' &&
-      (github.event_name != 'pull_request' || needs.scope.outputs.windows_incident_tooling == 'true') }}
+    if: ${{ needs.scope.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (needs.scope.outputs.windows_heavy == 'true' && (github.event_name != 'pull_request' || needs.scope.outputs.windows_incident_tooling == 'true')) }}
     runs-on: windows-latest
     # Recent runs: 44-56 min. Capped near an hour; diagnostics only.
     timeout-minutes: 65
@@ -360,9 +356,7 @@ jobs:
   incident-skip:
     name: Windows startup incident diagnostics
     needs: scope
-    if: >-
-      ${{ needs.scope.result == 'success' && !(needs.scope.outputs.windows_heavy == 'true' &&
-      (github.event_name != 'pull_request' || needs.scope.outputs.windows_incident_tooling == 'true')) }}
+    if: ${{ needs.scope.result == 'success' && (!(github.event_name != 'pull_request' || github.event.pull_request.draft == false) || !(needs.scope.outputs.windows_heavy == 'true' && (github.event_name != 'pull_request' || needs.scope.outputs.windows_incident_tooling == 'true'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

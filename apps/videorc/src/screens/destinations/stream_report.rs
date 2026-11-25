@@ -1,8 +1,8 @@
 //! Destinations → After the stream (`StreamReportEmailSection`, P791–P796).
 //!
-//! Words and view rules come from `livestream::stream_report`. Studio drives
-//! them through `stream_report_store`; L2 still owes the real RPC answers.
-//! Sign-in stays log-only until accounts land.
+//! Words and view rules come from `livestream::stream_report`. The Studio's
+//! `stream_report_store` drives them over `streamReport.*`: the first read's
+//! own retries, a failed save's toast and re-read, and `account.changed`.
 
 use gpui::{AnyElement, Context, Window, prelude::*};
 use videorc_app_core::livestream::copy as page_copy;

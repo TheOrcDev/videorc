@@ -35,12 +35,15 @@ pub const WINDOW_COMMANDS: &[&str] = &[
     "comments-window-set-smoke-marker",
     "comments-window-state",
     "comments-window-toggle",
+    "main-window-set-bounds",
     "notes-window-close",
     "notes-window-open",
     "notes-window-save-document",
     "notes-window-set-bounds",
     "notes-window-state",
     "raise-window",
+    "session-player-geometry",
+    "session-player-open",
 ];
 
 const NOTES_CLOSED: &str = "Notes window is not open.";
@@ -183,7 +186,64 @@ fn run(command: &str, params: &Map<String, Value>, cx: &mut App) -> Result<Value
             view.update(cx, |sm, _, cx| sm.smoke_command_trace(cx))
                 .map_err(|_| CHAT_CLOSED.to_string())
         }
+        "main-window-set-bounds" => {
+            // Electron's: the main window's frame (top-left screen points),
+            // each side not given kept, brought forward without focus.
+            let handle = super::shell(cx)?
+                .window(videorc_app_core::smoke::security::UiWindow::Main, cx)
+                .ok_or(super::MAIN_WINDOW_NOT_READY)?;
+            place(handle, params, cx)?;
+            let bounds = handle
+                .update(cx, |_, window, _| bounds_json(frame_of(window)))
+                .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())?;
+            Ok(json!({ "bounds": bounds }))
+        }
         "raise-window" => raise(params, cx),
+        "session-player-open" => {
+            let id = params
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .ok_or("session-player-open takes a sessionId.")?
+                .to_string();
+            let player = cx
+                .try_global::<crate::screens::session_player::SmokePlayers>()
+                .and_then(|players| {
+                    players
+                        .0
+                        .iter()
+                        .filter_map(|player| player.upgrade())
+                        .find(|player| player.read(cx).smoke_is_dialog())
+                })
+                .ok_or("session-player-open: the Library's player isn't there yet.")?;
+            let main = super::shell(cx)?
+                .window(videorc_app_core::smoke::security::UiWindow::Main, cx)
+                .ok_or(super::MAIN_WINDOW_NOT_READY)?;
+            let opened = main
+                .update(cx, |_, window, cx| {
+                    player.update(cx, |player, cx| player.smoke_open(&id, window, cx))
+                })
+                .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())?;
+            Ok(json!({ "opened": opened, "sessionId": id }))
+        }
+        "session-player-geometry" => {
+            // Every live session player (the Library's, and any a page hosts),
+            // newest last.
+            let players: Vec<_> = cx
+                .try_global::<crate::screens::session_player::SmokePlayers>()
+                .map(|players| {
+                    players
+                        .0
+                        .iter()
+                        .filter_map(|player| player.upgrade())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let geometry: Vec<Value> = players
+                .iter()
+                .map(|player| player.read(cx).smoke_geometry())
+                .collect();
+            Ok(json!({ "players": geometry }))
+        }
         other => Err(format!("{other} is not a Notes or Stream Manager command.")),
     }
 }

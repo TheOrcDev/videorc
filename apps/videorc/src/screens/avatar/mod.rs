@@ -20,7 +20,7 @@ mod onboarding;
 mod onboarding_view;
 mod persona;
 pub(crate) mod pictures;
-mod preview;
+pub(crate) mod preview;
 mod reactions;
 mod status;
 mod test_dialog;
@@ -28,7 +28,7 @@ mod test_dialog;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{Context, EventEmitter, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, EventEmitter, Window, canvas, div, prelude::*, px};
 use serde_json::{Value, json};
 use videorc_app_core::buddy::chat::display_name;
 use videorc_app_core::buddy::copy as words;
@@ -43,8 +43,8 @@ use videorc_kit::dialog::DialogHandle;
 use videorc_kit::input::InputState;
 use videorc_kit::page_tabs::PageTabs;
 use videorc_kit::textarea::TextareaState;
-use videorc_kit::theme::FONT;
-use videorc_kit::tokens::size;
+use videorc_kit::theme::{self, FONT, hsla};
+use videorc_kit::tokens::Theme;
 use videorc_protocol::cohost::CohostPersona;
 
 use status::Placement;
@@ -68,6 +68,8 @@ const LIBRARY_CHANGED_EVENT: &str = "cohost.library.changed";
 /// Premium changed: the create gates read again.
 const ENTITLEMENTS_UPDATED: &str = "entitlements.updated";
 const SETTINGS_CHANGED_EVENT: &str = "cohost.settings.changed";
+/// `ConfigGrid`: two columns from 940 px of page (`@min-[940px]/page`).
+const CONFIG_GRID_TWO_COLUMNS: f32 = 940.;
 
 /// A refused library call, as one sentence (`problemOf`,
 /// `use-buddy-library.ts`).
@@ -178,6 +180,9 @@ pub struct AvatarScreen {
     user_data_dir: PathBuf,
     tab: Tab,
     active: bool,
+    /// The page's width as last laid out: the gallery's tracks and the
+    /// config grid's columns follow the page, never the window.
+    page_width: f32,
     persona: Option<CohostPersona>,
     /// "About you": the avatar's notes (`cohost.settings` `notes`).
     notes: Option<String>,
@@ -257,6 +262,7 @@ impl AvatarScreen {
             user_data_dir,
             tab,
             active: false,
+            page_width: 0.,
             persona: None,
             notes: None,
             persona_fields: None,
@@ -319,7 +325,19 @@ impl AvatarScreen {
             .update(cx, |preview, cx| preview.set_active(active, cx));
         self.sync_creator_preview(cx);
         if active {
+            // Opening the page reads the persona and the greetings again,
+            // as Electron's page reads the live settings: a first read sent
+            // before the backend was ready leaves nothing behind.
+            self.refresh(cx);
             self.sync(cx);
+        }
+    }
+
+    /// The page's laid-out width, from its measuring canvas.
+    fn measured(&mut self, width: f32, cx: &mut Context<Self>) {
+        if (self.page_width - width).abs() >= 0.5 {
+            self.page_width = width;
+            cx.notify();
         }
     }
 
@@ -385,19 +403,36 @@ impl AvatarScreen {
     fn refresh(&self, cx: &mut Context<Self>) {
         self.refresh_packs(cx);
         self.refresh_look(cx);
-        let studio = self.studio.clone();
-        let read = self.runtime.spawn(async move {
-            let backend = studio.backend().clone();
-            let settings = backend
+        // The settings land on their own: a slow read below (the web's
+        // capabilities, the account) never holds back the persona, About
+        // you and the greetings.
+        let settings_backend = self.studio.backend().clone();
+        let settings = self.runtime.spawn(async move {
+            settings_backend
                 .request("cohost.settings.get", json!({}))
                 .await
                 .ok()
-                .and_then(|value| CohostSettingsView::from_json(&value));
-            let notes = settings.as_ref().map(|settings| settings.notes.clone());
-            let auto_chat = settings
-                .as_ref()
-                .and_then(|settings| settings.auto_chat.clone());
-            let persona = settings.and_then(|settings| settings.persona);
+                .and_then(|value| CohostSettingsView::from_json(&value))
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Some(settings)) = settings.await else {
+                return;
+            };
+            let _ = this.update(cx, |screen, cx| {
+                if settings.persona.is_some() {
+                    screen.persona = settings.persona;
+                }
+                screen.notes = Some(settings.notes);
+                if settings.auto_chat.is_some() {
+                    screen.auto_chat = settings.auto_chat;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        let studio = self.studio.clone();
+        let read = self.runtime.spawn(async move {
+            let backend = studio.backend().clone();
             let library = backend
                 .request("cohost.library.get", json!({}))
                 .await
@@ -411,41 +446,13 @@ impl AvatarScreen {
             let capabilities = backend.request("ai.capabilities.get", json!({})).await.ok();
             let account = backend.request("account.get", json!({})).await.ok();
             let entitlements = backend.request("entitlements.get", Value::Null).await.ok();
-            (
-                persona,
-                notes,
-                auto_chat,
-                library,
-                placement,
-                capabilities,
-                account,
-                entitlements,
-            )
+            (library, placement, capabilities, account, entitlements)
         });
         cx.spawn(async move |this, cx| {
-            let Ok((
-                persona,
-                notes,
-                auto_chat,
-                library,
-                placement,
-                capabilities,
-                account,
-                entitlements,
-            )) = read.await
-            else {
+            let Ok((library, placement, capabilities, account, entitlements)) = read.await else {
                 return;
             };
             let _ = this.update(cx, |screen, cx| {
-                if persona.is_some() {
-                    screen.persona = persona;
-                }
-                if notes.is_some() {
-                    screen.notes = notes;
-                }
-                if auto_chat.is_some() {
-                    screen.auto_chat = auto_chat;
-                }
                 if let Some(library) = library {
                     screen.library_changed(library, cx);
                 }
@@ -786,6 +793,36 @@ impl AvatarScreen {
     }
 }
 
+/// `ConfigGrid` for two sections: one column with the first's hairline
+/// between them, or two from 940 px of page with a hairline between the
+/// columns; the grid's own hairline closes it either way.
+fn config_grid(
+    first: Option<AnyElement>,
+    second: Option<AnyElement>,
+    two_columns: bool,
+    t: &Theme,
+) -> Option<AnyElement> {
+    if first.is_none() && second.is_none() {
+        return None;
+    }
+    let grid = div().flex().border_b_1().border_color(hsla(t.border));
+    let grid = if two_columns {
+        grid.flex_row()
+            .children(first.map(|section| {
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .border_r_1()
+                    .border_color(hsla(t.border))
+                    .child(section)
+            }))
+            .children(second.map(|section| div().flex_1().min_w(px(0.)).child(section)))
+    } else {
+        grid.flex_col().children(first).children(second)
+    };
+    Some(grid.into_any_element())
+}
+
 fn sync_handle(
     handle: &DialogHandle,
     want_open: &mut bool,
@@ -823,43 +860,50 @@ impl Render for AvatarScreen {
         self.sync_test(window, cx);
         self.ensure_bubble(false, cx);
         self.sync_previews(cx);
-        let body =
-            match self.tab {
-                Tab::Profile if self.creator_open() => creator::render_creator(self, window, cx),
-                Tab::Profile => div()
+        let t = theme::resolve(None, window, cx);
+        let body = match self.tab {
+            Tab::Profile if self.creator_open() => creator::render_creator(self, window, cx),
+            // `PageStack`: the status row, then flush sections split by
+            // hairlines, each with its own gutter; Reactions and Motion
+            // share a `ConfigGrid` row.
+            Tab::Profile => {
+                let two_columns = self.page_width >= CONFIG_GRID_TWO_COLUMNS;
+                let reactions_section = reactions::render_reactions(self, two_columns, window, cx);
+                let motion_section = reactions::render_motion(self, window, cx);
+                let page = cx.entity().downgrade();
+                let measure = canvas(
+                    move |bounds, _, cx| {
+                        let width = f32::from(bounds.size.width);
+                        page.update(cx, |screen, cx| screen.measured(width, cx))
+                            .ok();
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full();
+                div()
+                    .relative()
                     .flex()
                     .flex_col()
+                    .child(measure)
                     .child(status::render_status(self, window, cx))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(size::GUTTER))
-                            .p(px(size::GUTTER))
-                            .child(library::render_library(self, window, cx))
-                            .children(persona::render_persona(self, window, cx))
-                            .children(look::render_look(self, window, cx))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap(px(size::GUTTER))
-                                    .children(reactions::render_reactions(self, window, cx).map(
-                                        |section| div().flex_1().min_w(px(420.)).child(section),
-                                    ))
-                                    .children(reactions::render_motion(self, window, cx).map(
-                                        |section| div().flex_1().min_w(px(420.)).child(section),
-                                    )),
-                            ),
-                    )
-                    .into_any_element(),
-                Tab::Greetings => div()
-                    .flex()
-                    .flex_col()
-                    .p(px(size::GUTTER))
-                    .children(greetings::render_greetings(self, window, cx))
-                    .into_any_element(),
-            };
+                    .child(library::render_library(self, window, cx))
+                    .children(persona::render_persona(self, window, cx))
+                    .children(look::render_look(self, window, cx))
+                    .children(config_grid(
+                        reactions_section,
+                        motion_section,
+                        two_columns,
+                        t,
+                    ))
+                    .into_any_element()
+            }
+            Tab::Greetings => div()
+                .flex()
+                .flex_col()
+                .children(greetings::render_greetings(self, window, cx))
+                .into_any_element(),
+        };
 
         let entity = cx.entity();
         let mut tabs = PageTabs::new("avatar-page", words::AVATAR_TABS_LABEL);

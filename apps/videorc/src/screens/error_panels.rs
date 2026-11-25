@@ -8,7 +8,7 @@ use gpui::{ClipboardItem, Context, IntoElement, Window, div, prelude::*, px};
 use videorc_kit::{
     button::{Button, ButtonVariant},
     empty::Empty,
-    theme::{self, FONT, hsla},
+    theme::{self, FONT, TypeScale, hsla},
     tokens::{radius, text},
     window_frame::WindowHeader,
 };

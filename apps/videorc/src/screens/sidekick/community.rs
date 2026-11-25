@@ -2,22 +2,28 @@
 //! Forget — `cohost.community.*` plus `videorc_app_core::buddy::community`.
 //! Words and behaviour from Electron's `components/community/*.tsx`.
 
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::Utc;
-use gpui::{AnyElement, ClipboardItem, Context, Entity, Hsla, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, ClipboardItem, Context, Entity, FontWeight, Hsla, SharedString, Window, div,
+    prelude::*, px,
+};
 use gpui_base::input::InputEvent;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use videorc_app_core::buddy::community::{
     self, BUDDY_REMEMBERS_LOCK_REASON, COMMUNITY_DISCLOSURE_LINE, CommunitySummary,
     REMEMBER_OFFER_DESCRIPTION, REMEMBER_OFFER_TITLE, X_SELF_LINK_REASON, YOUTUBE_RETENTION_LINE,
-    account_label, forget_copy, forget_memory_label, has_x, linked_line, memory_forget_copy,
-    note_to_save, nothing_remembered_line, people_empty_copy, person_load_failed_line,
-    person_row_context, person_stats_line, regular_after_label, remember_offer_shows,
-    retention_line, support_line,
+    account_label, avatar_retry_delay, avatar_url, avatar_urls_to_load, forget_copy,
+    forget_memory_label, has_x, linked_line, memory_forget_copy, note_to_save,
+    nothing_remembered_line, people_empty_copy, person_load_failed_line, person_row_context,
+    person_stats_line, regular_after_label, remember_offer_shows, retention_line, support_line,
 };
-use videorc_app_core::buddy::copy as words;
+use videorc_app_core::chat::highlight_driver as driver;
+use videorc_app_core::chat::images;
+use videorc_app_core::chat::overlay::monogram_initials;
 use videorc_app_core::client::RpcError;
 use videorc_app_core::resources::capability::{IssueOptions, ResourceKind};
 use videorc_app_core::resources::issue_capability;
@@ -26,14 +32,17 @@ use videorc_app_core::user_error::{
     Failure, UserError, UserErrorContext, UserErrorKind, user_error_message,
 };
 use videorc_kit::alert::{Alert, AlertVariant};
+use videorc_kit::avatar::Avatar;
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
 use videorc_kit::empty::Empty;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
-use videorc_kit::list_row::{GroupedList, ListRow};
+use videorc_kit::input_group::{InputGroup, InputGroupAddon};
+use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::panel_section::PanelSection;
+use videorc_kit::progress::Progress;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::select::Select;
 use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
@@ -46,8 +55,10 @@ use videorc_kit::tokens::{radius, size, text};
 use videorc_kit::tooltip::tooltip;
 use videorc_protocol::community::{CommunitySettings, REGULAR_STREAMS_MAX, REGULAR_STREAMS_MIN};
 
-use super::SidekickScreen;
-use super::live::{LiveView, UnlockAction};
+use super::live::{Unlock, UnlockAction};
+use super::voice::chat_platform;
+use super::{SidekickScreen, config_grid_pair, unlock_alert};
+use crate::screens::chat_media::{self, Picture};
 
 const YOUR_COMMUNITY: &str = "Your community";
 const PEOPLE: &str = "People";
@@ -55,6 +66,13 @@ const SEARCH_PEOPLE: &str = "Search people";
 const SORT_PEOPLE: &str = "Sort people";
 const SHOW: &str = "Show";
 const LINKS_NEED_YOU: &str = "Links that need you";
+const LINKS_DESCRIPTION: &str =
+    "Accounts that might be one person. Videorc never links them on its own.";
+const AND: &str = "and";
+const LINK_CANCELLED: &str = "!link cancelled";
+const PEOPLE_DESCRIPTION: &str =
+    "Everyone who chatted, as one person per human. Open someone to see their card.";
+const READING_PAST_STREAMS: &str = "Reading your past streams";
 const SAME_PERSON: &str = "Same person";
 const SAME_PERSON_AS: &str = "Same person as…";
 const NOT_THE_SAME: &str = "Not the same";
@@ -90,6 +108,9 @@ const SIDEKICK_REMEMBERS: &str = "Sidekick remembers";
 const SIDEKICK_REMEMBERS_DESCRIPTION: &str = "After each stream, Sidekick keeps a few short facts people told chat about themselves. Never from YouTube.";
 const COMMUNITY_SYNC: &str = "Community sync";
 const COMMUNITY_SYNC_REASON: &str = "Community sync is part of Premium.";
+const COMMUNITY_SYNC_LATER: &str = "Community sync arrives in a later update.";
+const COMMUNITY_SYNC_DESCRIPTION: &str =
+    "The same community on your other computers. YouTube viewers are not synced (YouTube's rules).";
 const PREMIUM_DESCRIPTION: &str = "Sidekick remembers what regulars say about themselves, and your community follows you to your other computers, encrypted so Videorc can't read it.";
 const YOUR_DATA: &str = "Your data";
 const YOUR_DATA_DESCRIPTION: &str =
@@ -119,12 +140,18 @@ const FILTERS: [(&str, &str); 4] = [
 const COPIED_FOR: Duration = Duration::from_millis(1_500);
 /// How long Wave says "Waved" (person-card-body.tsx).
 const WAVED_FOR: Duration = Duration::from_millis(3_000);
+/// Pictures kept for the People rows and the card; past it, only the ones
+/// on screen stay (the list asks for 100 people at most).
+const AVATAR_CACHE: usize = 256;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersonRow {
     pub id: String,
     pub name: String,
+    /// The viewer's picture (`CommunityPersonRow.avatarUrl`).
+    #[serde(default)]
+    pub avatar_url: Option<String>,
     #[serde(default)]
     pub platforms: Vec<String>,
     #[serde(default)]
@@ -182,6 +209,9 @@ pub struct AccountSuggestion {
 pub struct PersonDetail {
     pub id: String,
     pub name: String,
+    /// The viewer's picture (`CommunityPerson.avatarUrl`).
+    #[serde(default)]
+    pub avatar_url: Option<String>,
     #[serde(default)]
     pub streams: u64,
     #[serde(default)]
@@ -252,6 +282,13 @@ pub struct CommunityState {
     copied_epoch: u64,
     /// Export… or Import… while its file is being written or read.
     pub file_busy: Option<CommunityFile>,
+    /// P1201: Play a welcome / Play a milestone (local preview only).
+    pub(super) preview: Option<super::community_preview::CommunityPreview>,
+    /// `useCachedAvatar`: the People rows' and the card's pictures by
+    /// `avatarUrl`, through the backend's chat image cache.
+    pub(super) avatars: HashMap<String, Picture>,
+    /// How many times each picture has failed, for its next wait.
+    pub(super) avatar_failures: HashMap<String, usize>,
 }
 
 /// Export… and Import… (D12): a picked folder or file goes to the backend
@@ -322,6 +359,9 @@ impl CommunityState {
             copied: false,
             copied_epoch: 0,
             file_busy: None,
+            preview: None,
+            avatars: HashMap::new(),
+            avatar_failures: HashMap::new(),
         }
     }
 }
@@ -426,7 +466,102 @@ impl SidekickScreen {
             }
             None => community.load_failed = true,
         }
+        self.load_community_avatars(cx);
         cx.notify();
+    }
+
+    /// `useCachedAvatar` for the People rows and the card: the backend
+    /// caches the picture, its route serves the bytes, and the monogram
+    /// stays while it loads or when either refuses.
+    pub(super) fn load_community_avatars(&mut self, cx: &mut Context<Self>) {
+        let Some(community) = self.community.as_mut() else {
+            return;
+        };
+        let shown: Vec<String> = community
+            .people
+            .iter()
+            .map(|person| person.avatar_url.as_deref())
+            .chain(
+                community
+                    .selected
+                    .iter()
+                    .map(|person| person.avatar_url.as_deref()),
+            )
+            .filter_map(avatar_url)
+            .map(str::to_owned)
+            .collect();
+        let wanted = avatar_urls_to_load(shown.iter().map(|url| Some(url.as_str())), |url| {
+            community.avatars.contains_key(url)
+        });
+        if community.avatars.len() + wanted.len() > AVATAR_CACHE {
+            let keep: HashSet<&str> = shown.iter().map(String::as_str).collect();
+            community
+                .avatars
+                .retain(|url, _| keep.contains(url.as_str()));
+            community
+                .avatar_failures
+                .retain(|url, _| keep.contains(url.as_str()));
+        }
+        for url in wanted {
+            self.fetch_community_avatar(url, cx);
+        }
+    }
+
+    /// One picture through the backend's cache. One the cache could not
+    /// fetch is asked for again after 5, 20 and 60 s, then left as the
+    /// monogram (`useCachedAvatar`'s `CHAT_IMAGE_NULL_RETRY_DELAYS_MS`).
+    fn fetch_community_avatar(&mut self, url: String, cx: &mut Context<Self>) {
+        let backend = self.studio.backend().clone();
+        let Some(community) = self.community.as_mut() else {
+            return;
+        };
+        community.avatars.insert(url.clone(), Picture::Loading);
+        let remote = url.clone();
+        let job = self.runtime.spawn(async move {
+            let kind = chat_media::cache_kind_for_url(&remote, false);
+            let local = driver::cache_image_as(&*backend, &remote, kind).await?;
+            let bytes = images::read_route(&local).await.ok()?;
+            Some(chat_media::picture_from_bytes(bytes))
+        });
+        cx.spawn(async move |this, cx| {
+            let picture = job.await.ok().flatten();
+            let retry = this
+                .update(cx, |screen, cx| {
+                    let community = screen.community.as_mut()?;
+                    let retry = match picture {
+                        Some(picture) => {
+                            community.avatar_failures.remove(&url);
+                            community.avatars.insert(url.clone(), picture);
+                            None
+                        }
+                        None => {
+                            let failed = community.avatar_failures.entry(url.clone()).or_insert(0);
+                            let delay = avatar_retry_delay(*failed);
+                            *failed += 1;
+                            community.avatars.insert(url.clone(), Picture::Failed);
+                            delay
+                        }
+                    };
+                    cx.notify();
+                    retry
+                })
+                .ok()
+                .flatten();
+            let Some(delay) = retry else {
+                return;
+            };
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |screen, cx| {
+                // Still on the page and still failed: ask again.
+                let again = screen.community.as_ref().is_some_and(|community| {
+                    matches!(community.avatars.get(&url), Some(Picture::Failed))
+                });
+                if again {
+                    screen.fetch_community_avatar(url, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// One card action (Wave, a note, Not the same, a memory, a bot flag, a
@@ -614,7 +749,8 @@ impl SidekickScreen {
         );
     }
 
-    /// A memory's "Forget …": the confirm takes the card's place.
+    /// A memory's "Forget …": the confirm stacks over the card
+    /// (`Dialog::layer(1)`).
     pub(super) fn ask_forget_memory(
         &mut self,
         memory: PersonMemory,
@@ -623,7 +759,6 @@ impl SidekickScreen {
     ) {
         if let Some(community) = self.community.as_mut() {
             community.memory_target = Some(memory);
-            community.person.close(window, cx);
             community.memory_forget.open(window, cx);
         }
         cx.notify();
@@ -633,7 +768,6 @@ impl SidekickScreen {
         if let Some(community) = self.community.as_mut() {
             community.memory_forget.close(window, cx);
             community.memory_target = None;
-            community.person.open(window, cx);
         }
         cx.notify();
     }
@@ -647,7 +781,6 @@ impl SidekickScreen {
             return;
         };
         community.memory_forget.close(window, cx);
-        community.person.open(window, cx);
         self.community_card_request(
             CardCall {
                 method: "cohost.community.memory.delete",
@@ -722,60 +855,47 @@ impl SidekickScreen {
 }
 
 pub fn render_community(
-    view: &LiveView,
     entitled: bool,
     state: &CommunityState,
     settings: &CommunitySettings,
+    preview: AnyElement,
+    wide: bool,
     window: &mut Window,
     cx: &mut Context<SidekickScreen>,
 ) -> AnyElement {
     let theme = theme::resolve(None, window, cx);
     let muted = hsla(theme.muted_foreground);
+    let foreground = hsla(theme.foreground);
+    let border = hsla(theme.border);
     let entity = cx.entity();
     let now = Utc::now();
     let off = !settings.enabled;
 
-    let mut lead = div().flex().flex_col().gap(px(8.)).p(px(size::GUTTER));
-    if !entitled {
-        let action = view
-            .unlock
-            .as_ref()
-            .and_then(|u| u.action)
-            .unwrap_or(UnlockAction::ViewPremium);
-        let label = match action {
-            UnlockAction::SignIn => words::SIGN_IN,
-            UnlockAction::ViewPremium => words::VIEW_PREMIUM,
-        };
-        lead = lead.child(
-            Alert::new("sidekick-community-premium")
-                .variant(AlertVariant::Warning)
-                .title(BUDDY_REMEMBERS_LOCK_REASON)
-                .action(
-                    Button::new("community-unlock-action")
-                        .variant(ButtonVariant::Outline)
-                        .size(ButtonSize::Xs)
-                        .label(label)
-                        .on_click(move |_, _, cx| match action {
-                            UnlockAction::SignIn => crate::app::accounts::sign_in(cx),
-                            UnlockAction::ViewPremium => cx.open_url("https://videorc.com/premium"),
-                        }),
-                ),
-        );
-    }
-
-    let header_line = community::community_header_line(state.summary.as_ref());
-    let mut summary_block = div().flex().flex_col().gap(px(4.)).child(
-        div()
-            .type_scale(text::META)
-            .text_color(muted)
-            .child(header_line),
-    );
-    if let Some(backfill) = community::backfill_line(state.summary.as_ref()) {
-        summary_block = summary_block.child(
+    // `CommunityOverview`: the header line as the description, then the
+    // past streams being read (with their progress) and the remember offer.
+    let mut summary = PanelSection::new("sidekick-your-community")
+        .title(YOUR_COMMUNITY)
+        .description(community::community_header_line(state.summary.as_ref()));
+    if let (Some(backfill), Some(counts)) = (
+        community::backfill_line(state.summary.as_ref()),
+        state.summary.as_ref(),
+    ) {
+        summary = summary.child(
             div()
-                .type_scale(text::META)
-                .text_color(muted)
-                .child(backfill),
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .type_scale(text::META)
+                        .text_color(muted)
+                        .child(backfill),
+                )
+                .child(
+                    Progress::new(counts.backfill.done as f32)
+                        .max(counts.backfill.total.max(1) as f32)
+                        .accessibility_label(READING_PAST_STREAMS),
+                ),
         );
     }
     // D10: offered once, after the first stream regulars came to.
@@ -790,67 +910,169 @@ pub fn render_community(
         settings.remember,
         settings.remember_offered,
     ) {
-        summary_block = summary_block.child(remember_offer(cx));
+        summary = summary.child(remember_offer(cx));
     }
-    let summary = PanelSection::new("sidekick-your-community")
-        .title(YOUR_COMMUNITY)
-        .child(summary_block);
 
-    let mut links = PanelSection::new("sidekick-links").title(LINKS_NEED_YOU);
-    if state.suggestions.is_empty() {
-        links = links.child(
-            div()
-                .type_scale(text::META)
-                .text_color(muted)
-                .child("No links waiting."),
-        );
-    } else {
-        let mut list = GroupedList::new().label(LINKS_NEED_YOU);
+    // D-2: links that need you, only when there are any. Each row names
+    // both accounts with their platform marks, then its two answers.
+    let links = (!state.suggestions.is_empty()).then(|| {
+        let mut list = GroupedList::new();
         for suggestion in &state.suggestions {
             let account_a = suggestion.account_a.account_key.clone();
             let account_b = suggestion.account_b.account_key.clone();
-            let title = format!(
-                "{} ↔ {}",
-                suggestion.account_a.name, suggestion.account_b.name
-            );
             let key = format!("{account_a}|{account_b}");
-            list = list.row(
-                ListRow::new(format!("link-{key}"), title)
-                    .context(suggestion.reason.clone())
+            let account = |person: &PersonAccount| {
+                let mark = chat_platform(&person.platform);
+                [
+                    icon(mark.icon(), 16., mark.tint_hsla(theme)).into_any_element(),
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(foreground)
+                        .child(person.name.clone())
+                        .into_any_element(),
+                ]
+            };
+            let names = div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap(px(6.))
+                .children(account(&suggestion.account_a))
+                .child(div().flex_none().text_color(muted).child(AND))
+                .children(account(&suggestion.account_b))
+                .when(suggestion.reason == "link-cancelled", |names| {
+                    names.child(Badge::new(LINK_CANCELLED).variant(BadgeVariant::Outline))
+                });
+            let answers = div()
+                .flex()
+                .flex_none()
+                .gap(px(4.))
+                .child(
+                    Button::new(format!("accept-{key}"))
+                        .variant(ButtonVariant::Outline)
+                        .size(ButtonSize::Xs)
+                        .label(SAME_PERSON)
+                        .on_click({
+                            let entity = entity.clone();
+                            let account_a = account_a.clone();
+                            let account_b = account_b.clone();
+                            move |_, _, cx| {
+                                entity.update(cx, |screen, cx| {
+                                    screen.community_accept_suggestion(
+                                        account_a.clone(),
+                                        account_b.clone(),
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                )
+                .child(
+                    Button::new(format!("dismiss-{key}"))
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Xs)
+                        .label(NOT_THE_SAME)
+                        .on_click({
+                            let entity = entity.clone();
+                            let account_a = account_a.clone();
+                            let account_b = account_b.clone();
+                            move |_, _, cx| {
+                                entity.update(cx, |screen, cx| {
+                                    screen.community_dismiss_suggestion(
+                                        account_a.clone(),
+                                        account_b.clone(),
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                );
+            list = list.item(
+                div()
+                    .id(SharedString::from(format!("link-{key}")))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .min_h(px(size::ROW))
+                    .gap_x(px(10.))
+                    .gap_y(px(4.))
+                    .px(px(12.))
+                    .py(px(4.))
+                    .text_size(px(14.))
+                    .line_height(px(20.))
+                    .child(names)
+                    .child(answers),
+            );
+        }
+        PanelSection::new("sidekick-links")
+            .title(LINKS_NEED_YOU)
+            .description(LINKS_DESCRIPTION)
+            .child(list)
+    });
+
+    // D-3: search, sort and filter over the list, which scrolls inside its
+    // own 384 px well.
+    let people_body = if state.people.is_empty() {
+        let query = state.search.read(cx).value().to_string();
+        let (title, description) = people_empty_copy(&query, state.filter);
+        // `Empty className="py-6"`: Empty's own 24 px padding, no more.
+        Empty::new()
+            .title(title)
+            .description(description)
+            .into_any_element()
+    } else {
+        let count = state.people.len();
+        let mut rows = div().flex().flex_col();
+        for (index, person) in state.people.iter().enumerate() {
+            let id = person.id.clone();
+            let name = person.name.clone();
+            let context = person_row_context(person.streams, person.last_seen_at.as_deref(), now);
+            let tag = if person.status == "bot" {
+                Some(BOT)
+            } else if person.regular {
+                Some(REGULAR)
+            } else {
+                None
+            };
+            let marks = div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(4.))
+                .children(person.platforms.iter().map(|platform| {
+                    let mark = chat_platform(platform);
+                    icon(mark.icon(), 16., mark.tint_hsla(theme))
+                }))
+                .children(tag.map(|tag| Badge::new(tag).variant(BadgeVariant::Outline)));
+            rows = rows.child(
+                div()
+                    .when(index + 1 < count, |row| {
+                        row.border_b_1().border_color(border)
+                    })
                     .child(
-                        Button::new(format!("accept-{key}"))
-                            .variant(ButtonVariant::Outline)
-                            .size(ButtonSize::Xs)
-                            .label(SAME_PERSON)
+                        ListRow::new(format!("person-{}", person.id), person.name.clone())
+                            .leading(
+                                person_avatar(
+                                    &person.name,
+                                    person.avatar_url.as_deref(),
+                                    &state.avatars,
+                                )
+                                .sm(),
+                            )
+                            .alias(marks)
+                            .meta(context)
+                            .grouped()
                             .on_click({
                                 let entity = entity.clone();
-                                let account_a = account_a.clone();
-                                let account_b = account_b.clone();
-                                move |_, _, cx| {
+                                move |_, window, cx| {
                                     entity.update(cx, |screen, cx| {
-                                        screen.community_accept_suggestion(
-                                            account_a.clone(),
-                                            account_b.clone(),
-                                            cx,
-                                        );
-                                    });
-                                }
-                            }),
-                    )
-                    .child(
-                        Button::new(format!("dismiss-{key}"))
-                            .variant(ButtonVariant::Ghost)
-                            .size(ButtonSize::Xs)
-                            .label(NOT_THE_SAME)
-                            .on_click({
-                                let entity = entity.clone();
-                                let account_a = account_a.clone();
-                                let account_b = account_b.clone();
-                                move |_, _, cx| {
-                                    entity.update(cx, |screen, cx| {
-                                        screen.community_dismiss_suggestion(
-                                            account_a.clone(),
-                                            account_b.clone(),
+                                        screen.open_community_person(
+                                            id.clone(),
+                                            name.clone(),
+                                            window,
                                             cx,
                                         );
                                     });
@@ -859,45 +1081,20 @@ pub fn render_community(
                     ),
             );
         }
-        links = links.child(list);
-    }
-
-    let people_body = if state.people.is_empty() {
-        let query = state.search.read(cx).value().to_string();
-        let (title, description) = people_empty_copy(&query, state.filter);
         div()
-            .py(px(24.))
-            .child(Empty::new().title(title).description(description))
+            .overflow_hidden()
+            .rounded(px(radius::ROW))
+            .border_1()
+            .border_color(border)
+            .bg(hsla(theme.inset))
+            .child(
+                div()
+                    .id("community-people-list")
+                    .h(px(384.))
+                    .overflow_y_scroll()
+                    .child(rows),
+            )
             .into_any_element()
-    } else {
-        let mut people_list = GroupedList::new().label(PEOPLE);
-        for person in &state.people {
-            let id = person.id.clone();
-            let name = person.name.clone();
-            let context = person_row_context(person.streams, person.last_seen_at.as_deref(), now);
-            let meta = if person.status == "bot" {
-                BOT
-            } else if person.regular {
-                REGULAR
-            } else {
-                ""
-            };
-            people_list = people_list.row(
-                ListRow::new(format!("person-{}", person.id), person.name.clone())
-                    .compact(true)
-                    .context(context)
-                    .meta(meta)
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_, window, cx| {
-                            entity.update(cx, |screen, cx| {
-                                screen.open_community_person(id.clone(), name.clone(), window, cx);
-                            });
-                        }
-                    }),
-            );
-        }
-        people_list.into_any_element()
     };
 
     let mut sort = Select::new("community-sort")
@@ -930,40 +1127,75 @@ pub fn render_community(
         show = show.option(Segment::new(value, label));
     }
 
-    let people = PanelSection::new("sidekick-people").title(PEOPLE).child(
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(
-                        div().min_w(px(160.)).flex_1().child(
-                            Input::new("community-search", &state.search)
-                                .accessibility_label(SEARCH_PEOPLE),
-                        ),
-                    )
-                    .child(sort),
-            )
-            .child(show)
-            .child(people_body),
-    );
+    let people = PanelSection::new("sidekick-people")
+        .title(PEOPLE)
+        .description(PEOPLE_DESCRIPTION)
+        .last(wide)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div().min_w(px(160.)).flex_1().child(
+                                InputGroup::new("community-search", &state.search)
+                                    .accessibility_label(SEARCH_PEOPLE)
+                                    .start(InputGroupAddon::start().child(icon(
+                                        IconName::MagnifyingGlass,
+                                        16.,
+                                        muted,
+                                    ))),
+                            ),
+                        )
+                        .child(sort),
+                )
+                // A plain `SegmentedControl` (not in a Field): it hugs its
+                // options at the left (`w-fit`).
+                .child(div().flex().child(show))
+                .child(people_body),
+        );
 
     let community_settings = render_settings_section(settings, entity.clone());
 
+    // Premium: the lock leads, and both rows stay on screen behind it. Its
+    // action is the gate's upgrade (`unlockActionForGate`): View Premium,
+    // signed in or not.
+    let lock = (!entitled).then(|| {
+        unlock_alert(
+            "sidekick-community-premium-lock",
+            "community-unlock-action",
+            &Unlock {
+                action: Some(UnlockAction::ViewPremium),
+                reason: BUDDY_REMEMBERS_LOCK_REASON.to_string(),
+            },
+            BUDDY_REMEMBERS_LOCK_REASON,
+        )
+    });
+    let remember_reason = if !entitled {
+        Some(BUDDY_REMEMBERS_LOCK_REASON)
+    } else if off {
+        Some(OFF_REASON)
+    } else {
+        None
+    };
     let premium = PanelSection::new("sidekick-community-premium")
         .title(PREMIUM)
         .description(PREMIUM_DESCRIPTION)
+        .children(lock)
         .child(
             SettingsGroup::new()
                 .row(
                     SettingsRow::new("sidekick-remembers", SIDEKICK_REMEMBERS)
                         .description(SIDEKICK_REMEMBERS_DESCRIPTION)
-                        .child(
+                        .child(with_reason(
+                            "sidekick-remembers-reason",
+                            remember_reason,
                             Switch::new("sidekick-remembers")
                                 .accessibility_label(SIDEKICK_REMEMBERS)
                                 .checked(entitled && settings.remember)
@@ -979,20 +1211,28 @@ pub fn render_community(
                                         });
                                     }
                                 }),
-                        ),
+                        )),
                 )
                 .row(
                     SettingsRow::new("community-sync", COMMUNITY_SYNC)
-                        .description(COMMUNITY_SYNC_REASON)
-                        .child(
+                        .description(COMMUNITY_SYNC_DESCRIPTION)
+                        .child(with_reason(
+                            "community-sync-reason",
+                            Some(if entitled {
+                                COMMUNITY_SYNC_LATER
+                            } else {
+                                COMMUNITY_SYNC_REASON
+                            }),
                             Switch::new("community-sync")
                                 .accessibility_label(COMMUNITY_SYNC)
                                 .checked(false)
                                 .disabled(true),
-                        ),
+                        )),
                 ),
         );
 
+    // Your data: the disclosure line and its Copy, then Export… and
+    // Import… with Forget everyone… at the far end.
     let data = PanelSection::new("sidekick-your-data")
         .title(YOUR_DATA)
         .description(YOUR_DATA_DESCRIPTION)
@@ -1000,47 +1240,57 @@ pub fn render_community(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(8.))
+                .gap(px(12.))
                 .child(
                     div()
-                        .type_scale(text::META)
-                        .text_color(muted)
-                        .child(DISCLOSURE_LEAD),
-                )
-                .child(
-                    div()
-                        .rounded(px(radius::ROW))
-                        .bg(hsla(theme.inset))
-                        .px(px(12.))
-                        .py(px(8.))
-                        .type_scale(text::META)
-                        .text_color(hsla(theme.foreground))
-                        .child(COMMUNITY_DISCLOSURE_LINE),
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .type_scale(text::META)
+                                .text_color(muted)
+                                .child(DISCLOSURE_LEAD),
+                        )
+                        .child(
+                            div()
+                                .rounded(px(radius::ROW))
+                                .bg(hsla(theme.inset))
+                                .px(px(12.))
+                                .py(px(8.))
+                                .type_scale(text::META)
+                                .text_color(foreground)
+                                .child(COMMUNITY_DISCLOSURE_LINE),
+                        )
+                        .child(
+                            div().flex().child(
+                                Button::new("copy-disclosure")
+                                    .variant(ButtonVariant::Secondary)
+                                    .size(ButtonSize::Xs)
+                                    .icon(IconName::Copy)
+                                    .label(if state.copied { COPIED } else { COPY })
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_, _, cx| {
+                                            entity.update(cx, |screen, cx| {
+                                                screen.copy_community_disclosure(cx);
+                                            });
+                                        }
+                                    }),
+                            ),
+                        ),
                 )
                 .child(
                     div()
                         .flex()
-                        .gap(px(8.))
-                        .child(
-                            Button::new("copy-disclosure")
-                                .variant(ButtonVariant::Secondary)
-                                .size(ButtonSize::Xs)
-                                .label(if state.copied { COPIED } else { COPY })
-                                .on_click({
-                                    let entity = entity.clone();
-                                    move |_, _, cx| {
-                                        entity.update(cx, |screen, cx| {
-                                            screen.copy_community_disclosure(cx);
-                                        });
-                                    }
-                                }),
-                        )
+                        .flex_wrap()
+                        .gap(px(6.))
                         .child(file_button(CommunityFile::Export, state.file_busy, cx))
                         .child(file_button(CommunityFile::Import, state.file_busy, cx))
+                        .child(div().flex_1())
                         .child(
                             Button::new("forget-everyone")
-                                .variant(ButtonVariant::Outline)
-                                .size(ButtonSize::Xs)
+                                .variant(ButtonVariant::Destructive)
                                 .label(FORGET_EVERYONE)
                                 .on_click({
                                     let entity = entity.clone();
@@ -1062,23 +1312,29 @@ pub fn render_community(
     let forget_all = forget_everyone_dialog(state, cx);
     let forget_memory = memory_forget_dialog(state, cx);
 
+    // One column for the people (the header, links that need you, the
+    // list), one for the settings, Premium, your data and the preview.
+    let lead = div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .child(summary)
+        .children(links)
+        .child(people);
+    let trail = div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .child(community_settings)
+        .child(premium)
+        .child(data)
+        .child(preview);
+
     div()
         .flex()
         .flex_col()
-        .child(lead)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(size::GUTTER))
-                .p(px(size::GUTTER))
-                .child(summary)
-                .child(links)
-                .child(people)
-                .child(community_settings)
-                .child(premium)
-                .child(data),
-        )
+        .flex_1()
+        .child(config_grid_pair(lead, trail, wide, border))
         .child(person)
         .child(forget)
         .child(forget_all)
@@ -1139,14 +1395,22 @@ fn remember_offer(cx: &mut Context<SidekickScreen>) -> AnyElement {
 
 /// A control that is off while Remember my community is off, saying why.
 fn gated(id: &'static str, off: bool, control: impl IntoElement) -> AnyElement {
-    if off {
-        div()
+    with_reason(id, off.then_some(OFF_REASON), control)
+}
+
+/// `DisabledReason`: a disabled control's reason on hover, while it has one.
+fn with_reason(
+    id: &'static str,
+    reason: Option<&'static str>,
+    control: impl IntoElement,
+) -> AnyElement {
+    match reason {
+        Some(reason) => div()
             .id(id)
-            .tooltip(tooltip(OFF_REASON))
+            .tooltip(tooltip(reason))
             .child(control)
-            .into_any_element()
-    } else {
-        control.into_any_element()
+            .into_any_element(),
+        None => control.into_any_element(),
     }
 }
 
@@ -1323,6 +1587,19 @@ fn person_dialog(
     Dialog::new("community-person", &state.person, title).child(body)
 }
 
+/// `Avatar` with `AvatarImage` over the `AvatarFallback` monogram: the
+/// person's picture once the cache has it, the initials until then.
+fn person_avatar(name: &str, url: Option<&str>, avatars: &HashMap<String, Picture>) -> Avatar {
+    let avatar = Avatar::new(monogram_initials(name));
+    match avatar_url(url)
+        .and_then(|url| avatars.get(url))
+        .and_then(Picture::ready)
+    {
+        Some(image) => avatar.image(image),
+        None => avatar,
+    }
+}
+
 /// The card's section label (`SectionLabel`: 11 px / 600, tertiary).
 fn card_label(label: &'static str, subtle: Hsla) -> impl IntoElement {
     div()
@@ -1391,7 +1668,12 @@ fn render_person_card(
     if is_bot {
         name_line = name_line.child(Badge::new(BOT).variant(BadgeVariant::Outline));
     }
-    let mut header = div().flex().flex_col().child(name_line);
+    let mut header = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.))
+        .child(name_line);
     if linked {
         header = header.child(
             div()
@@ -1400,7 +1682,16 @@ fn render_person_card(
                 .child(linked_line(person.accounts.len())),
         );
     }
-    body = body.child(header);
+    // `Avatar size="lg"` beside the name, 10 px apart (`gap-2.5`).
+    body = body.child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .min_w(px(0.))
+            .child(person_avatar(&name, person.avatar_url.as_deref(), &state.avatars).lg())
+            .child(header),
+    );
 
     // AccountsList: a linked account's "Not the same" splits it off.
     if !person.accounts.is_empty() {
@@ -1712,6 +2003,7 @@ fn forget_dialog(state: &CommunityState, cx: &mut Context<SidekickScreen>) -> Di
     let entity = cx.entity();
     let copy = forget_copy(&state.forget_name);
     Dialog::new("forget-person", &state.forget, copy.title.clone())
+        .layer(1)
         .description(copy.description.clone())
         .footer(
             Button::new("forget-cancel")
@@ -1722,12 +2014,9 @@ fn forget_dialog(state: &CommunityState, cx: &mut Context<SidekickScreen>) -> Di
                     move |_, window, cx| {
                         entity.update(cx, |screen, cx| {
                             if let Some(community) = screen.community.as_mut() {
+                                // The card it was asked from stays open below.
                                 community.forget.close(window, cx);
                                 community.forget_id = None;
-                                // Back to the card it was asked from.
-                                if community.selected.is_some() {
-                                    community.person.open(window, cx);
-                                }
                             }
                             cx.notify();
                         });
@@ -1746,7 +2035,7 @@ fn forget_dialog(state: &CommunityState, cx: &mut Context<SidekickScreen>) -> Di
         )
 }
 
-/// "Forget this memory?" (D10), asked in the card's place.
+/// "Forget this memory?" (D10), stacked over the card.
 fn memory_forget_dialog(state: &CommunityState, cx: &mut Context<SidekickScreen>) -> Dialog {
     let entity = cx.entity();
     let name = state
@@ -1761,6 +2050,7 @@ fn memory_forget_dialog(state: &CommunityState, cx: &mut Context<SidekickScreen>
         .unwrap_or_default();
     let copy = memory_forget_copy(name, text);
     Dialog::new("forget-memory", &state.memory_forget, copy.title)
+        .layer(1)
         .description(copy.description)
         .footer(
             Button::new("forget-memory-cancel")
@@ -1831,7 +2121,6 @@ fn file_button(
     let entity = cx.entity();
     Button::new(id)
         .variant(ButtonVariant::Outline)
-        .size(ButtonSize::Xs)
         .label(if busy == Some(which) { working } else { label })
         .disabled(busy.is_some())
         .on_click(move |_, _, cx| {
@@ -2043,4 +2332,53 @@ fn press_community_toast(toast: ToastData, cx: &mut Context<SidekickScreen>) {
     hub.update(cx, |hub, cx| {
         hub.press_toast("community-file".to_string(), toast, cx)
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PersonDetail, PersonRow};
+    use serde_json::json;
+
+    /// `cohost.community.list` rows and `cohost.community.person` carry the
+    /// viewer's picture as `avatarUrl`; an older answer without it still reads.
+    #[test]
+    fn people_and_the_card_read_the_avatar_url() {
+        let row: PersonRow = serde_json::from_value(json!({
+            "id": "p1",
+            "name": "Ada",
+            "avatarUrl": "https://yt3.ggpht.com/ada.jpg",
+            "platforms": ["youtube"],
+            "streams": 3,
+            "regular": true,
+            "status": "normal",
+        }))
+        .expect("row");
+        assert_eq!(
+            row.avatar_url.as_deref(),
+            Some("https://yt3.ggpht.com/ada.jpg")
+        );
+        let bare: PersonRow =
+            serde_json::from_value(json!({ "id": "p2", "name": "Bo" })).expect("bare row");
+        assert_eq!(bare.avatar_url, None);
+
+        let person: PersonDetail = serde_json::from_value(json!({
+            "id": "p1",
+            "name": "Ada",
+            "avatarUrl": "https://static-cdn.jtvnw.net/ada.png",
+            "accounts": [],
+            "streams": 3,
+            "messages": 40,
+            "inARow": 2,
+            "bestInARow": 2,
+            "regular": true,
+            "support": {},
+            "note": "",
+            "status": "normal",
+        }))
+        .expect("person");
+        assert_eq!(
+            person.avatar_url.as_deref(),
+            Some("https://static-cdn.jtvnw.net/ada.png")
+        );
+    }
 }

@@ -269,6 +269,7 @@ impl Player {
                     gpui::canvas(
                         move |bounds, _, cx| {
                             let _ = weak.update(cx, |this, _| {
+                                this.smoke_slot = Some(bounds);
                                 if let Some(native) = this.native.as_mut() {
                                     if let Some(element) = native.element.as_mut() {
                                         element.place(videorc_preview::LayerRect {

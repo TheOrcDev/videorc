@@ -9,11 +9,11 @@ use gpui::{App, IntoElement, WeakEntity, div, prelude::*, px};
 use videorc_app_core::settings_page::SettingsTab;
 use videorc_app_core::updater::{ChipAction, ChipTone, UpdateStatus, update_chip};
 use videorc_kit::{
-    button::{Button, ButtonVariant},
     icon::{IconName, icon},
     status_dot::{StatusDot, StatusTone},
     theme::hsla,
-    tokens::Theme,
+    tokens::{Theme, radius, size},
+    tooltip::tooltip,
 };
 
 use super::shell::Shell;
@@ -31,36 +31,45 @@ pub fn chip(shell: WeakEntity<Shell>, t: &Theme, cx: &App) -> Option<impl IntoEl
         ChipTone::Good => StatusTone::Good,
         ChipTone::Neutral => StatusTone::Neutral,
     };
+    let (accent, foreground) = (hsla(t.accent), hsla(t.foreground));
+    // `sidebar.tsx`: a `px-3 pb-1` band over the footer, and in it a 28 px
+    // row button at the row radius, 14 px words in the primary ink, the
+    // flat accent block on hover.
     Some(
-        div().px(px(4.)).pb(px(4.)).child(
-            Button::new("sidebar-update-chip")
-                .variant(ButtonVariant::Ghost)
+        div().px(px(12.)).pb(px(4.)).child(
+            gpui_base::Button::new("sidebar-update-chip")
                 .accessibility_label(chip.label.clone())
-                .tooltip(chip.detail)
+                .tooltip(tooltip(chip.detail))
+                .w_full()
+                .h(px(size::ROW_COMPACT))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(10.))
+                .rounded(px(radius::ROW))
+                .text_size(px(14.))
+                .line_height(px(20.))
+                .text_color(foreground)
+                .hover(move |style| style.bg(accent))
                 .child(
                     div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .min_w(px(0.))
+                        .relative()
+                        .flex_none()
+                        .size(px(16.))
+                        .child(icon(
+                            IconName::ArrowsClockwise,
+                            16.,
+                            hsla(t.muted_foreground),
+                        ))
                         .child(
                             div()
-                                .relative()
-                                .flex_none()
-                                .size(px(16.))
-                                .child(icon(
-                                    IconName::ArrowsClockwise,
-                                    16.,
-                                    hsla(t.muted_foreground),
-                                ))
-                                .child(
-                                    div().absolute().top(px(-2.)).right(px(-2.)).child(
-                                        StatusDot::new("sidebar-update-chip-dot").tone(tone),
-                                    ),
-                                ),
-                        )
-                        .child(div().min_w(px(0.)).truncate().child(chip.label)),
+                                .absolute()
+                                .top(px(-2.))
+                                .right(px(-2.))
+                                .child(StatusDot::new("sidebar-update-chip-dot").tone(tone)),
+                        ),
                 )
+                .child(div().flex_1().min_w(px(0.)).truncate().child(chip.label))
                 .on_click(move |_, window, cx| match action {
                     ChipAction::Install => updater::install_update(cx),
                     ChipAction::Settings => {

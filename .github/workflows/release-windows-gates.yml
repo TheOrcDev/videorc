@@ -12,6 +12,11 @@ on:
         required: false
         type: boolean
         default: true
+      js:
+        description: Run Electron and Node suites; release callers keep the default
+        required: false
+        type: boolean
+        default: true
 permissions:
   contents: read
 jobs:
@@ -240,6 +245,7 @@ jobs:
 
   js:
     name: Windows release JS gates
+    if: ${{ inputs.js }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -286,6 +292,7 @@ jobs:
     # Plan 242 S8: the desktop tests on Windows (path separators, pnpm spawn
     # semantics) in three shards split by recorded time.
     name: Windows desktop tests (${{ matrix.shard }}/3)
+    if: ${{ inputs.js }}
     runs-on: windows-latest
     timeout-minutes: 10
     strategy:
@@ -342,6 +349,7 @@ jobs:
           RUST_RESULT: ${{ needs.rust.result }}
           RUST_WANTED: ${{ inputs.rust }}
           JS_RESULT: ${{ needs.js.result }}
+          JS_WANTED: ${{ inputs.js }}
           VITEST_RESULT: ${{ needs.js-vitest.result }}
         run: |
           echo "Windows release Rust gates: $RUST_RESULT (wanted: $RUST_WANTED)"
@@ -352,8 +360,10 @@ jobs:
             echo "The Windows Rust gates must succeed."
             exit 1
           fi
-          if [ "$JS_RESULT" != success ] || [ "$VITEST_RESULT" != success ]; then
-            echo "Every Windows JS gate job must succeed."
+          expected=skipped
+          if [ "$JS_WANTED" = true ]; then expected=success; fi
+          if [ "$JS_RESULT" != "$expected" ] || [ "$VITEST_RESULT" != "$expected" ]; then
+            echo "Every Windows JS gate result must be $expected."
             exit 1
           fi
 
@@ -369,6 +379,7 @@ jobs:
           node-version: '24.6.0'
 
       - name: Download shard reports
+        if: ${{ inputs.js }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: windows-vitest-shard-*
@@ -376,4 +387,5 @@ jobs:
           merge-multiple: true
 
       - name: Every desktop test file ran exactly once on Windows
+        if: ${{ inputs.js }}
         run: node scripts/vitest-shard-report.mjs check "$RUNNER_TEMP"/windows-vitest-shards/*.json

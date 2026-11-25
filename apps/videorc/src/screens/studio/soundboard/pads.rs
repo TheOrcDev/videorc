@@ -30,18 +30,21 @@ pub fn grid(
         let stop_entity = entity.clone();
         let play_id = sound.id.clone();
         let stop_id = sound.id.clone();
-        let mut pad = SoundPad::new(("sound-pad", sound.id.clone()), sound.name.clone())
-            .mode(mode)
-            .size(SoundPadSize::Sm)
-            .playing(playing)
-            .disabled(disabled)
-            .accessibility_label(label)
-            .on_trigger(move |_, cx| {
-                let _ = play_entity.update(cx, |section, cx| section.play(play_id.clone(), cx));
-            })
-            .on_stop(move |_, cx| {
-                let _ = stop_entity.update(cx, |section, cx| section.stop(stop_id.clone(), cx));
-            });
+        let mut pad = SoundPad::new(
+            (gpui::ElementId::from("sound-pad"), sound.id.clone()),
+            sound.name.clone(),
+        )
+        .mode(mode)
+        .size(SoundPadSize::Sm)
+        .playing(playing)
+        .disabled(disabled)
+        .accessibility_label(label)
+        .on_trigger(move |_, cx| {
+            let _ = play_entity.update(cx, |section, cx| section.play(play_id.clone(), cx));
+        })
+        .on_stop(move |_, cx| {
+            let _ = stop_entity.update(cx, |section, cx| section.stop(stop_id.clone(), cx));
+        });
         if let Some(key) = sound.hotkey.clone() {
             pad = pad.hotkey(key);
         }

@@ -47,6 +47,25 @@ pub fn stage_footprint(width: u32, height: u32) -> f32 {
     }
 }
 
+/// `previewSlotRatio` (`preview-stage.tsx:282`): the docked slot's width over
+/// its height, always the canvas's real aspect (16:9 with none), so the
+/// native surface glued to it is never squeezed. A portrait canvas gets a
+/// true 9:16 slot centred in the landscape footprint.
+pub fn stage_slot_aspect(width: u32, height: u32) -> f32 {
+    if width == 0 || height == 0 {
+        16. / 9.
+    } else {
+        width as f32 / height as f32
+    }
+}
+
+/// The slot's share of the footprint's width: the slot is as tall as the
+/// footprint, so its width is `slot / footprint` of the footprint's (1 for
+/// a landscape canvas, the slot and the footprint being one box).
+pub fn stage_slot_share(width: u32, height: u32) -> f32 {
+    (stage_slot_aspect(width, height) / stage_footprint(width, height)).min(1.)
+}
+
 /// A section a door brings into view on the page's scroll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StudioSection {
@@ -91,6 +110,20 @@ mod tests {
         assert_eq!(stage_footprint(1440, 1080), 1440. / 1080.);
         assert_eq!(stage_footprint(1080, 1920), 16. / 9.);
         assert_eq!(stage_footprint(0, 0), 16. / 9.);
+    }
+
+    #[test]
+    fn a_portrait_canvas_gets_a_true_slot_centred_in_the_footprint() {
+        // Landscape: the slot is the footprint.
+        assert_eq!(stage_slot_aspect(1920, 1080), 1920. / 1080.);
+        assert_eq!(stage_slot_share(1920, 1080), 1.);
+        assert_eq!(stage_slot_share(1440, 1080), 1.);
+        // Portrait 9:16: a 9:16 slot, (9/16) / (16/9) of the footprint wide.
+        assert_eq!(stage_slot_aspect(1080, 1920), 1080. / 1920.);
+        assert!((stage_slot_share(1080, 1920) - 81. / 256.).abs() < 1e-6);
+        // No canvas yet: the 16:9 footprint, whole.
+        assert_eq!(stage_slot_aspect(0, 0), 16. / 9.);
+        assert_eq!(stage_slot_share(0, 0), 1.);
     }
 
     #[test]

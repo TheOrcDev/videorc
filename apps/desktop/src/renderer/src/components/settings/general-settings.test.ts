@@ -71,15 +71,7 @@ function switchById(id: string): HTMLElement | null {
 describe('GeneralSettings', () => {
   it('splits into Appearance, Chat, Setup, Import, Privacy and Elsewhere', async () => {
     await act(async () => root.render(createElement(GeneralSettings)))
-    expect(headings()).toEqual([
-      'Appearance',
-      'Chat',
-      'Notifications',
-      'Setup',
-      'Import',
-      'Privacy',
-      'Elsewhere'
-    ])
+    expect(headings()).toEqual(['Appearance', 'Chat', 'Setup', 'Import', 'Privacy', 'Elsewhere'])
     expect(container.textContent).toContain('Open Stream Manager when you go live')
   })
 
@@ -140,15 +132,7 @@ describe('GeneralSettings', () => {
       runtimeInfo: { platform: 'darwin', commentsWindowEnabled: false }
     }
     await act(async () => root.render(createElement(GeneralSettings)))
-    expect(headings()).toEqual([
-      'Appearance',
-      'Chat',
-      'Notifications',
-      'Setup',
-      'Import',
-      'Privacy',
-      'Elsewhere'
-    ])
+    expect(headings()).toEqual(['Appearance', 'Chat', 'Setup', 'Import', 'Privacy', 'Elsewhere'])
     expect(container.querySelector('#studio-chat')).not.toBeNull()
     expect(container.textContent).not.toContain('Open Stream Manager when you go live')
   })

@@ -50,6 +50,7 @@ const CAPTURE_RUNTIME_DEPENDENCIES = [
   'apps/desktop/src/renderer/src/lib/layout-labels.ts',
   'apps/desktop/src/renderer/src/lib/platform-copy.ts',
   'apps/desktop/src/renderer/src/lib/platform.ts',
+  'apps/desktop/src/renderer/src/lib/ui-settings-limits.ts',
   'apps/desktop/src/renderer/src/lib/ui-settings-storage.ts',
   'apps/desktop/src/renderer/src/lib/ui-settings-store.ts',
   'apps/desktop/src/shared/backend.ts',

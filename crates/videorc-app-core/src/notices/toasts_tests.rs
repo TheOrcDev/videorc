@@ -1173,7 +1173,7 @@ fn a_destination_is_news_when_it_stops_reconnects_or_comes_back() {
     );
     assert_eq!(notices[0].id.as_deref(), Some("stream-target:t"));
     assert_eq!(notices[0].kind, NoticeKind::Warning);
-    assert_eq!(notices[0].lifetime, NoticeDuration::UntilClosed);
+    assert_eq!(notices[0].lifetime, NoticeLifetime::UntilClosed);
 
     states = reconnecting
         .iter()
@@ -1242,6 +1242,24 @@ fn a_destination_is_news_when_it_stops_reconnects_or_comes_back() {
             .on_stream_targets(&[target("t", "Twitch", Live)])
             .is_empty()
     );
+}
+
+fn finalization(
+    state: RecordingFinalizationState,
+    percent: Option<u8>,
+) -> RecordingFinalizationEvent {
+    RecordingFinalizationEvent {
+        session_id: "s1".to_string(),
+        state,
+        progress_percent: percent,
+        mp4_path: None,
+        output_path: None,
+        duration_ms: None,
+        file_size_bytes: None,
+        error: None,
+        interruption_recovery: None,
+        updated_at: "2026-11-09T00:00:00Z".to_string(),
+    }
 }
 
 #[test]

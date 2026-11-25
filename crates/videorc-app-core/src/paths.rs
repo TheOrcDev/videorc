@@ -119,7 +119,8 @@ pub fn cargo_bin_dir() -> PathBuf {
     home_dir().join(".cargo").join("bin")
 }
 
-fn home_dir() -> PathBuf {
+/// The user's home folder (`USERPROFILE` on Windows, `HOME` elsewhere).
+pub fn home_dir() -> PathBuf {
     #[cfg(windows)]
     let var = "USERPROFILE";
     #[cfg(not(windows))]

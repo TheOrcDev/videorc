@@ -36,6 +36,8 @@ pub struct Textarea {
     invalid: bool,
     plain: bool,
     text_size: Option<Pixels>,
+    /// A call site's `min-h-*` over the 64 px default.
+    min_height: Option<f32>,
     ground: Option<Color>,
     accessibility_label: Option<SharedString>,
     appearance: Option<Appearance>,
@@ -50,10 +52,18 @@ impl Textarea {
             invalid: false,
             plain: false,
             text_size: None,
+            min_height: None,
             ground: None,
             accessibility_label: None,
             appearance: None,
         }
+    }
+
+    /// The least height instead of `min-h-16` (Stream details' description
+    /// is `min-h-20`: 80).
+    pub fn min_height(mut self, height: f32) -> Self {
+        self.min_height = Some(height);
+        self
     }
 
     pub fn disabled(mut self, disabled: bool) -> Self {
@@ -170,7 +180,9 @@ impl RenderOnce for Textarea {
             .w_full()
             .min_w(px(0.0))
             .when(plain, |frame| frame.flex_1().h_full().min_h(px(0.0)))
-            .when(!plain, |frame| frame.min_h(px(MIN_HEIGHT)))
+            .when(!plain, |frame| {
+                frame.min_h(px(self.min_height.unwrap_or(MIN_HEIGHT)))
+            })
             .px(if plain { px(0.0) } else { px(10.0) })
             .py(if plain { px(0.0) } else { px(8.0) })
             .rounded(if plain { px(0.0) } else { px(radius::CHIP) })

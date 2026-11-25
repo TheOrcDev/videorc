@@ -9,6 +9,8 @@ export async function startScheduledStreamsFixture({
   // X Livestream Scheduling API: one dedicated source per schedule.
   const xSources = new Map()
   const xSchedules = new Map()
+  // Instant Go Live broadcasts (`POST /2/broadcasts`), by broadcast id.
+  const xBroadcasts = new Map()
   const calls = []
   const controls = {
     failThumbnail: false,
@@ -17,7 +19,13 @@ export async function startScheduledStreamsFixture({
     loseStreamResponse: false,
     /** The X fixture source reports RTMP as flowing. */
     xSourceActive: false,
-    loseXCreateResponse: false
+    loseXCreateResponse: false,
+    /** `GET /2/broadcasts/categories`, in X's order (sorted by viewership). */
+    xCategories: [
+      { id: 'gaming', name: 'Gaming' },
+      { id: 'just-chatting', name: 'Just Chatting' },
+      { id: 'science-technology', name: 'Science & Technology' }
+    ]
   }
   let eventCounter = 0
   let xCounter = 0
@@ -157,6 +165,7 @@ export async function startScheduledStreamsFixture({
   // `data` envelopes, problem-JSON errors, 19-digit source ids, and the
   // stream key only in the create response and the stream_key route.
   const isSourceId = (id) => /^\d+$/.test(id ?? '')
+  const isListedCategory = (id) => controls.xCategories.some((category) => category.id === id)
   const problem = (send, status, detail) =>
     send(
       {
@@ -188,6 +197,10 @@ export async function startScheduledStreamsFixture({
     const broadcastPath = path.match(/^\/2\/broadcasts\/([^/]+)$/)
     if (path === '/2/region') {
       send({ region: 'us-east-1' })
+      return
+    }
+    if (path === '/2/broadcasts/categories' && method === 'GET') {
+      send({ data: controls.xCategories })
       return
     }
     if (sourcePath && !sourcePath[1]) {
@@ -311,9 +324,16 @@ export async function startScheduledStreamsFixture({
       return
     }
     if (path === '/2/broadcasts' && method === 'POST') {
-      // Instant Go Live (never used by the scheduling smoke, which asserts
-      // it is not called): strict body, 201, RUNNING.
-      const allowed = ['source_id', 'title', 'locale', 'chat_option', 'should_not_tweet']
+      // Instant Go Live (the scheduling smoke asserts it is never called;
+      // smoke:x-live-mock uses it): strict body, 201, RUNNING.
+      const allowed = [
+        'source_id',
+        'title',
+        'locale',
+        'chat_option',
+        'should_not_tweet',
+        'live_category_id'
+      ]
       const unknown = Object.keys(body ?? {}).filter((key) => !allowed.includes(key))
       if (unknown.length > 0) {
         problem(send, 400, `unknown field: ${unknown.join(', ')}`)
@@ -323,19 +343,64 @@ export async function startScheduledStreamsFixture({
         problem(send, 400, 'The `source_id` value is not a source id.')
         return
       }
+      if (body.live_category_id !== undefined && !isListedCategory(body.live_category_id)) {
+        problem(send, 400, 'The `live_category_id` value is not a live category.')
+        return
+      }
       const id = `xlive${++xCounter}`
-      send(
-        {
-          data: {
-            id,
-            broadcast_id: id,
-            state: 'RUNNING',
-            share_url: `https://x.com/i/broadcasts/${id}`,
-            media_key: `28_${String(2116610227978326016n + BigInt(xCounter))}`
-          }
-        },
-        201
-      )
+      const broadcast = {
+        id,
+        broadcast_id: id,
+        state: 'RUNNING',
+        share_url: `https://x.com/i/broadcasts/${id}`,
+        media_key: `28_${String(2116610227978326016n + BigInt(xCounter))}`,
+        title: body.title,
+        source_id: body.source_id,
+        ...(body.live_category_id !== undefined ? { live_category_id: body.live_category_id } : {})
+      }
+      xBroadcasts.set(id, broadcast)
+      send({ data: broadcast }, 201)
+      return
+    }
+    if (broadcastPath && method === 'PUT') {
+      // Change a broadcast's title or live category, before, during or after
+      // it runs: only those two keys, `live_category_id: ""` clears it.
+      const keys = Object.keys(body ?? {})
+      if (keys.length === 0 || keys.some((key) => key !== 'title' && key !== 'live_category_id')) {
+        problem(send, 400, 'Send title and/or live_category_id only.')
+        return
+      }
+      if (body.title !== undefined && String(body.title).trim() === '') {
+        problem(send, 400, 'The `title` value must not be empty.')
+        return
+      }
+      if (
+        body.live_category_id !== undefined &&
+        body.live_category_id !== '' &&
+        !isListedCategory(body.live_category_id)
+      ) {
+        problem(send, 400, 'The `live_category_id` value is not a live category.')
+        return
+      }
+      const id = broadcastPath[1]
+      const record = xBroadcasts.get(id) ?? xSchedules.get(id)
+      if (!record) {
+        problem(send, 404, 'Broadcast not found.')
+        return
+      }
+      if (body.title !== undefined) record.title = body.title
+      if (body.live_category_id === '') delete record.live_category_id
+      else if (body.live_category_id !== undefined) record.live_category_id = body.live_category_id
+      send({
+        data: {
+          id,
+          broadcast_id: id,
+          state: xBroadcasts.has(id) ? record.state : 'RUNNING',
+          share_url: `https://x.com/i/broadcasts/${id}`,
+          title: record.title,
+          ...(record.live_category_id ? { live_category_id: record.live_category_id } : {})
+        }
+      })
       return
     }
     if (statePath) {
@@ -345,7 +410,14 @@ export async function startScheduledStreamsFixture({
       }
       const schedule = xSchedules.get(statePath[1])
       if (schedule) schedule.state = 'Ended'
+      const instant = xBroadcasts.get(statePath[1])
+      if (instant) instant.state = 'ENDED'
       send({ data: { id: statePath[1], state: 'ENDED' } })
+      return
+    }
+    if (broadcastPath && method === 'GET' && xBroadcasts.has(broadcastPath[1])) {
+      const broadcast = xBroadcasts.get(broadcastPath[1])
+      send({ data: { ...broadcast, total_watching: '3' } })
       return
     }
     if (broadcastPath && method === 'GET') {
@@ -388,6 +460,7 @@ export async function startScheduledStreamsFixture({
     streams,
     xSources,
     xSchedules,
+    xBroadcasts,
     calls,
     controls,
     close: () =>

@@ -259,6 +259,29 @@ pub fn agent_notice(id: &str, title: &str) -> Input {
     }
 }
 
+/// The event the agents' D11 notices ride on (an Activity row, with the
+/// backend's filled `notice` sentence for a successful `onAir` call).
+pub const AGENTS_ACTIVITY_EVENT: &str = "agents.activity";
+
+/// `startAgentNotices`' one step: the bell entry for one `agents.activity`
+/// payload, or `None` for a row without a notice. The title is the
+/// backend's sentence without its period (`agentNoticeTitle`); the key is
+/// one per agent and tool, so a newer notice replaces the older
+/// (`agentNoticeId`).
+pub fn agent_activity_notice(payload: &serde_json::Value) -> Option<Input> {
+    let notice = payload["notice"].as_str()?.trim();
+    if notice.is_empty() {
+        return None;
+    }
+    let title = notice.strip_suffix('.').unwrap_or(notice);
+    let id = format!(
+        "agent-notice:{}:{}",
+        payload["agentId"].as_str().unwrap_or_default(),
+        payload["tool"].as_str().unwrap_or_default()
+    );
+    Some(agent_notice(&id, title))
+}
+
 /// `publishOutputTooHeavy`: a finished check found the output too heavy;
 /// the lighter preset is one press. After it runs, the app clears the entry
 /// (`Store::clear(OUTPUT_TOO_HEAVY_KEY, now)`): nothing is left to say.
@@ -312,6 +335,27 @@ pub fn app_press(key: &str, action_id: &str) -> Option<AppPress> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_activity_row_with_a_notice_becomes_one_entry_per_agent_and_tool() {
+        let entry = agent_activity_notice(&serde_json::json!({
+            "id": "a1",
+            "agentId": "claude",
+            "agentName": "Claude Desktop",
+            "tool": "stop",
+            "outcome": "ok",
+            "summary": "",
+            "at": "2026-11-25T12:00:00Z",
+            "notice": " Claude Desktop ended the livestream. ",
+        }))
+        .unwrap();
+        assert_eq!(entry.key, "agent-notice:claude:stop");
+        assert_eq!(entry.kind, "app-news");
+        assert_eq!(entry.title, "Claude Desktop ended the livestream");
+        assert_eq!(entry.actions[0].id, "open-settings");
+        assert!(agent_activity_notice(&serde_json::json!({ "tool": "status" })).is_none());
+        assert!(agent_activity_notice(&serde_json::json!({ "notice": "  " })).is_none());
+    }
     use crate::notices::Effect;
     use crate::notices::types::State;
 

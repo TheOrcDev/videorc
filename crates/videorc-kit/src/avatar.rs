@@ -1,6 +1,6 @@
 //! Avatar (`components/ui/avatar.tsx`): a round face with an optional image
 //! and a letter fallback. Sizes match the React twin (`sm` 24, default 32,
-//! `lg` 40).
+//! `lg` 40) plus `xs` 20 for the sidebar account face (Electron `size-5`).
 
 use gpui::{
     AnyElement, App, Div, ImageSource, IntoElement, SharedString, StyleRefinement, Window, div,
@@ -11,6 +11,8 @@ use crate::theme::{Appearance, FONT, hsla, resolve};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Face {
+    /// 20 px — sidebar account trigger (Electron AvatarCircle `size-5`).
+    Xs,
     Sm,
     #[default]
     Default,
@@ -20,6 +22,7 @@ enum Face {
 impl Face {
     fn px(self) -> f32 {
         match self {
+            Self::Xs => 20.0,
             Self::Sm => 24.0,
             Self::Default => 32.0,
             Self::Lg => 40.0,
@@ -28,7 +31,8 @@ impl Face {
 
     fn text(self) -> f32 {
         match self {
-            Self::Sm => 11.0,
+            // Floor is 11 px (design guards); the face is only 20 px wide.
+            Self::Xs | Self::Sm => 11.0,
             Self::Default => 14.0,
             Self::Lg => 16.0,
         }
@@ -54,6 +58,12 @@ impl Avatar {
             fallback: fallback.into(),
             appearance: None,
         }
+    }
+
+    /// 20 px, sidebar account face (Electron `size-5`).
+    pub fn xs(mut self) -> Self {
+        self.face = Face::Xs;
+        self
     }
 
     /// 24 px, React `size="sm"`.

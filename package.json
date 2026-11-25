@@ -325,6 +325,7 @@
     "backend:fmt": "cargo fmt --check",
     "backend:clippy": "cargo clippy -- -D warnings",
     "smoke:scheduled-streams": "node scripts/smoke-scheduled-streams-app.mjs",
+    "smoke:x-live-mock": "node scripts/smoke-x-live-mock-app.mjs",
     "ffmpeg:build:capture:windows": "node scripts/build-ffmpeg-capture-windows.mjs",
     "probe:ffmpeg-capture:windows": "node scripts/ffmpeg-capture-windows.mjs",
     "release:start": "node scripts/release.mjs start",

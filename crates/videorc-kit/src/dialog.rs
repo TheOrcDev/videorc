@@ -58,6 +58,8 @@ pub struct Dialog {
     body: SmallVec<[AnyElement; 2]>,
     footer: SmallVec<[AnyElement; 2]>,
     size: DialogSize,
+    /// Stacking index: a confirm over a card uses `1` so both stay open (L3 Forget).
+    layer: usize,
     close_button: bool,
     palette: bool,
     appearance: Option<Appearance>,
@@ -78,11 +80,20 @@ impl Dialog {
             body: SmallVec::new(),
             footer: SmallVec::new(),
             size: DialogSize::Md,
+            layer: 0,
             close_button: true,
             palette: false,
             appearance: None,
             on_open_change: None,
         }
+    }
+
+    /// Stack above another open dialog without closing it. `0` is the default
+    /// card; a Forget confirm over a person card uses `1` (L3). Escape and the
+    /// backdrop hit the topmost layer first.
+    pub fn layer(mut self, layer: usize) -> Self {
+        self.layer = layer;
+        self
     }
 
     /// Every real open/close, including Escape, backdrop and the close button.
@@ -241,9 +252,11 @@ impl RenderOnce for Dialog {
         .text_color(hsla(t.popover_foreground))
         .children(close);
 
+        let topmost = self.layer > 0;
         let dialog = gpui_base::Dialog::new(cx)
             .focus_handle(focus)
             .accessibility_label(self.title)
+            .layer(self.layer, topmost)
             // The toolbar band stays the window's drag area under the scrim.
             .dismiss_below_y(px(size::TOOLBAR))
             .backdrop(

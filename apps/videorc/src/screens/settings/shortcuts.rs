@@ -1,15 +1,28 @@
 use super::*;
-use gpui::{AnyElement, Keystroke, SharedString};
+use gpui::{AnyElement, Hsla, Keystroke, SharedString};
 use videorc_app_core::{
     desktop::{accelerator as a, global_shortcuts as g},
     shortcuts as s,
 };
 use videorc_kit::{
-    button::{Button, ButtonVariant},
+    button::{Button, ButtonSize, ButtonVariant},
+    icon::{IconName, icon},
     list_row::{GroupedList, ListRow},
     panel_section::PanelSection,
+    settings_row::SettingsRow,
     shortcut_keys::ShortcutKeys,
+    tokens::{radius, size},
 };
+
+/// The recorder field's colours, read once per frame.
+#[derive(Clone, Copy)]
+struct Ink {
+    muted: Hsla,
+    /// The input group's fill (`bg-input/50`).
+    fill: Hsla,
+    ring: Hsla,
+    destructive: Hsla,
+}
 
 #[derive(Default)]
 pub(super) struct Recorder {
@@ -122,6 +135,13 @@ impl SettingsScreen {
             }
         };
         self.disarm_shortcut(cx);
+        self.set_shortcut(action, value, cx);
+    }
+    /// Saves `value` as the action's key (empty clears it).
+    fn set_shortcut(&mut self, action: String, value: String, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
         self.shortcut.message = None;
         self.busy = true;
         let studio = self.studio.clone();
@@ -141,11 +161,123 @@ impl SettingsScreen {
         });
         self.finish_save(job, cx);
     }
-    pub(super) fn shortcuts_page(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// `ShortcutRecorderField` (`shortcut-recorder.tsx`): one SettingsRow,
+    /// the field a 176 px input group (`w-44`) that shows the key, Press
+    /// shortcut…, the app's own key and where, or Unassigned, with a clear
+    /// button while a key is set.
+    fn recorder_row(&self, row: s::RecorderRow, ink: Ink, cx: &mut Context<Self>) -> SettingsRow {
+        let platform = crate::app::hotkeys::node_platform();
+        let armed = self.shortcut.action.as_deref() == Some(&row.action);
+        let name = s::shortcut_recorder_name(
+            &row.label,
+            row.value.as_deref(),
+            row.app_key.as_ref(),
+            armed,
+            Some(platform),
+        );
+        let enabled = crate::app::hotkeys::supported(&row.action) && !self.disabled();
+        let value = row.value.clone().filter(|value| !value.is_empty());
+        let content: AnyElement = if armed {
+            div()
+                .truncate()
+                .text_color(ink.muted)
+                .child("Press shortcut…")
+                .into_any_element()
+        } else if let Some(value) = &value {
+            ShortcutKeys::accelerator(value.clone()).into_any_element()
+        } else if let Some(app_key) = &row.app_key {
+            div()
+                .flex()
+                .min_w(px(0.))
+                .items_center()
+                .gap(px(6.))
+                .child(ShortcutKeys::accelerator(app_key.accelerator.clone()))
+                .child(
+                    div()
+                        .truncate()
+                        .text_color(ink.muted)
+                        .child(app_key.place.clone()),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .truncate()
+                .text_color(ink.muted)
+                .child("Unassigned")
+                .into_any_element()
+        };
+        let arm_action = row.action.clone();
+        let clear_action = row.action.clone();
+        let clear_name = format!("Clear the {} shortcut", row.label);
+        let border = if armed {
+            ink.ring
+        } else if row.conflict.is_some() {
+            ink.destructive
+        } else {
+            gpui::transparent_black()
+        };
+        let mut control = div()
+            .id(SharedString::from(format!("record-{}", row.action)))
+            .role(gpui::Role::Button)
+            .aria_label(name)
+            .flex()
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .items_center()
+            .gap(px(4.))
+            .px(px(10.))
+            .text_xs()
+            .child(content);
+        if enabled {
+            control = control.cursor_pointer().on_click(
+                cx.listener(move |this, _, _, cx| this.arm_shortcut(arm_action.clone(), cx)),
+            );
+        }
+        let mut field = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .w(px(176.))
+            .h(px(size::CONTROL))
+            // `InputGroup`: `rounded-chip bg-input/50`, the border clear
+            // until armed (ring) or refused (destructive).
+            .rounded(px(radius::CHIP))
+            .bg(ink.fill)
+            .border_1()
+            .border_color(border)
+            .child(control);
+        if value.is_some() && !armed {
+            field = field.child(
+                div().pr(px(2.)).child(
+                    Button::new(SharedString::from(format!("clear-{}", row.action)))
+                        .size(ButtonSize::IconXs)
+                        .variant(ButtonVariant::Ghost)
+                        .accessibility_label(clear_name)
+                        .disabled(!enabled)
+                        .child(icon(IconName::X, 14., ink.muted))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_shortcut(clear_action.clone(), String::new(), cx)
+                        })),
+                ),
+            );
+        }
+        let mut line = SettingsRow::new(SharedString::from(row.action.clone()), row.label.clone())
+            .child(field);
+        if let Some(conflict) = row.conflict {
+            line = line.error(conflict);
+        }
+        line
+    }
+
+    pub(super) fn shortcuts_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme::current(window, cx).theme();
+        let ink = Ink {
+            muted: hsla(t.muted_foreground),
+            fill: hsla(videorc_kit::theme::with_alpha(t.input, 0.5)),
+            ring: hsla(t.ring),
+            destructive: hsla(t.destructive),
+        };
         let registration = self.hotkeys.registration();
         let config = self.shortcut_config();
         let scenes = self.shortcut_scenes();
@@ -162,67 +294,48 @@ impl SettingsScreen {
             scenes: &scenes,
             registered: &registration.registered,
         });
+        // The actions, then the scenes in their own labelled group.
         let mut globals = GroupedList::new();
-        for row in model.action_rows.into_iter().chain(model.scene_rows) {
-            let armed = self.shortcut.action.as_deref() == Some(&row.action);
-            let name = s::shortcut_recorder_name(
-                &row.label,
-                row.value.as_deref(),
-                row.app_key.as_ref(),
-                armed,
-                Some(crate::app::hotkeys::node_platform()),
-            );
-            let enabled = crate::app::hotkeys::supported(&row.action);
-            let action = row.action.clone();
-            globals = globals.item(
-                div()
-                    .child(
-                        ListRow::new(SharedString::from(row.action), row.label).child(
-                            Button::new(SharedString::from(format!("record-{action}")))
-                                .accessibility_label(name)
-                                .label(if armed {
-                                    "Press shortcut…".to_string()
-                                } else {
-                                    row.value
-                                        .as_deref()
-                                        .filter(|s| !s.is_empty())
-                                        .map(|s| {
-                                            a::accelerator_label(
-                                                Some(s),
-                                                Some(crate::app::hotkeys::node_platform()),
-                                            )
-                                        })
-                                        .unwrap_or_else(|| "Unassigned".into())
-                                })
-                                .variant(ButtonVariant::Outline)
-                                .disabled(self.disabled() || !enabled)
-                                .tooltip(if enabled {
-                                    "Click to change"
-                                } else {
-                                    view::NOT_IN_THIS_BUILD
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.arm_shortcut(action.clone(), cx)
-                                })),
-                        ),
-                    )
-                    .children(row.conflict),
-            );
+        for row in model.action_rows {
+            globals = globals.item(self.recorder_row(row, ink, cx));
         }
-        let mut app = GroupedList::new();
-        for (label, action) in [
-            (
-                "Settings",
-                Box::new(crate::app::menus::ShowSettings) as Box<dyn gpui::Action>,
-            ),
-            (
-                "Settings → Shortcuts",
-                Box::new(crate::app::menus::ShowShortcuts),
-            ),
-            ("Open Preview", Box::new(crate::app::menus::TogglePreview)),
-        ] {
-            app = app
-                .item(ListRow::new(label, label).child(ShortcutKeys::for_action(action.as_ref())));
+        let mut scene_list = GroupedList::new().label("Scenes");
+        for row in model.scene_rows {
+            scene_list = scene_list.item(self.recorder_row(row, ink, cx));
+        }
+        // `Esc cancels, Backspace clears.` under the fields.
+        let keys_hint = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(4.))
+            .px(px(4.))
+            .text_xs()
+            .text_color(ink.muted)
+            .child(ShortcutKeys::accelerator("Escape"))
+            .child("cancels,")
+            .child(ShortcutKeys::accelerator("Backspace"))
+            .child("clears.");
+        // App shortcuts: one labelled grouped list per group, compact rows
+        // with their keys (`shortcutsByGroup`).
+        let mut app = div().flex().flex_col().gap(px(12.));
+        for (group, rows) in model.app_groups {
+            let mut list = GroupedList::new().label(group);
+            for (index, (label, accelerators)) in rows.into_iter().enumerate() {
+                let mut keys = div().flex().items_center().gap(px(4.));
+                for accelerator in accelerators {
+                    keys = keys.child(ShortcutKeys::accelerator(accelerator));
+                }
+                list = list.row(
+                    ListRow::new(
+                        SharedString::from(format!("app-key-{group}-{index}")),
+                        label,
+                    )
+                    .compact(true)
+                    .child(keys),
+                );
+            }
+            app = app.child(list);
         }
         div()
             .flex()
@@ -235,16 +348,25 @@ impl SettingsScreen {
                         .description(model.global_description)
                         .children(model.unavailable)
                         .children(self.shortcut.message.clone())
-                        .child(globals),
+                        .child(globals)
+                        .child(scene_list)
+                        .child(keys_hint)
+                        .last(true),
                 ),
             )
             .child(
-                div().flex_1().min_w(px(360.)).child(
-                    PanelSection::new(s::APP_TITLE)
-                        .title(s::APP_TITLE)
-                        .description(s::APP_DESCRIPTION)
-                        .child(app),
-                ),
+                div()
+                    .flex_1()
+                    .min_w(px(360.))
+                    .border_l_1()
+                    .border_color(hsla(t.border))
+                    .child(
+                        PanelSection::new(s::APP_TITLE)
+                            .title(s::APP_TITLE)
+                            .description(s::APP_DESCRIPTION)
+                            .last(true)
+                            .child(app),
+                    ),
             )
             .into_any_element()
     }
