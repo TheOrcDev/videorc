@@ -28,9 +28,9 @@ use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle, DialogSize};
 use videorc_kit::empty::Empty;
-use videorc_kit::icon::IconName;
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
-use videorc_kit::input_group::InputGroup;
+use videorc_kit::input_group::{InputGroup, InputGroupAddon};
 use videorc_kit::kebab_menu::{KebabMenu, KebabMenuItem, KebabReveal};
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
@@ -706,20 +706,20 @@ impl Render for GuestsPanel {
             );
         }
 
+        // `StatusDot` before the phase ("● Room closed"), pulsing while it
+        // opens or closes; the counts and the button trail.
         let room_row = SettingsRow::new("guests-room-row", phase_label)
-            .description(guests::ROOM_BACKSTAGE_TIME_LINE)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(StatusDot::new("guests-phase").tone(if room_open {
+            .label_leading(
+                StatusDot::new("guests-phase")
+                    .tone(if room_open {
                         StatusTone::Good
                     } else {
                         StatusTone::Neutral
-                    }))
-                    .child(room_trailing),
-            );
+                    })
+                    .pulse(room_pending || phase == RoomPhase::Closing),
+            )
+            .description(guests::ROOM_BACKSTAGE_TIME_LINE)
+            .child(room_trailing);
 
         let mut room_section = PanelSection::new("guests-room")
             .title(ROOM_SECTION)
@@ -793,6 +793,11 @@ impl Render for GuestsPanel {
                     .child(
                         div().flex_1().min_w(px(0.)).child(
                             InputGroup::new("guests-invite-url", &invite_input)
+                                .start(InputGroupAddon::start().child(icon(
+                                    IconName::LinkSimple,
+                                    16.,
+                                    hsla(t.muted_foreground),
+                                )))
                                 .readonly(true)
                                 .disabled(disabled || no_link)
                                 .accessibility_label(INVITE_ARIA),
