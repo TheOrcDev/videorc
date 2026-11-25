@@ -313,9 +313,23 @@ enum Format {
     Bmp,
 }
 
-/// The composited window `id` into `file`.
+/// How long a woken window gets to draw before the capture that counts.
+const WAKE_TO_CAPTURE: Duration = Duration::from_millis(700);
+
+/// The composited window `id` into `file`, fresh: GPUI redraws a covered
+/// window only once something reads its pixels, so one capture alone can show
+/// the screen before (L4's gallery found it lagging one screen behind). A
+/// first capture wakes the window and is thrown away; the second, a moment
+/// later, is the one kept.
 #[cfg(target_os = "macos")]
 async fn capture(id: u32, file: &Path, format: Format) -> Result<(), String> {
+    capture_once(id, file, format).await?;
+    tokio::time::sleep(WAKE_TO_CAPTURE).await;
+    capture_once(id, file, format).await
+}
+
+#[cfg(target_os = "macos")]
+async fn capture_once(id: u32, file: &Path, format: Format) -> Result<(), String> {
     if let Some(directory) = file.parent() {
         std::fs::create_dir_all(directory)
             .map_err(|error| format!("The capture folder can't be made: {error}"))?;
