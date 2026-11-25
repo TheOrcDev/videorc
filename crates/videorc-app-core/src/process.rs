@@ -44,6 +44,10 @@ use crate::ledger::{
 const OWNERSHIP_PREFIX: &str = "OWNERSHIP ";
 const READY_PREFIX: &str = "READY ";
 const OWNERSHIP_TOKEN_ENV: &str = "VIDEORC_BACKEND_OWNERSHIP_TOKEN";
+/// Who hosts the talk show's room (the backend's `room_host::CLIENT_ROOM_ENV`).
+pub const ROOM_HOST_ENV: &str = "VIDEORC_ROOM_HOST";
+/// This app holds no room itself: the backend does.
+pub const ROOM_HOST_BACKEND: &str = "backend";
 const STDERR_TAIL_LINES: usize = 60;
 
 /// Variables T3 Code and release tooling leak into every child; Electron main
@@ -854,7 +858,11 @@ fn backend_command(launch: &BackendLaunch, ownership_token: &str) -> Result<Comm
         .env("VIDEORC_SUPERVISOR_PID", std::process::id().to_string())
         // Root of the process tree Windows system audio excludes.
         .env("VIDEORC_ELECTRON_MAIN_PID", std::process::id().to_string())
-        .env(OWNERSHIP_TOKEN_ENV, ownership_token);
+        .env(OWNERSHIP_TOKEN_ENV, ownership_token)
+        // Plan 260 S1.8 (L1): this app has no renderer room, so the backend
+        // holds the talk show's room (macOS today: the SDK's other builds
+        // are owed; elsewhere the backend has no room and ignores it).
+        .env(ROOM_HOST_ENV, ROOM_HOST_BACKEND);
     if let Some(version) = &launch.app_version {
         command.env("VIDEORC_APP_VERSION", version);
     }
