@@ -2,12 +2,23 @@
 //! streamer chooses (sent once as base64, never kept), the draft's poses and
 //! a creation's stored sources and built moves, read straight from the buddy
 //! write root (plan 260: the UI reads files directly, as Electron's main
-//! process did for `readBuddyCreationFile`).
+//! process did for `readBuddyCreationFile`). A look's inspiration picture is
+//! fitted and shrunk to what the backend takes before it is sent
+//! (`prepareBuddyLookPicture`).
 
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{Image, ImageFormat};
+use image::codecs::jpeg::JpegEncoder;
+use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
+use image::codecs::webp::WebPEncoder;
+use image::imageops::FilterType;
+use image::metadata::Orientation;
+use image::{
+    DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, ImageReader, RgbImage, RgbaImage,
+};
 use serde::Deserialize;
 
 use super::pictures::BUDDY_ASSETS_FOLDER;
@@ -16,9 +27,19 @@ use super::pictures::BUDDY_ASSETS_FOLDER;
 /// before reading it.
 pub const LOOK_PICTURE_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// `BUDDY_LOOK_SEND_MAX_BYTES`: what the backend takes (Vercel's body cap).
-/// Electron shrinks a bigger picture first; this app has no encoder yet, so
-/// a bigger one is refused with the backend's own words.
+/// A picture is shrunk to fit it before it is sent.
 pub const LOOK_SEND_MAX_BYTES: u64 = 3 * 1024 * 1024;
+/// `BUDDY_LOOK_PICTURE_SIDE`: a look's picture is fitted within this many
+/// pixels on its longest side before it is sent.
+pub const LOOK_PICTURE_SIDE: u32 = 1024;
+/// `BUDDY_LOOK_PICTURE_MIN_SIDE`: below this side a picture is no use as
+/// inspiration, so it is refused instead.
+const LOOK_PICTURE_MIN_SIDE: u32 = 512;
+/// `LOSSY_QUALITIES` (0.9 to 0.6), as JPEG's 1 to 100.
+const LOOK_JPEG_QUALITIES: [u8; 4] = [90, 80, 70, 60];
+/// What a look's picture may be.
+const LOOK_PICTURE_KINDS: [PictureKind; 3] =
+    [PictureKind::Png, PictureKind::Jpeg, PictureKind::Webp];
 /// `BUDDY_PET_REFERENCE_UPLOAD_MAX_BYTES`.
 pub const REFERENCE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// `BUDDY_PET_FILE_MAX_BYTES`: a creation file is read only below this.
@@ -74,6 +95,15 @@ pub enum ChooseError {
     Unreadable,
 }
 
+/// Why a look's picture can't be sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LookPictureError {
+    Choose(ChooseError),
+    /// Still over 3 MB at the smallest size worth sending
+    /// (`BUDDY_LOOK_PICTURE_TOO_LARGE`).
+    CantShrink,
+}
+
 /// Reads `path` as one of `kinds`, at most `max_bytes`. Blocking: run it off
 /// the UI thread.
 pub fn read_picture(
@@ -81,6 +111,157 @@ pub fn read_picture(
     kinds: &[PictureKind],
     max_bytes: u64,
 ) -> Result<ChosenPicture, ChooseError> {
+    let bytes = read_checked(path, kinds, max_bytes)?;
+    Ok(ChosenPicture {
+        name: file_name(path),
+        path: path.to_path_buf(),
+        base64: base64(&bytes),
+    })
+}
+
+/// A look's inspiration picture as the backend takes it: read as
+/// `read_picture` does (PNG, JPEG or WebP under 10 MB), then fitted and
+/// shrunk by `prepare_look_picture`. Blocking and CPU-heavy: run it off the
+/// UI thread.
+pub fn read_look_picture(path: &Path) -> Result<ChosenPicture, LookPictureError> {
+    let bytes = read_checked(path, &LOOK_PICTURE_KINDS, LOOK_PICTURE_MAX_BYTES)
+        .map_err(LookPictureError::Choose)?;
+    let sent = prepare_look_picture(&bytes, LOOK_SEND_MAX_BYTES)?;
+    Ok(ChosenPicture {
+        name: file_name(path),
+        path: path.to_path_buf(),
+        base64: base64(&sent),
+    })
+}
+
+/// `prepareBuddyLookPicture`: fitted within 1024 px, then a PNG when it has
+/// transparency and stays at or under `max_bytes`, else JPEG (opaque) at
+/// quality 90 stepping down to 60, then the size stepped down by 0.8 until
+/// it fits; refused only when it can't fit above 512 px. Electron's lossy
+/// WebP for a transparent picture is lossless WebP here (`image` encodes no
+/// lossy WebP), so a transparent picture steps the size alone. EXIF
+/// orientation is applied first, as the browser's decode does.
+pub fn prepare_look_picture(bytes: &[u8], max_bytes: u64) -> Result<Vec<u8>, LookPictureError> {
+    let unreadable = LookPictureError::Choose(ChooseError::Unreadable);
+    let picture = decode_oriented(bytes).ok_or(unreadable)?;
+    let (width, height) = (picture.width(), picture.height());
+    if width == 0 || height == 0 {
+        return Err(unreadable);
+    }
+    let fits = |encoded: &Vec<u8>| encoded.len() as u64 <= max_bytes;
+    let mut side = LOOK_PICTURE_SIDE;
+    while side >= LOOK_PICTURE_MIN_SIDE {
+        let (fit_width, fit_height) = look_fit(width, height, side);
+        let drawn = if (fit_width, fit_height) == (width, height) {
+            picture.clone()
+        } else {
+            picture.resize_exact(fit_width, fit_height, FilterType::Lanczos3)
+        };
+        // Any pixel not fully opaque.
+        let transparent = drawn
+            .has_alpha()
+            .then(|| drawn.to_rgba8())
+            .filter(|rgba| rgba.pixels().any(|pixel| pixel.0[3] < u8::MAX));
+        if let Some(rgba) = transparent {
+            if side == LOOK_PICTURE_SIDE
+                && let Some(png) = encode_png(&rgba).filter(fits)
+            {
+                return Ok(png);
+            }
+            if let Some(webp) = encode_webp(&rgba).filter(fits) {
+                return Ok(webp);
+            }
+        } else {
+            let rgb = drawn.to_rgb8();
+            for quality in LOOK_JPEG_QUALITIES {
+                if let Some(jpeg) = encode_jpeg(&rgb, quality).filter(fits) {
+                    return Ok(jpeg);
+                }
+            }
+        }
+        // Already smaller than the next side: only the quality could help,
+        // and it did not.
+        if u64::from(width.max(height)) * 5 <= u64::from(side) * 4 {
+            break;
+        }
+        // `Math.floor(side * 0.8)`.
+        side = side * 4 / 5;
+    }
+    Err(LookPictureError::CantShrink)
+}
+
+/// `buddyLookFit`: the size that fits `width` × `height` within `side`,
+/// never upscaled.
+pub fn look_fit(width: u32, height: u32, side: u32) -> (u32, u32) {
+    let scale = (f64::from(side) / f64::from(width.max(height).max(1))).min(1.0);
+    let fit = |value: u32| ((f64::from(value) * scale).round() as u32).max(1);
+    (fit(width), fit(height))
+}
+
+/// The picture upright, as its EXIF orientation says.
+fn decode_oriented(bytes: &[u8]) -> Option<DynamicImage> {
+    let mut decoder = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_decoder()
+        .ok()?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut picture = DynamicImage::from_decoder(decoder).ok()?;
+    picture.apply_orientation(orientation);
+    Some(picture)
+}
+
+fn encode_png(rgba: &RgbaImage) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    PngEncoder::new_with_quality(&mut out, CompressionType::Default, PngFilter::Adaptive)
+        .write_image(
+            rgba.as_raw(),
+            rgba.width(),
+            rgba.height(),
+            ExtendedColorType::Rgba8,
+        )
+        .ok()?;
+    Some(out)
+}
+
+fn encode_webp(rgba: &RgbaImage) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    WebPEncoder::new_lossless(&mut out)
+        .encode(
+            rgba.as_raw(),
+            rgba.width(),
+            rgba.height(),
+            ExtendedColorType::Rgba8,
+        )
+        .ok()?;
+    Some(out)
+}
+
+fn encode_jpeg(rgb: &RgbImage, quality: u8) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, quality)
+        .encode(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            ExtendedColorType::Rgb8,
+        )
+        .ok()?;
+    Some(out)
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The file's bytes, when it is one of `kinds` and at most `max_bytes`.
+fn read_checked(
+    path: &Path,
+    kinds: &[PictureKind],
+    max_bytes: u64,
+) -> Result<Vec<u8>, ChooseError> {
     let size = std::fs::metadata(path)
         .map_err(|_| ChooseError::Unreadable)?
         .len();
@@ -95,14 +276,7 @@ pub fn read_picture(
     if !kinds.contains(&kind) {
         return Err(ChooseError::Kind);
     }
-    Ok(ChosenPicture {
-        name: path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        path: path.to_path_buf(),
-        base64: base64(&bytes),
-    })
+    Ok(bytes)
 }
 
 /// A picture file as an image GPUI draws, read fresh (a redone pose keeps
@@ -359,6 +533,80 @@ mod tests {
         ] {
             assert_eq!(creation_file(root, persona, build, file), None, "{file}");
         }
+    }
+
+    /// A picture of `width` × `height` as PNG bytes; `alpha` per pixel,
+    /// noisy colour when `noise` (it doesn't compress).
+    fn png_of(width: u32, height: u32, noise: bool, alpha: impl Fn(u32, u32) -> u8) -> Vec<u8> {
+        let mut seed: u32 = 0x9e37_79b9;
+        let rgba = RgbaImage::from_fn(width, height, |x, y| {
+            let [r, g, b] = if noise {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let [r, g, b, _] = seed.to_le_bytes();
+                [r, g, b]
+            } else {
+                [(x % 256) as u8, (y % 256) as u8, 128]
+            };
+            image::Rgba([r, g, b, alpha(x, y)])
+        });
+        encode_png(&rgba).unwrap()
+    }
+
+    fn size_of(bytes: &[u8]) -> (u32, u32) {
+        let picture = decode_oriented(bytes).unwrap();
+        (picture.width(), picture.height())
+    }
+
+    #[test]
+    fn a_look_picture_fits_within_its_side_never_upscaled() {
+        assert_eq!(look_fit(2048, 1024, 1024), (1024, 512));
+        assert_eq!(look_fit(1024, 3000, 1024), (350, 1024));
+        assert_eq!(look_fit(500, 300, 1024), (500, 300));
+        assert_eq!(look_fit(5000, 1, 1024), (1024, 1));
+    }
+
+    #[test]
+    fn an_opaque_picture_is_fitted_and_sent_as_jpeg() {
+        let png = png_of(2000, 1000, false, |_, _| u8::MAX);
+        let sent = prepare_look_picture(&png, LOOK_SEND_MAX_BYTES).unwrap();
+        assert_eq!(PictureKind::sniff(&sent), Some(PictureKind::Jpeg));
+        assert_eq!(size_of(&sent), (1024, 512));
+    }
+
+    #[test]
+    fn a_transparent_picture_stays_a_png_when_it_fits() {
+        let png = png_of(600, 400, false, |x, _| if x < 300 { 0 } else { u8::MAX });
+        let sent = prepare_look_picture(&png, LOOK_SEND_MAX_BYTES).unwrap();
+        assert_eq!(PictureKind::sniff(&sent), Some(PictureKind::Png));
+        assert_eq!(size_of(&sent), (600, 400));
+    }
+
+    #[test]
+    fn a_transparent_picture_over_the_cap_is_sent_as_webp() {
+        let png = png_of(1024, 1024, true, |x, _| if x < 8 { 0 } else { u8::MAX });
+        // Noise doesn't compress: the PNG is over 3 MB at 1024 px, so it is
+        // sent as lossless WebP, a smaller size when it has to be.
+        let sent = prepare_look_picture(&png, LOOK_SEND_MAX_BYTES).unwrap();
+        assert_eq!(PictureKind::sniff(&sent), Some(PictureKind::Webp));
+        assert!(sent.len() as u64 <= LOOK_SEND_MAX_BYTES);
+        let (width, height) = size_of(&sent);
+        assert_eq!(width, height);
+        assert!((LOOK_PICTURE_MIN_SIDE..=LOOK_PICTURE_SIDE).contains(&width));
+    }
+
+    #[test]
+    fn a_picture_that_cannot_fit_is_refused_and_junk_is_unreadable() {
+        let png = png_of(700, 700, true, |_, _| u8::MAX);
+        assert_eq!(
+            prepare_look_picture(&png, 1024),
+            Err(LookPictureError::CantShrink)
+        );
+        assert_eq!(
+            prepare_look_picture(b"not a picture", LOOK_SEND_MAX_BYTES),
+            Err(LookPictureError::Choose(ChooseError::Unreadable))
+        );
     }
 
     #[test]

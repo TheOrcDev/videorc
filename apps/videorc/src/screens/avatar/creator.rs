@@ -15,8 +15,11 @@
 //! window. Every draw and redo spends the streamer's creations: nothing here
 //! runs in a test.
 //!
-//! Not yet in this flavour: Check's living preview of the built moves (the
-//! neutral cell stands in for it), and keeping the marks across a restart.
+//! Check's living preview plays the built moves (`LazyBuddyPetPreview` in
+//! Electron), read again per build; it ticks only while Check shows on the
+//! page. The neutral cell stands in when the moves can't be played.
+//!
+//! Not yet in this flavour: keeping the marks across a restart.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -51,6 +54,7 @@ use super::creator_view::{
 use super::files::{self, Atlas, ChooseError, ChosenPicture, PictureKind};
 use super::gate::{self, Gate, GateKind};
 use super::onboarding::{PRIMARY_KEYS, refusal};
+use super::preview::PetPreview;
 use super::{AvatarScreen, sync_handle};
 
 /// A refused creator call, as one sentence (`problemOf`).
@@ -62,8 +66,9 @@ const UPDATE_THE_LOOK: UserErrorContext = UserErrorContext {
 /// Check's cells: a gaze cell, a reaction or extra.
 const GAZE_CELL_PX: f32 = 72.;
 const OTHER_CELL_PX: f32 = 60.;
-/// The neutral cell beside Check, where Electron plays the built moves.
-const CHECK_STILL_PX: f32 = 160.;
+/// The living preview beside Check (Electron's `size={160}`), and the
+/// neutral cell that stands in for it.
+const CHECK_PREVIEW_PX: f32 = 160.;
 /// The picture step's frame.
 const REFERENCE_PX: f32 = 160.;
 /// The pilot sheet, at most.
@@ -171,6 +176,9 @@ pub struct Creator {
     focus_root: bool,
     atlas_key: String,
     atlas: Option<Atlas>,
+    /// Check's living preview, made the first time Check shows.
+    preview: Option<Entity<PetPreview>>,
+    preview_active: bool,
     cancel_handle: DialogHandle,
     cancel_want_open: bool,
     cancel_was_open: bool,
@@ -207,6 +215,8 @@ impl Creator {
             focus_root: false,
             atlas_key: String::new(),
             atlas: None,
+            preview: None,
+            preview_active: false,
             cancel_handle: DialogHandle::new(false),
             cancel_want_open: false,
             cancel_was_open: false,
@@ -319,6 +329,7 @@ impl AvatarScreen {
             creator.cancel_want_open = false;
             creator.generation += 1;
         }
+        self.sync_creator_preview(cx);
         cx.notify();
     }
 
@@ -1221,6 +1232,45 @@ impl AvatarScreen {
         }
     }
 
+    /// Check's living preview plays the built moves, read again when the
+    /// build's finish time moves (Electron's `reloadKey`). It ticks only
+    /// while the page shows the creator on Check, so a closed creator,
+    /// another tab or another step keeps no timer.
+    pub(super) fn sync_creator_preview(&mut self, cx: &mut Context<Self>) {
+        let active = self.active && self.tab == super::Tab::Profile;
+        let persona_id = self.persona.as_ref().map(|persona| persona.id.clone());
+        let user_data_dir = self.user_data_dir.clone();
+        let Some(creator) = self.creator.as_mut() else {
+            return;
+        };
+        let wanted = active && creator.open && creator.step() == Step::Review;
+        if wanted && creator.preview.is_none() {
+            let preview = cx.new(|_| PetPreview::new(CHECK_PREVIEW_PX, "check"));
+            cx.observe(&preview, |_, _, cx| cx.notify()).detach();
+            creator.preview = Some(preview);
+        }
+        let Some(preview) = creator.preview.clone() else {
+            return;
+        };
+        let changed = wanted != creator.preview_active;
+        creator.preview_active = wanted;
+        if !(wanted || changed) {
+            return;
+        }
+        let built = creator.creation.as_ref().and_then(|creation| {
+            let build = creation.build.as_ref()?;
+            (build.state == "built").then(|| (creation.build_id.clone(), build.finished_at.clone()))
+        });
+        preview.update(cx, |preview, cx| {
+            if changed {
+                preview.set_active(wanted, cx);
+            }
+            if wanted && let (Some(persona_id), Some((build_id, stamp))) = (persona_id, built) {
+                preview.show_creation(&user_data_dir, &persona_id, &build_id, &stamp, cx);
+            }
+        });
+    }
+
     /// The built moves for Check, read again per build.
     fn load_creator_atlas(&mut self, cx: &mut Context<Self>) {
         let Some(persona_id) = self.persona.as_ref().map(|persona| persona.id.clone()) else {
@@ -1323,6 +1373,7 @@ pub(super) fn render_creator(
 ) -> AnyElement {
     screen.ensure_creator_fields(window, cx);
     screen.load_creator_atlas(cx);
+    screen.sync_creator_preview(cx);
     if let Some(creator) = screen.creator.as_mut() {
         sync_handle(
             &creator.cancel_handle,
@@ -2399,23 +2450,30 @@ fn review_step(
             cx,
         ));
     }
-    // The living preview of the built moves isn't in this flavour yet: the
-    // neutral cell stands in for it.
-    let neutral = creator.atlas.as_ref().map(|atlas| atlas.neutral.clone());
+    // The living preview plays the built moves (click it for the next
+    // reaction, as on stream); one it can't load leaves the neutral cell.
+    let preview = creator
+        .preview
+        .clone()
+        .filter(|preview| preview.read(cx).error().is_none());
+    let still = match preview {
+        Some(preview) => Some(preview.into_any_element()),
+        None => creator.atlas.as_ref().map(|atlas| {
+            atlas_cell(
+                Some(atlas),
+                &atlas.neutral,
+                CHECK_PREVIEW_PX,
+                TITLE.to_string(),
+                t,
+            )
+        }),
+    };
     let aside = div()
         .flex()
         .flex_col()
         .items_center()
         .gap(px(8.))
-        .children(neutral.map(|neutral| {
-            atlas_cell(
-                creator.atlas.as_ref(),
-                &neutral,
-                CHECK_STILL_PX,
-                TITLE.to_string(),
-                t,
-            )
-        }))
+        .children(still)
         .child(meta(
             view::marked_line(view::marked_count(&marks, creation)),
             t,

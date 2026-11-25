@@ -24,6 +24,10 @@ gpui_base = { workspace = true }
 # The design system (plan 260 Phase 3): the kit synced from videorc-ui's
 # GPUI flavour, which every screen draws with.
 videorc-kit = { workspace = true }
+# Avatar's inspiration picture, fitted and shrunk under 3 MB before it is
+# sent (PNG, JPEG, lossless WebP). The codecs are the ones GPUI already
+# builds `image` with, so this adds no new code to the build.
+image = { workspace = true, features = ["jpeg", "png", "webp"] }
 # The core: the supervisor, the logs, the typed client, the stores.
 videorc-app-core = { workspace = true }
 # The Session section's clock for the core's on-air facts.
