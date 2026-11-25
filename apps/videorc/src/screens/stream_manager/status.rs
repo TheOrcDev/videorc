@@ -11,6 +11,7 @@ use videorc_app_core::stream_manager::copy::{
     HIGHLIGHT_POSITION, MORE_ACTIONS, SHOW_HIGHLIGHTS_IN, hide_from_stream_hint, open_preview,
 };
 use videorc_app_core::studio::clips::clip_length_label;
+use videorc_app_core::studio::sources::copy::{HIDE_SCREEN, SHOW_SCREEN};
 use videorc_kit::{
     button::{Button, ButtonSize, ButtonVariant},
     dropdown_menu::{DropdownMenu, Menu, MenuItem},
@@ -22,7 +23,6 @@ use videorc_kit::{
 
 use super::layout::{Tier, full_labels};
 
-const HIDE_SCREEN: &str = "Hide screen";
 const CLEAR: &str = "Clear";
 const CLEAR_VIEW: &str = "Clear view";
 const BANNERS: &str = "Banners";
@@ -32,6 +32,9 @@ const COMMANDS_HINT: &str = "Add or change the !commands viewers type";
 const CLEAR_HINT: &str = "Clear view (keeps Library history)";
 const BANNERS_HINT: &str = "Show or hide your banners (or type /banner)";
 const SOUNDS_HINT: &str = "Play a sound (or type /sound)";
+const HIDE_SCREEN_HINT: &str =
+    "Cover your screen with a frosted picture on the recording and every stream";
+const SHOW_SCREEN_HINT: &str = "Show your screen to viewers again";
 
 /// The status bar under the panes.
 pub fn status_bar(
@@ -39,11 +42,14 @@ pub fn status_bar(
     pinned: bool,
     hidden: bool,
     hide_method: HideMethod,
+    screen_hidden: bool,
+    screen_blocked: Option<String>,
     width: f32,
     on_pin: impl Fn(bool, &ClickEvent, &mut Window, &mut App) + 'static,
     on_hide: impl Fn(bool, &ClickEvent, &mut Window, &mut App) + 'static,
     on_clear: impl Fn(&mut Window, &mut App) + 'static,
     on_clip: impl Fn(u32, &mut Window, &mut App) + 'static,
+    on_screen: impl Fn(bool, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let tier = Tier::of(width);
     let labels = full_labels(width);
@@ -69,6 +75,19 @@ pub fn status_bar(
     let actions_wide = tier != Tier::Narrow;
     let on_clear = Rc::new(on_clear);
     let on_clip = Rc::new(on_clip);
+    let on_screen = Rc::new(on_screen);
+    let screen_label = if screen_hidden {
+        SHOW_SCREEN
+    } else {
+        HIDE_SCREEN
+    };
+    let screen_hint = if screen_hidden {
+        SHOW_SCREEN_HINT.to_string()
+    } else {
+        HIDE_SCREEN_HINT.to_string()
+    };
+    let screen_disabled = screen_blocked.is_some();
+    let screen_hint = screen_blocked.unwrap_or(screen_hint);
 
     bar = bar
         .child(
@@ -87,12 +106,15 @@ pub fn status_bar(
     if actions_wide {
         bar = bar
             .child(
-                StatusBarAction::new("hide-screen", HIDE_SCREEN)
-                    .text(HIDE_SCREEN)
-                    .hint(
-                        "Cover your screen with a frosted picture on the recording and every stream",
-                    )
-                    .on_click(|_, _, _| {}),
+                StatusBarAction::new("hide-screen", screen_label)
+                    .text(screen_label)
+                    .hint(screen_hint.clone())
+                    .pressed(screen_hidden)
+                    .disabled(screen_disabled)
+                    .on_click({
+                        let screen = on_screen.clone();
+                        move |_, window, app| screen(!screen_hidden, window, app)
+                    }),
             )
             .child(
                 PinWindowButton::new("keep-on-top")
@@ -206,12 +228,22 @@ pub fn status_bar(
                     .menu({
                         let clear = on_clear.clone();
                         let clip = on_clip.clone();
+                        let screen = on_screen.clone();
+                        let screen_item = screen_label.to_string();
+                        let screen_off = screen_disabled;
                         move |_, _| {
                             let clear = clear.clone();
                             let clip30 = clip.clone();
                             let clip60 = clip.clone();
+                            let screen = screen.clone();
                             Menu::new()
-                                .item(MenuItem::new(HIDE_SCREEN).on_select(|_, _| {}))
+                                .item(
+                                    MenuItem::new(screen_item.clone())
+                                        .disabled(screen_off)
+                                        .on_select(move |window, app| {
+                                            screen(!screen_hidden, window, app)
+                                        }),
+                                )
                                 .item(MenuItem::new(HIGHLIGHT_POSITION).on_select(|_, _| {}))
                                 .item(
                                     MenuItem::new(clip_short_menu.clone())
