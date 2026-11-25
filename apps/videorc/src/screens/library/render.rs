@@ -865,7 +865,7 @@ impl LibraryScreen {
             .disabled(play_off)
             .tooltip(row.play_reason.unwrap_or(copy::PLAY_IN_DEFAULT_PLAYER))
             .child(icon(
-                IconName::Play,
+                IconName::PlayFill,
                 16.,
                 if play_off {
                     hsla(with_alpha(t.foreground, 0.5))

@@ -1987,6 +1987,11 @@ fn sound_body(
             .child(
                 div().flex_1().min_w(px(0.)).flex().items_center().child(
                     Slider::new(&screen.mic_gain)
+                        // A fader from 0 dB, as the Studio's gain.
+                        .origin(
+                            -MICROPHONE_GAIN_RANGE.0
+                                / (MICROPHONE_GAIN_RANGE.1 - MICROPHONE_GAIN_RANGE.0),
+                        )
                         .accessibility_label("Microphone gain")
                         .disabled(locked),
                 ),
@@ -1997,7 +2002,7 @@ fn sound_body(
                     .min_w(px(56.))
                     .flex()
                     .justify_end()
-                    .font_family(crate::lcd::SCREEN_FONT)
+                    .font_family(videorc_kit::theme::FONT_MONO)
                     .type_scale(text::META)
                     .text_color(muted)
                     .child(format_db(gain)),
