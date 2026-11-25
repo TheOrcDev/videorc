@@ -22,7 +22,6 @@ use videorc_app_core::desktop::permissions::PermissionPlatform;
 use videorc_app_core::protocol::{Banner, ScreenPrivacy, ScreenPrivacyReason, SoundboardState};
 use videorc_app_core::stream_manager::copy::WINDOW_NAME;
 use videorc_app_core::stream_manager::dashboard::{LiveDashboard, SessionState};
-use videorc_app_core::{BackendClient, Studio};
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
 use videorc_kit::{
@@ -42,8 +41,7 @@ use super::status::{BannerRow, SoundRow, status_bar};
 use crate::app::hide::HideFromStream;
 use crate::app::menus::ToggleStreamManager;
 use crate::platform;
-
-pub type AppStudio = Studio<BackendClient>;
+use crate::screens::stream_manager::SharedStudio;
 
 actions!(stream_manager, [ShowSidekick, SearchChat, WriteInChat]);
 
@@ -57,7 +55,7 @@ struct Open {
     frame: StreamManagerFrame,
     app_id: &'static str,
     dashboard: watch::Receiver<LiveDashboard>,
-    studio: Arc<AppStudio>,
+    studio: SharedStudio,
     runtime: tokio::runtime::Handle,
     window: Option<WindowHandle<StreamManager>>,
     quitting: bool,
@@ -72,7 +70,7 @@ pub fn install(
     frame: StreamManagerFrame,
     app_id: &'static str,
     dashboard: watch::Receiver<LiveDashboard>,
-    studio: Arc<AppStudio>,
+    studio: SharedStudio,
     runtime: tokio::runtime::Handle,
 ) {
     cx.bind_keys([
@@ -180,7 +178,7 @@ impl Facts {
 
 pub struct StreamManager {
     frame: StreamManagerFrame,
-    studio: Arc<AppStudio>,
+    studio: SharedStudio,
     runtime: tokio::runtime::Handle,
     notices: gpui::Entity<crate::screens::notifications::Centre>,
     chat: gpui::Entity<ChatPane>,
@@ -206,7 +204,7 @@ impl StreamManager {
     fn new(
         frame: StreamManagerFrame,
         mut dashboard: watch::Receiver<LiveDashboard>,
-        studio: Arc<AppStudio>,
+        studio: SharedStudio,
         runtime: tokio::runtime::Handle,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -218,7 +216,17 @@ impl StreamManager {
         let notices = cx.new(|cx| {
             crate::screens::notifications::Centre::new(hub, "stream-manager", window, cx)
         });
-        let chat = cx.new(|cx| ChatPane::new(window, cx));
+        let live = matches!(dashboard.borrow().session, SessionState::Live);
+        let chat = cx.new(|cx| {
+            ChatPane::new(
+                studio.clone(),
+                runtime.clone(),
+                studio.live_chat(),
+                live,
+                window,
+                cx,
+            )
+        });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         frame.moved(window);
@@ -235,7 +243,6 @@ impl StreamManager {
         }
         let now = chrono::Utc::now().timestamp_millis();
         let stats = StatsView::from_dashboard(&dashboard.borrow(), now);
-        let live = matches!(dashboard.borrow().session, SessionState::Live);
         cx.spawn(async move |this, cx| {
             loop {
                 tokio::select! {
@@ -254,6 +261,8 @@ impl StreamManager {
                     let changed = sm.stats != next || sm.facts.live != live;
                     sm.stats = next;
                     sm.facts.live = live;
+                    sm.chat.update(cx, |chat, cx| chat.set_live(live, cx));
+                    sm.facts.can_send = sm.chat.read(cx).can_send();
                     if changed {
                         cx.notify();
                     }
@@ -330,10 +339,9 @@ impl StreamManager {
             notices,
             chat,
             panes: Panes::default(),
-            // Shell: local commands keep ⌘L alive until the send driver lands.
             facts: Facts {
                 can_send: true,
-                marker: true,
+                marker: false,
                 live,
                 ..Facts::default()
             },

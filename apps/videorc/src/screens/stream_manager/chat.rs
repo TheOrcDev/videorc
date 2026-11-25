@@ -1,6 +1,4 @@
-//! The chat pane (P957–P982): filters, empty states and the composer shell.
-//! Rows and send land in later slices; this draws the chrome and holds the
-//! filter / draft state the drivers will read.
+//! The chat pane (P957–P982): filters, empty states, live rows and send.
 
 use std::sync::Arc;
 
@@ -8,6 +6,8 @@ use gpui::{
     AnyElement, App, AppContext, Context, Entity, Focusable, IntoElement, SharedString,
     Subscription, Window, div, prelude::*, px,
 };
+use tokio::sync::watch;
+use videorc_app_core::chat::LiveChat;
 use videorc_app_core::chat::model::LiveChatMessage;
 use videorc_app_core::chat::view::platform_label;
 use videorc_app_core::stream_manager::copy::{
@@ -16,7 +16,9 @@ use videorc_app_core::stream_manager::copy::{
 use videorc_app_core::stream_manager::pane::{
     self, ChatFilter, chat_pane_messages, filter_platforms,
 };
-use videorc_app_core::stream_manager::send::{CHAT_SEND_MAX_CHARS, draft_length};
+use videorc_app_core::stream_manager::send::{
+    CHAT_SEND_MAX_CHARS, draft_length, validate_chat_draft, writable_providers,
+};
 use videorc_kit::{
     badge::{Badge, BadgeVariant},
     button::{Button, ButtonSize, ButtonVariant},
@@ -31,28 +33,42 @@ use videorc_kit::{
     toggle_group::{ToggleGroup, ToggleItem},
 };
 
+use super::SharedStudio;
 use super::layout::{Tier, full_labels};
-use super::rows::{chat_row, shell_messages};
+use super::rows::chat_row;
 
-/// The chat pane: filter bar, rows, empty body and composer shell.
+/// The chat pane: filter bar, rows, empty body and composer.
 pub struct ChatPane {
+    studio: SharedStudio,
+    runtime: tokio::runtime::Handle,
     filter: ChatFilter,
     /// Destinations + message platforms (≥2 draws the platform chips).
     platforms: Vec<String>,
     messages: Vec<Arc<LiveChatMessage>>,
     mention_names: Vec<String>,
     live: bool,
+    can_send: bool,
     search: Entity<InputState>,
     draft: Entity<InputState>,
     chat_on_stream: bool,
-    /// Show the composer chrome (shell: on until history exists).
+    /// Show the composer chrome while live (or a marker context later).
     composer: bool,
+    sending: bool,
+    /// Clear the draft on the next render (after a successful send).
+    clear_draft: bool,
     _search: Subscription,
     _draft: Subscription,
 }
 
 impl ChatPane {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        studio: SharedStudio,
+        runtime: tokio::runtime::Handle,
+        mut live_chat: watch::Receiver<LiveChat>,
+        live: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let search =
             cx.new(|cx| InputState::new(window, cx).placeholder(pane::copy::SEARCH_PLACEHOLDER));
         let draft = cx.new(|cx| {
@@ -69,21 +85,92 @@ impl ChatPane {
                 cx.notify();
             }
         });
-        let messages = shell_messages();
-        let platforms = filter_platforms(&[], &messages);
+        let seed = live_chat.borrow().clone();
+        let (messages, platforms, mention_names, can_send) = view_from_chat(&seed);
+        cx.spawn(async move |this, cx| {
+            loop {
+                if live_chat.changed().await.is_err() {
+                    break;
+                }
+                let chat = live_chat.borrow().clone();
+                let alive = this.update(cx, |pane, cx| {
+                    pane.apply_live_chat(&chat, cx);
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         Self {
+            studio,
+            runtime,
             filter: ChatFilter::default(),
             platforms,
             messages,
-            mention_names: vec!["orc".into()],
-            live: false,
+            mention_names,
+            live,
+            can_send,
             search,
             draft,
             chat_on_stream: false,
-            composer: true,
+            composer: live,
+            sending: false,
+            clear_draft: false,
             _search: search_sub,
             _draft: draft_sub,
         }
+    }
+
+    fn apply_live_chat(&mut self, chat: &LiveChat, cx: &mut Context<Self>) {
+        let (messages, platforms, mention_names, can_send) = view_from_chat(chat);
+        self.messages = messages;
+        self.platforms = platforms;
+        self.mention_names = mention_names;
+        self.can_send = can_send;
+        self.composer = self.live && can_send;
+        cx.notify();
+    }
+
+    pub fn set_live(&mut self, live: bool, cx: &mut Context<Self>) {
+        if self.live == live {
+            return;
+        }
+        self.live = live;
+        self.composer = live && self.can_send;
+        cx.notify();
+    }
+
+    /// Whether a send can go out (writable destinations + a session).
+    pub fn can_send(&self) -> bool {
+        self.can_send
+    }
+
+    fn send_draft(&mut self, cx: &mut Context<Self>) {
+        if self.sending || !self.can_send {
+            return;
+        }
+        let text = self.draft.read(cx).value().to_string();
+        let Some(text) = validate_chat_draft(&text, CHAT_SEND_MAX_CHARS) else {
+            return;
+        };
+        self.sending = true;
+        cx.notify();
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let sent = runtime
+                .spawn(async move { studio.send_chat(&text).await })
+                .await;
+            let _ = this.update(cx, |pane, cx| {
+                pane.sending = false;
+                if matches!(sent, Ok(Ok(Some(_)))) {
+                    pane.clear_draft = true;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// ⌘F: focus the search field.
@@ -336,6 +423,11 @@ impl ChatPane {
 
 impl Render for ChatPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.clear_draft {
+            self.clear_draft = false;
+            self.draft
+                .update(cx, |draft, cx| draft.set_value("", window, cx));
+        }
         let width = f32::from(window.viewport_size().width);
         let tier = Tier::of(width);
         let labels = full_labels(width);
@@ -346,9 +438,12 @@ impl Render for ChatPane {
         let filtering = self.filter.filtering();
         let draft = self.draft.read(cx).value().to_string();
         let draft_len = draft_length(draft.trim());
-        let can_send = !draft.trim().is_empty();
+        let can_send = self.can_send
+            && !self.sending
+            && validate_chat_draft(&draft, CHAT_SEND_MAX_CHARS).is_some();
         let filters = self.filters_bar(tier, labels, window, cx);
         let live = self.live;
+        let this = cx.entity().downgrade();
         let list: AnyElement = if shown.is_empty() {
             let empty = if filtering {
                 pane::copy::NO_MATCH
@@ -429,11 +524,29 @@ impl Render for ChatPane {
                                         .variant(ButtonVariant::Ghost)
                                         .size(ButtonSize::Xs)
                                         .disabled(!can_send)
-                                        .accessibility_label("Run local command")
-                                        .on_click(|_, _, _| {}),
+                                        .accessibility_label("Send")
+                                        .on_click({
+                                            let this = this.clone();
+                                            move |_, _, app| {
+                                                let _ = this
+                                                    .update(app, |pane, cx| pane.send_draft(cx));
+                                            }
+                                        }),
                                 ),
                         ),
                 )
             })
     }
+}
+
+fn view_from_chat(chat: &LiveChat) -> (Vec<Arc<LiveChatMessage>>, Vec<String>, Vec<String>, bool) {
+    let messages: Vec<Arc<LiveChatMessage>> = chat.messages.iter().cloned().collect();
+    let platforms = filter_platforms(&chat.providers, &messages);
+    let mention_names: Vec<String> = chat
+        .providers
+        .iter()
+        .filter_map(|p| p.account_label.clone())
+        .collect();
+    let can_send = chat.session_id.is_some() && !writable_providers(&chat.providers).is_empty();
+    (messages, platforms, mention_names, can_send)
 }

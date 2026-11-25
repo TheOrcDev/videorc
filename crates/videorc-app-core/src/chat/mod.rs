@@ -15,8 +15,8 @@
 //!
 //! - [`view`]: the Studio's Chat section.
 //!
-//! Still to land in S1.6e: the driver that feeds this from the Studio's events (it needs the Studio,
-//! S1.6a, behind a trait).
+//! The Studio driver that feeds this from `liveChat.*` events lives in
+//! [`crate::studio::live_chat`].
 
 pub mod arrival;
 pub mod highlight;
