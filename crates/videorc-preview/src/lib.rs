@@ -53,6 +53,8 @@ pub mod lifecycle;
 pub mod stats;
 
 pub mod cpu_frames;
+#[cfg(not(target_os = "macos"))]
+pub mod cpu_playback;
 pub mod element;
 pub mod feed;
 #[cfg(target_os = "linux")]

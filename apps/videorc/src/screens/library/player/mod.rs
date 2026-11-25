@@ -1,7 +1,6 @@
 //! Recording playback owns a distinct presenter/feed. No live-preview
 //! surface or capture scene is borrowed by the Library player.
 mod markers;
-#[cfg(target_os = "macos")]
 mod native;
 mod render;
 
@@ -47,7 +46,6 @@ pub struct Player {
     marker_epoch: u64,
     deleting: std::collections::BTreeMap<String, std::rc::Rc<std::cell::Cell<bool>>>,
     delete_flushes: std::collections::BTreeMap<String, std::rc::Rc<dyn Fn(&mut gpui::App)>>,
-    #[cfg(target_os = "macos")]
     native: Option<native::Native>,
 }
 impl Player {
@@ -155,7 +153,6 @@ impl Player {
             marker_epoch: 0,
             deleting: Default::default(),
             delete_flushes: Default::default(),
-            #[cfg(target_os = "macos")]
             native: None,
         }
     }
@@ -185,7 +182,6 @@ impl Player {
         self.playable = playable;
         self.need_open = playable;
         self.resume = resume;
-        #[cfg(target_os = "macos")]
         if playable {
             if self.native.is_none() {
                 if let Err(error) = self.start_native(window, cx) {
@@ -214,7 +210,6 @@ impl Player {
         self.resume = None;
         self.resume_in_flight = None;
         self.scrub = None;
-        #[cfg(target_os = "macos")]
         if let Some(native) = &mut self.native {
             if let Some(element) = &mut native.element {
                 element.set_visible(false);
@@ -226,7 +221,6 @@ impl Player {
     }
     pub fn stop(&mut self, cx: &mut Context<Self>) {
         self.stop_playback(cx);
-        #[cfg(target_os = "macos")]
         {
             self.native.take();
         }
@@ -245,7 +239,6 @@ impl Player {
         if !self.ready() {
             return;
         }
-        #[cfg(target_os = "macos")]
         if let Some(element) = self.native.as_ref().and_then(|n| n.element.as_ref()) {
             element.seek(p::clamp_seek_ms(ms, self.status.duration_ms as f64).round() as u64);
         }
@@ -254,7 +247,6 @@ impl Player {
         if !self.ready() {
             return;
         }
-        #[cfg(target_os = "macos")]
         if let Some(element) = self.native.as_ref().and_then(|n| n.element.as_ref()) {
             if self.status.state == PlaybackState::Playing {
                 element.pause();
@@ -268,7 +260,6 @@ impl Player {
             return;
         }
         self.desired_muted = !self.status.muted;
-        #[cfg(target_os = "macos")]
         if let Some(element) = self.native.as_ref().and_then(|n| n.element.as_ref()) {
             element.set_muted(self.desired_muted);
         }
@@ -279,7 +270,6 @@ impl Player {
         }
         self.resume = self.session.as_mut().map(p::PlayerSession::retry);
         self.need_open = self.playable;
-        #[cfg(target_os = "macos")]
         if self.playable && self.native.is_none() {
             if self.start_native(window, cx).is_err() {
                 self.error = Some("Playback isn't available in this window.".into());
@@ -287,12 +277,10 @@ impl Player {
             }
         }
         self.error = None;
-        #[cfg(target_os = "macos")]
         self.open_native();
         cx.notify();
     }
     fn external(&mut self, reveal: bool, cx: &mut Context<Self>) {
-        #[cfg(target_os = "macos")]
         if !reveal {
             if let Some(element) = self.native.as_ref().and_then(|n| n.element.as_ref()) {
                 element.pause();
@@ -326,7 +314,6 @@ impl Player {
 }
 impl Drop for Player {
     fn drop(&mut self) {
-        #[cfg(target_os = "macos")]
         {
             self.native.take();
         }
