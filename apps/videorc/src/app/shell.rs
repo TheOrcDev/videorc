@@ -633,17 +633,17 @@ impl Shell {
     }
 
     fn sidebar(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The pages sit in a padded column; the footer below it runs the
+        // sidebar's full width, so its rule meets both edges (`sidebar.tsx`:
+        // the nav is `px-3`, the footer `border-t px-3` under it).
         let mut column = div()
-            .w(px(220.))
-            .h_full()
+            .flex_1()
+            .min_h(px(0.))
             .flex()
             .flex_col()
             .gap(px(2.))
             .px(px(8.))
-            .pt(chrome_top())
-            .bg(hsla(t.glass_solid))
-            .border_r_1()
-            .border_color(hsla(t.border));
+            .pt(chrome_top());
         for (group, pages) in ZONES {
             if let Some(label) = group.label() {
                 column = column.child(
@@ -712,55 +712,71 @@ impl Shell {
         );
         // P021: the update chip, above the account row.
         let update_chip = super::update_chip::chip(cx.entity().downgrade(), t, cx);
-        column.child(div().flex_1()).children(update_chip).child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(4.))
-                .border_t_1()
-                .border_color(hsla(t.border))
-                .px(px(4.))
-                .py(px(6.))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .children(self.account.as_ref().map(|account| {
-                            let state = account.read(cx).value();
-                            let needs_sign_in = videorc_app_core::accounts::needs_sign_in(
-                                &state.account,
-                                self.chat_waits
-                                    .as_ref()
-                                    .is_some_and(|waits| *waits.read(cx).value()),
-                                self.sidekick.read(cx).cohost_reason(),
-                            );
-                            let status = self.backend.read(cx).value();
-                            super::account_menu::row(
-                                state,
-                                needs_sign_in,
-                                status_tone(status.tone),
-                                status.text.clone(),
-                                matches!(status.tone, Tone::Busy),
-                                cx.entity().downgrade(),
-                                t,
-                            )
-                        })),
-                )
-                .child(
-                    Button::new("sidebar-theme-toggle")
-                        .size(ButtonSize::Xs)
-                        .variant(ButtonVariant::Ghost)
-                        .accessibility_label("Toggle color theme")
-                        .tooltip(if dark {
-                            "Switch to light theme"
-                        } else {
-                            "Switch to dark theme"
-                        })
-                        .label(if dark { "Light" } else { "Dark" })
-                        .on_click(cx.listener(|this, _, window, cx| this.toggle_theme(window, cx))),
-                ),
-        )
+        let column = column.child(div().flex_1()).children(update_chip);
+        let footer = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(8.))
+            .min_h(px(44.))
+            .border_t_1()
+            .border_color(hsla(t.border))
+            .px(px(12.))
+            .py(px(6.))
+            .child(
+                // A flex row, so the trigger keeps its own width and sits at
+                // the start: a block wrapper stretched it and the button
+                // centred "Sign in" in the whole row.
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .items_center()
+                    .justify_start()
+                    .children(self.account.as_ref().map(|account| {
+                        let state = account.read(cx).value();
+                        let needs_sign_in = videorc_app_core::accounts::needs_sign_in(
+                            &state.account,
+                            self.chat_waits
+                                .as_ref()
+                                .is_some_and(|waits| *waits.read(cx).value()),
+                            self.sidekick.read(cx).cohost_reason(),
+                        );
+                        let status = self.backend.read(cx).value();
+                        super::account_menu::row(
+                            state,
+                            needs_sign_in,
+                            status_tone(status.tone),
+                            status.text.clone(),
+                            matches!(status.tone, Tone::Busy),
+                            cx.entity().downgrade(),
+                            t,
+                        )
+                    })),
+            )
+            .child(
+                Button::new("sidebar-theme-toggle")
+                    .size(ButtonSize::Xs)
+                    .variant(ButtonVariant::Ghost)
+                    .accessibility_label("Toggle color theme")
+                    .tooltip(if dark {
+                        "Switch to light theme"
+                    } else {
+                        "Switch to dark theme"
+                    })
+                    .label(if dark { "Light" } else { "Dark" })
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_theme(window, cx))),
+            );
+        div()
+            .w(px(220.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(hsla(t.glass_solid))
+            .border_r_1()
+            .border_color(hsla(t.border))
+            .child(column)
+            .child(footer)
     }
 
     fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -863,13 +879,17 @@ impl Render for Shell {
                             .pt(chrome_top())
                             .child(self.errors.clone())
                     } else if page == PageId::Studio {
+                        // The Studio rises into the title strip: the stage and
+                        // Record / Go Live line up with the traffic lights'
+                        // row (they sit over the sidebar), and the column
+                        // divider runs to the window's top edge (owner by-eye,
+                        // 11-25). The page keeps its own gutter.
                         div()
                             .flex_1()
                             .min_w(px(0.))
                             .min_h(px(0.))
                             .flex()
                             .flex_col()
-                            .pt(chrome_top())
                             .child(self.studio.clone())
                     } else if page == PageId::Layouts {
                         div()
