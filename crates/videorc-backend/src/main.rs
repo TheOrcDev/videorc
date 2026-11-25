@@ -199,6 +199,7 @@ mod panic_hook;
 mod performance_check;
 mod pipeline;
 mod platform_stream_watch;
+mod playback;
 mod playback_cpu_ring;
 mod posters;
 mod preflight;
@@ -6551,6 +6552,13 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
         }),
 
+        // Plan 260 (L2): an open probes the file and waits for its first
+        // frame (5 s at most); a seek waits for the frame at its position.
+        "playback.open" | "playback.seek" | "playback.close" => Some(Mutation {
+            max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
+        }),
+        "playback.play" | "playback.pause" | "playback.mute" => Some(DEFAULT_MUTATION_POLICY),
+
         // Plan 168 S-F4: a save decodes the built atlas once and moves the pack.
         "cohost.pet.save" => Some(Mutation {
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
@@ -6740,6 +6748,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "preview.surface.status"
         | "preview.cpu.status"
         | "playback.cpu.status"
+        | "playback.status"
         | "remote.control.status"
         | "remote.lan.status"
         | "remote.chat.snapshot"
@@ -13463,6 +13472,43 @@ async fn handle_text_message_with_role(
         }
         "preview.cpu.status" => ServerResponse::ok(command.id, state.preview_cpu_ring.status()),
         "playback.cpu.status" => ServerResponse::ok(command.id, state.playback_cpu_ring.status()),
+        // Plan 260 (L2): the Library's playback on Windows and Linux.
+        "playback.open" => {
+            match serde_json::from_value::<crate::protocol::playback::PlaybackOpenParams>(
+                command.params,
+            ) {
+                Ok(params) => ServerResponse::ok(command.id, playback::open(state, params).await),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "playback.play" => ServerResponse::ok(command.id, playback::play(state).await),
+        "playback.pause" => ServerResponse::ok(command.id, playback::pause(state).await),
+        "playback.seek" => {
+            match serde_json::from_value::<crate::protocol::playback::PlaybackSeekParams>(
+                command.params,
+            ) {
+                Ok(params) => {
+                    ServerResponse::ok(command.id, playback::seek(state, params.position_ms).await)
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "playback.mute" => {
+            match serde_json::from_value::<crate::protocol::playback::PlaybackMuteParams>(
+                command.params,
+            ) {
+                Ok(params) => ServerResponse::ok(command.id, playback::mute(state, params.muted)),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "playback.close" => ServerResponse::ok(command.id, playback::close(state).await),
+        "playback.status" => ServerResponse::ok(command.id, state.playback.status()),
         "preview.surface.take_native_host_commands" => {
             let commands = take_native_preview_host_commands(state).await;
             ServerResponse::ok(command.id, commands)

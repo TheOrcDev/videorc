@@ -1138,6 +1138,9 @@ pub struct AppState {
     /// decoder's frame store it reads (`playback_cpu_ring.rs`).
     pub playback_cpu_ring: Arc<crate::preview_cpu_ring::PreviewCpuRingService>,
     pub playback_frames: Arc<crate::playback_cpu_ring::PlaybackFrames>,
+    /// Plan 260 (L2): the Library's playback on Windows and Linux: the
+    /// decoder, the sound and the controls (`playback.rs`).
+    pub playback: Arc<crate::playback::PlaybackService>,
     /// Serializes compositor worker stop/start handoffs so concurrent preview and
     /// recording ownership changes cannot orphan a `spawn_blocking` render worker.
     pub compositor_lifecycle: Arc<tokio::sync::Mutex<()>>,
@@ -1532,6 +1535,7 @@ impl AppState {
             preview_cpu_ring: Arc::new(crate::preview_cpu_ring::PreviewCpuRingService::default()),
             playback_cpu_ring: Arc::new(crate::preview_cpu_ring::PreviewCpuRingService::default()),
             playback_frames: Arc::new(crate::playback_cpu_ring::PlaybackFrames::default()),
+            playback: Arc::new(crate::playback::PlaybackService::default()),
             compositor_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             scene: Arc::new(tokio::sync::Mutex::new(default_scene())),
             scene_commit: Arc::new(tokio::sync::Mutex::new(())),
