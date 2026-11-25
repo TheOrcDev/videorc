@@ -33,6 +33,10 @@ pub const EVENTS: [&str; 6] = [
     "agents.activity",
     "account.changed",
 ];
+/// The remote settings couldn't be read (`remote.control.status`,
+/// `remote.lan.status`, `agents.status`, `agents.activity.list`).
+const REMOTE_READ_FAILED: &str = "Couldn't read the remote settings. Reopen Settings to try again.";
+
 pub struct Navigate(pub videorc_app_core::nav::PageId);
 impl EventEmitter<Navigate> for SettingsScreen {}
 
@@ -396,15 +400,18 @@ impl SettingsScreen {
                             }
                             rows.truncate(ACTIVITY_ROWS);
                         }
-                        if this.remote.is_none()
+                        // The remote settings' one notice: set while a read
+                        // came back short, cleared by the next whole read
+                        // (opening Settings reads again), so a failure at
+                        // startup doesn't stay for the session.
+                        let short = this.remote.is_none()
                             || this.phone.is_none()
                             || this.agents.is_none()
-                            || this.activity.is_none()
-                        {
-                            this.error = Some(
-                                "Couldn't read the remote settings. Reopen Settings to try again."
-                                    .into(),
-                            );
+                            || this.activity.is_none();
+                        if short {
+                            this.error = Some(REMOTE_READ_FAILED.into());
+                        } else if this.error.as_deref() == Some(REMOTE_READ_FAILED) {
+                            this.error = None;
                         }
                     }
                 }
