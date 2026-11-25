@@ -104,6 +104,18 @@ The preview's commands (`PREVIEW_COMMANDS` in `apps/videorc/src/smoke/mod.rs`): 
 `floatingOpen`, `words`); `preview-window-open`, `-close` and `-toggle` float it in its own window or dock it back
 (macOS; elsewhere opening is refused by name). Electron's surface and host commands have no GPUI form.
 
+### `open-tab`'s GPUI extras and the screen gallery
+
+`open-tab` also takes `subTab` (a Settings, Sidekick or Avatar tab id from `nav::sub_tabs`, such as `voice` or
+`greetings`) and `dialog` (`go-live`, `palette`, or `first-run` with `step` and `goal`), answered by
+`Shell::smoke_open`. A sub-tab on a page without tabs, or an unknown id, is refused by name.
+
+`pnpm gallery:gpui` (`scripts/gpui-gallery.mjs`) uses them to shoot every GPUI screen on main, dark and light, at a
+1280x800 window, next to the S0.10 Electron baseline ([baseline.md](baseline.md)). It runs the compile sentinel's
+binaries (`~/cloud-test/gpui-builds/latest/`) on a profile seeded like the baseline's, captures the window with
+`screencapture -l` (gap 3), and writes a manifest (each shot, its baseline pair, the parity rows it covers) and the
+Live pages the owner answers per screen. Rows are ticked only from those answers.
+
 ## Recording smokes on the GPUI app
 
 Run with `VIDEORC_APP=gpui`:
