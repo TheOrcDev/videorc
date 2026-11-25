@@ -43,7 +43,8 @@ pub fn native_window(window: &Window) -> NativeWindow {
 }
 
 /// Asks the window's accessibility adapter for its tree, as a screen reader
-/// does first. GPUI then activates and draws a frame with the tree.
+/// does first (macOS: the window's content view, where AccessKit's adapter
+/// lives). GPUI then activates and draws a frame with the tree.
 pub fn activate(native: NativeWindow) -> Result<(), String> {
     match native {
         #[cfg(target_os = "macos")]
@@ -53,10 +54,24 @@ pub fn activate(native: NativeWindow) -> Result<(), String> {
             if view.is_null() {
                 return Err("The window has no view yet.".into());
             }
-            // `accesskit_macos::SubclassingAdapter` answers this on the view
-            // and calls GPUI's activation handler on the way.
-            let _children: *mut AnyObject =
-                unsafe { msg_send![view.cast::<AnyObject>(), accessibilityChildren] };
+            // GPUI's window handle names its own `GPUIView`, a subview of the
+            // window's content view; `SubclassingAdapter::for_window` (in
+            // gpui-pre-macos's `a11y_init`) subclasses the CONTENT view, so
+            // that is the view whose `accessibilityChildren` reaches AccessKit
+            // and calls GPUI's activation handler. Asking the GPUIView (a
+            // plain NSView here) never activated anything: the tree never
+            // arrived in a smoke run (L6, first runs on 010616c0d).
+            let content: *mut AnyObject = unsafe {
+                let window: *mut AnyObject = msg_send![view.cast::<AnyObject>(), window];
+                if window.is_null() {
+                    return Err("The window's view is not in a window yet.".into());
+                }
+                msg_send![window, contentView]
+            };
+            if content.is_null() {
+                return Err("The window has no content view yet.".into());
+            }
+            let _children: *mut AnyObject = unsafe { msg_send![content, accessibilityChildren] };
             Ok(())
         }
         #[cfg(target_os = "windows")]
