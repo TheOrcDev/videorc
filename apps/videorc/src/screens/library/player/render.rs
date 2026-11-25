@@ -137,7 +137,9 @@ impl Render for Player {
             markers,
             scrub_ms: self.scrub,
             track_width_px: f64::from(self.slider.read(cx).bounds().size.width),
-            available: cfg!(target_os = "macos"),
+            // Every platform plays now: macOS natively, Windows and Linux
+            // from the backend's playback ring.
+            available: true,
         });
         if self.scrub.is_none() {
             let percent = if self.status.duration_ms > 0 {
@@ -157,10 +159,7 @@ impl Render for Player {
             .type_scale(text::LABEL)
             .text_color(hsla(t.foreground));
         if self.active {
-            #[cfg(target_os = "macos")]
             let slot = self.slot(cx);
-            #[cfg(not(target_os = "macos"))]
-            let slot = div().h(px(100.)).into_any_element();
             body = body.child(
                 div()
                     .id("recording-player-video")
