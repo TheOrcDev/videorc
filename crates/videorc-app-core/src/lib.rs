@@ -11,6 +11,7 @@ pub mod account;
 pub mod accounts;
 pub mod assets;
 pub mod buddy;
+pub mod bundled;
 pub mod captions;
 pub mod chat;
 pub mod client;

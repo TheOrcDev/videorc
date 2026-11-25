@@ -45,7 +45,7 @@ const CREATION_MANIFEST: &str = "pack/manifest.json";
 pub fn bundled_root() -> PathBuf {
     std::env::var_os("VIDEORC_BUDDY_BUNDLED_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../desktop/resources/buddy"))
+        .unwrap_or_else(|| videorc_app_core::bundled::current().buddy.clone())
 }
 
 /// One sheet of a pack, decoded once.

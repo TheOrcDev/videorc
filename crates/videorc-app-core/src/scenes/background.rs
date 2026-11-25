@@ -28,6 +28,24 @@ pub const BUNDLED_BACKGROUNDS: [(&str, &str); 10] = [
     ("builtin-bg-10", "focus.webp"),
 ];
 
+/// `BUNDLED_BACKGROUND_MANIFEST`'s names, by id (the Images page's preset
+/// tiles).
+pub fn bundled_background_name(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "builtin-bg-01" => "Code Demo",
+        "builtin-bg-02" => "Product Launch",
+        "builtin-bg-03" => "Tutorial",
+        "builtin-bg-04" => "Livestream",
+        "builtin-bg-05" => "Minimal Desk",
+        "builtin-bg-06" => "Podcast",
+        "builtin-bg-07" => "Webinar",
+        "builtin-bg-08" => "Dark Mode",
+        "builtin-bg-09" => "Light Mode",
+        "builtin-bg-10" => "Focus",
+        _ => return None,
+    })
+}
+
 /// `LIVE_BACKGROUND_IDS`, in `LIVE_BACKGROUND_DEFAULT_LOOKS`' order.
 pub const LIVE_BACKGROUND_IDS: [&str; 10] = [
     "silk",
