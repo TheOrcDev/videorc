@@ -1,15 +1,22 @@
 //! The stats bar (P945–P951): session chip, Clock / Viewers / Followers
-//! cells from [`LiveDashboard`], and Wide-only sparklines.
+//! cells from [`LiveDashboard`], Wide-only sparklines, and drag-reorder.
 
-use gpui::{AnyElement, FontWeight, IntoElement, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, Context, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px,
+};
 use videorc_app_core::stream_manager::copy::{
     HISTORY_CHIP, ON_AIR_CHIP, RECORDING_CHIP, STATS_REGION,
 };
 use videorc_app_core::stream_manager::dashboard::{LiveDashboard, SessionChatTotals, SessionState};
 use videorc_app_core::stream_manager::format::{group_thousands, parse_time};
+use videorc_app_core::studio::families::{
+    DEFAULT_STAT_ORDER, StatsLayout, arranged_stat_ids, move_stat,
+};
 use videorc_app_core::studio::timecode::format_timecode;
 use videorc_kit::{
     badge::{Badge, BadgeVariant},
+    context_menu::ContextMenu,
+    dropdown_menu::{Menu, MenuItem},
     theme::hsla,
     tokens::Theme,
 };
@@ -52,9 +59,10 @@ impl SessionChip {
     }
 }
 
-/// One stats cell: label, value, optional Wide sparkline.
+/// One stats cell: id (layout key), label, value, optional Wide sparkline.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StatCell {
+    pub id: &'static str,
     pub label: &'static str,
     pub value: String,
     pub spark: Vec<f32>,
@@ -64,7 +72,7 @@ pub struct StatCell {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StatsView {
     pub chip: SessionChip,
-    pub cells: [StatCell; 6],
+    pub cells: Vec<StatCell>,
 }
 
 impl Default for StatsView {
@@ -86,41 +94,38 @@ impl StatsView {
         let subs = subs_value(board);
         let tips = tips_value(board);
         let (pace, pace_spark) = chat_pace_value(board);
-        Self {
-            chip,
-            cells: [
-                StatCell {
-                    label: "Clock",
-                    value: clock,
-                    spark: Vec::new(),
-                },
-                StatCell {
-                    label: "Viewers",
-                    value: viewers,
-                    spark: viewer_spark,
-                },
-                StatCell {
-                    label: "Followers",
-                    value: followers,
-                    spark: Vec::new(),
-                },
-                StatCell {
-                    label: "Subs and members",
-                    value: subs,
-                    spark: Vec::new(),
-                },
-                StatCell {
-                    label: "Tips",
-                    value: tips,
-                    spark: Vec::new(),
-                },
-                StatCell {
-                    label: "Chat pace",
-                    value: pace,
-                    spark: pace_spark,
-                },
-            ],
-        }
+        let by_id = [
+            ("session", "Clock", clock, Vec::new()),
+            ("viewers", "Viewers", viewers, viewer_spark),
+            ("followers", "Followers", followers, Vec::new()),
+            ("supporters", "Subs and members", subs, Vec::new()),
+            ("tips", "Tips", tips, Vec::new()),
+            ("chat", "Chat pace", pace, pace_spark),
+        ];
+        let cells = DEFAULT_STAT_ORDER
+            .iter()
+            .filter_map(|id| {
+                by_id.iter().find(|(cell_id, _, _, _)| cell_id == id).map(
+                    |(id, label, value, spark)| StatCell {
+                        id,
+                        label,
+                        value: value.clone(),
+                        spark: spark.clone(),
+                    },
+                )
+            })
+            .collect();
+        Self { chip, cells }
+    }
+
+    /// Cells in the stored layout order, with hidden ones dropped.
+    pub fn arranged(&self, layout: &StatsLayout) -> Vec<StatCell> {
+        let by_id: std::collections::HashMap<&str, &StatCell> =
+            self.cells.iter().map(|cell| (cell.id, cell)).collect();
+        arranged_stat_ids(layout)
+            .into_iter()
+            .filter_map(|id| by_id.get(id.as_str()).cloned().cloned())
+            .collect()
     }
 }
 
@@ -246,11 +251,42 @@ fn sparkline(points: &[f32], ink: gpui::Hsla) -> Option<AnyElement> {
     )
 }
 
-/// The bar under the header.
-pub fn stats_bar(t: &Theme, view: &StatsView, width: f32) -> AnyElement {
+/// Drag payload for reordering a stats cell.
+#[derive(Clone)]
+struct StatDrag {
+    id: SharedString,
+}
+
+impl Render for StatDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+        div()
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(4.))
+            .bg(gpui::rgba(0x00000080))
+            .text_color(gpui::white())
+            .text_size(px(12.))
+            .child(self.id.clone())
+    }
+}
+
+/// The bar under the header. `on_layout` persists a new order after drag or
+/// Move left / Move right.
+pub fn stats_bar(
+    t: &Theme,
+    view: &StatsView,
+    layout: &StatsLayout,
+    width: f32,
+    on_layout: impl Fn(StatsLayout, &mut App) + Clone + 'static,
+) -> AnyElement {
     let wide = width >= WIDE_MIN;
     let muted = hsla(t.muted_foreground);
     let chip = view.chip;
+    let cells = view.arranged(layout);
+    let shown: Vec<SharedString> = cells
+        .iter()
+        .map(|cell| SharedString::from(cell.id))
+        .collect();
     div()
         .id("stream-stats")
         .flex_none()
@@ -266,17 +302,27 @@ pub fn stats_bar(t: &Theme, view: &StatsView, width: f32) -> AnyElement {
         .when_some(chip.words(), |bar, words| {
             bar.child(Badge::new(words).variant(chip.badge()))
         })
-        .children(view.cells.clone().into_iter().map(move |cell| {
+        .children(cells.into_iter().enumerate().map(|(index, cell)| {
             let spark = if wide {
                 sparkline(&cell.spark, muted)
             } else {
                 None
             };
-            div()
+            let id = SharedString::from(cell.id);
+            let drag = StatDrag { id: id.clone() };
+            let layout_for_drop = layout.clone();
+            let on_drop = on_layout.clone();
+            let shown_for_menu = shown.clone();
+            let layout_for_menu = layout.clone();
+            let on_menu = on_layout.clone();
+            let cell_id = id.clone();
+            let body = div()
+                .id(SharedString::from(format!("stat-{}", cell.id)))
                 .flex()
                 .items_center()
                 .gap(px(6.))
                 .min_w(px(0.))
+                .cursor_move()
                 .child(
                     div()
                         .flex()
@@ -292,6 +338,87 @@ pub fn stats_bar(t: &Theme, view: &StatsView, width: f32) -> AnyElement {
                         ),
                 )
                 .children(spark)
+                .on_drag(drag, |info: &StatDrag, _, _, cx| cx.new(|_| info.clone()))
+                .on_drop(move |info: &StatDrag, _, app| {
+                    if info.id.as_ref() == cell_id.as_ref() {
+                        return;
+                    }
+                    let without: Vec<String> = layout_for_drop
+                        .order
+                        .iter()
+                        .filter(|candidate| candidate.as_str() != info.id.as_ref())
+                        .cloned()
+                        .collect();
+                    let neighbor = cell_id.as_ref();
+                    let Some(neighbor_ix) = without.iter().position(|c| c == neighbor) else {
+                        return;
+                    };
+                    let next = move_stat(&layout_for_drop, info.id.as_ref(), neighbor_ix);
+                    if next != layout_for_drop {
+                        on_drop(next, app);
+                    }
+                });
+            ContextMenu::new(SharedString::from(format!("stat-menu-{}", cell.id)), body)
+                .menu(move |_, _| {
+                    let position = shown_for_menu
+                        .iter()
+                        .position(|candidate| candidate.as_ref() == id.as_ref())
+                        .unwrap_or(index);
+                    let can_left = position > 0;
+                    let can_right = position + 1 < shown_for_menu.len();
+                    let left_neighbor = can_left.then(|| shown_for_menu[position - 1].clone());
+                    let right_neighbor = can_right.then(|| shown_for_menu[position + 1].clone());
+                    let layout = layout_for_menu.clone();
+                    let on_left = on_menu.clone();
+                    let on_right = on_menu.clone();
+                    let move_id = id.clone();
+                    Menu::new()
+                        .item(MenuItem::new("Move left").disabled(!can_left).on_select(
+                            move |_, app| {
+                                let Some(neighbor) = &left_neighbor else {
+                                    return;
+                                };
+                                let without: Vec<String> = layout
+                                    .order
+                                    .iter()
+                                    .filter(|c| c.as_str() != move_id.as_ref())
+                                    .cloned()
+                                    .collect();
+                                let Some(ix) = without.iter().position(|c| c == neighbor.as_ref())
+                                else {
+                                    return;
+                                };
+                                let next = move_stat(&layout, move_id.as_ref(), ix);
+                                if next != layout {
+                                    on_left(next, app);
+                                }
+                            },
+                        ))
+                        .item(MenuItem::new("Move right").disabled(!can_right).on_select({
+                            let move_id = id.clone();
+                            let layout = layout_for_menu.clone();
+                            move |_, app| {
+                                let Some(neighbor) = &right_neighbor else {
+                                    return;
+                                };
+                                let without: Vec<String> = layout
+                                    .order
+                                    .iter()
+                                    .filter(|c| c.as_str() != move_id.as_ref())
+                                    .cloned()
+                                    .collect();
+                                let Some(ix) = without.iter().position(|c| c == neighbor.as_ref())
+                                else {
+                                    return;
+                                };
+                                let next = move_stat(&layout, move_id.as_ref(), ix + 1);
+                                if next != layout {
+                                    on_right(next, app);
+                                }
+                            }
+                        }))
+                })
+                .into_any_element()
         }))
         .into_any_element()
 }
