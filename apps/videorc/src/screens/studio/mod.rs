@@ -205,6 +205,10 @@ impl StudioPage {
             .detach();
         cx.observe(&show_stage, |_, _, cx| cx.notify()).detach();
         cx.observe(&talk_show_host, |_, _, cx| cx.notify()).detach();
+        // C3: Scenes room-open line toggles TalkShowRoomHost::scenes_enabled.
+        scenes.update(cx, |scenes, cx| {
+            scenes.bind_room_host(talk_show_host.clone(), cx);
+        });
         // The preview's notes: Open Health goes through the page's door, and
         // the check's line redraws the docked row.
         let studio = transport.read(cx).studio();

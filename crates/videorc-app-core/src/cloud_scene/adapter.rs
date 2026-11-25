@@ -85,6 +85,11 @@ pub fn stage_layout_clears_scene(previous_layout: Option<&str>, next_layout: &st
     previous_layout.is_some_and(|previous| previous != next_layout)
 }
 
+/// How long `applySceneToRoom` polls for camera/screen tracks (`readyWaitMs`).
+pub const ROOM_SOURCES_READY_WAIT_MS: u64 = 2_000;
+/// Poll interval while waiting for room sources (`sleep(100)`).
+pub const ROOM_SOURCES_READY_POLL_MS: u64 = 100;
+
 /// Whether the room's camera/screen tracks satisfy a translated scene.
 pub fn room_sources_ready(
     needs_camera: bool,
@@ -103,5 +108,46 @@ pub fn room_sources_ready(
         Err("This scene shows a screen. Share your screen in the room first.")
     } else {
         Err("This scene shows your camera. Turn the room camera on first.")
+    }
+}
+
+/// How many poll ticks fit in the default ready wait (inclusive of the
+/// first immediate check).
+pub fn room_sources_ready_poll_ticks(wait_ms: u64, poll_ms: u64) -> u32 {
+    if poll_ms == 0 {
+        return 1;
+    }
+    (wait_ms / poll_ms).saturating_add(1) as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn room_sources_ready_matches_adapter() {
+        assert!(room_sources_ready(false, false, false, false, false, false).is_ok());
+        assert!(room_sources_ready(true, false, true, false, false, false).is_ok());
+        assert!(room_sources_ready(true, false, false, true, false, false).is_ok());
+        assert_eq!(
+            room_sources_ready(true, false, false, false, false, false),
+            Err("This scene shows your camera. Turn the room camera on first.")
+        );
+        assert_eq!(
+            room_sources_ready(false, true, false, false, false, false),
+            Err("This scene shows a screen. Share your screen in the room first.")
+        );
+        assert!(room_sources_ready(false, true, false, false, true, false).is_ok());
+        assert!(room_sources_ready(false, true, false, false, false, true).is_ok());
+    }
+
+    #[test]
+    fn ready_poll_ticks_cover_the_wait() {
+        assert_eq!(
+            room_sources_ready_poll_ticks(ROOM_SOURCES_READY_WAIT_MS, ROOM_SOURCES_READY_POLL_MS),
+            21
+        );
+        assert_eq!(room_sources_ready_poll_ticks(0, 100), 1);
+        assert_eq!(room_sources_ready_poll_ticks(100, 0), 1);
     }
 }
