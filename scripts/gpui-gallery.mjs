@@ -459,6 +459,10 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
       // then back as it was. The app applies store changes live.
       const restore = screen.settings ? await patchSetting(rpc, screen.settings) : null
       if (restore) await sleep(SETTLE_MS)
+      if (screen.seed) {
+        await command(screen.seed.command, screen.seed.params ?? {})
+        await sleep(SETTLE_MS)
+      }
       for (const look of LOOKS) {
         const shot = { look }
         const name = shotName(screen.id, look, 'gpui')
@@ -517,6 +521,12 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
         const electron = electronShot(screen, look, baselineDir, imgDir)
         if (electron) shot.electron = electron
         entry.shots.push(shot)
+      }
+      if (screen.after) {
+        await command(screen.after.command, screen.after.params ?? {}).catch((error) =>
+          log(`${screen.id} after: ${error.message}`)
+        )
+        await sleep(SETTLE_MS)
       }
       if (restore) await restore().catch((error) => log(`${screen.id}: ${error.message}`))
       if (screen.toast) await sleep(TOAST_MS + 500)

@@ -247,6 +247,9 @@ pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     // S2.3b: the Studio slot's rect, which Electron's probes read from the
     // DOM with `eval-js`.
     "studio-dock-slot",
+    // Plan 260 C4: gallery Show stage / Vertical stream seeds (no LiveKit).
+    "gallery-seed-show-stage",
+    "gallery-seed-vertical-stream",
     "studio-put-setting",
     "studio-record",
     // L6: "Check this computer" as the Output page starts it

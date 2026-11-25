@@ -65,6 +65,8 @@ pub const IMPLEMENTED_COMMANDS: &[&str] = &[
 /// `window.__videorcSmoke*`). The app's Studio handler takes exactly these.
 pub const STUDIO_COMMANDS: &[&str] = &[
     "enable-synthetic-source",
+    "gallery-seed-show-stage",
+    "gallery-seed-vertical-stream",
     "preview-surface-scene-state",
     "scheduled-mutate",
     "scheduled-state",

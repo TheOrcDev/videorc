@@ -56,6 +56,8 @@ use videorc_protocol::{Device, DeviceKind, DeviceStatus};
 /// The commands this handler takes.
 pub const STUDIO_SMOKE_COMMANDS: &[&str] = &[
     "enable-synthetic-source",
+    "gallery-seed-show-stage",
+    "gallery-seed-vertical-stream",
     "select-camera-device",
     "select-camera-shape",
     "select-layout-preset",
@@ -412,6 +414,64 @@ impl StudioSmoke {
             .await
             .map_err(|error| format!("The capture config was not saved: {error}"))?;
         Ok(json!({ "configured": true, "state": state_json(&self.studio.snapshot()) }))
+    }
+
+    /// Plan 260 C4: synthetic talk-show room for the screen gallery.
+    async fn gallery_seed_show_stage(&self, params: Map<String, Value>) -> Result<Value, String> {
+        let kind = text_param(&params, "kind").unwrap_or("open");
+        let kind = crate::studio::gallery_show_stage::GalleryShowStage::parse(kind)
+            .ok_or_else(|| {
+                format!(
+                    "gallery-seed-show-stage kind must be closed, open, screens or host-camera-off (got {kind})."
+                )
+            })?;
+        self.studio.seed_gallery_show_stage(kind).await;
+        Ok(json!({
+            "seeded": true,
+            "kind": kind.as_str(),
+            "previewReplaced": kind != crate::studio::gallery_show_stage::GalleryShowStage::Closed,
+        }))
+    }
+
+    /// Plan 260 C4: arm YouTube Vertical so the Studio's Vertical stream
+    /// slot shows (as the Electron baseline's `setVerticalLeg`).
+    async fn gallery_seed_vertical_stream(
+        &self,
+        params: Map<String, Value>,
+    ) -> Result<Value, String> {
+        self.settings_ready().await?;
+        let on = params.get("on").and_then(Value::as_bool).unwrap_or(true);
+        self.studio
+            .update_capture_config(|config| {
+                if let Some(obj) = config.as_object_mut() {
+                    obj.insert("streamEnabled".into(), json!(on));
+                }
+                if let Some(streaming) = config.get_mut("streaming").and_then(|v| v.as_object_mut())
+                {
+                    streaming.insert("enabled".into(), json!(on));
+                    if let Some(targets) =
+                        streaming.get_mut("targets").and_then(|v| v.as_array_mut())
+                    {
+                        for target in targets {
+                            let id = target.get("id").and_then(|v| v.as_str());
+                            if id == Some("youtube-vertical")
+                                && let Some(entry) = target.as_object_mut()
+                            {
+                                entry.insert("enabled".into(), json!(on));
+                            }
+                        }
+                        let enabled: Vec<Value> = targets
+                            .iter()
+                            .filter(|t| t.get("enabled").and_then(|v| v.as_bool()) == Some(true))
+                            .filter_map(|t| t.get("id").cloned())
+                            .collect();
+                        streaming.insert("enabledTargetIds".into(), json!(enabled));
+                    }
+                }
+            })
+            .await
+            .map_err(|error| format!("Vertical stream seed failed: {error}"))?;
+        Ok(json!({ "seeded": true, "on": on }))
     }
 
     /// `studio-performance-check {displayWidth?, displayHeight?}`: "Check
@@ -864,6 +924,8 @@ impl SmokeCommandHandler for StudioSmoke {
         Box::pin(async move {
             match command {
                 "enable-synthetic-source" => self.enable_synthetic_source(params).await,
+                "gallery-seed-show-stage" => self.gallery_seed_show_stage(params).await,
+                "gallery-seed-vertical-stream" => self.gallery_seed_vertical_stream(params).await,
                 "studio-state" => Ok(state_json(&self.studio.snapshot())),
                 "studio-record" => self.record(params).await,
                 "studio-stop" => self.stop(params).await,
