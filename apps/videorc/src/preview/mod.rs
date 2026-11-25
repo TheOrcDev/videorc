@@ -286,7 +286,34 @@ impl Preview {
     /// The Scene canvas shows the live picture (X5 `liveCanvasActive`):
     /// the docked layer is here, not in its own window.
     pub fn live_canvas(&self) -> bool {
-        SCENE_HOSTS_DOCKED && self.mode == WindowMode::Docked && self.native_ready()
+        SCENE_HOSTS_DOCKED
+            && self.mode == WindowMode::Docked
+            && !self.is_closed()
+            && self.native_ready()
+    }
+
+    /// Show preview here (P540): a closed Preview opens docked, one in its
+    /// own window comes back to the dock.
+    pub fn show_docked(&mut self, cx: &mut gpui::Context<Self>) {
+        #[cfg(target_os = "macos")]
+        if self.closed {
+            self.open_docked(cx);
+        } else if self.mode == WindowMode::Floating {
+            self.dock(cx);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = cx;
+    }
+
+    /// The Scene page's entry (P532): a closed Preview opens docked there;
+    /// one in its own window stays where it is.
+    pub fn open_docked_if_closed(&mut self, cx: &mut gpui::Context<Self>) {
+        #[cfg(target_os = "macos")]
+        if self.closed {
+            self.open_docked(cx);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = cx;
     }
 
     /// What the Studio slot says, or nothing while a frame shows there.

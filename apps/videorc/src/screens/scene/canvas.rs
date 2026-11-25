@@ -207,7 +207,7 @@ impl ScenePage {
             let preview = self.preview.read(cx);
             (
                 preview.live_canvas(),
-                preview.mode() == WindowMode::Docked,
+                preview.mode() == WindowMode::Docked && !preview.is_closed(),
                 preview.can_float(),
             )
         };
@@ -463,18 +463,22 @@ impl ScenePage {
                     .accessibility_label(words::POP_OUT)
                     .child(icon(IconName::ArrowSquareOut, 14., muted))
                     .child(words::POP_OUT)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.preview
+                            .update(cx, |preview, cx| preview.toggle_floating(cx));
+                    }))
             } else {
+                // From its own window or closed, the Preview docks here.
                 Button::new("scene-stage-show-live")
                     .accessibility_label(words::SHOW_HERE)
                     .child(icon(IconName::Eye, 14., muted))
                     .child(words::SHOW_HERE)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.preview
+                            .update(cx, |preview, cx| preview.show_docked(cx));
+                    }))
             };
-            right = right.child(button.variant(ButtonVariant::Ghost).on_click(cx.listener(
-                |this, _, _, cx| {
-                    this.preview
-                        .update(cx, |preview, cx| preview.toggle_floating(cx));
-                },
-            )));
+            right = right.child(button.variant(ButtonVariant::Ghost));
         }
 
         div()
