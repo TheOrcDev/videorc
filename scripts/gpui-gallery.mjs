@@ -3,7 +3,7 @@
 //
 //   pnpm gallery:gpui [-- --build DIR] [--baseline DIR] [--out DIR]
 //                     [--screens=studio,settings-*] [--since DIR] [--all]
-//                     [--pages-only]
+//                     [--pages-only] [--electron-only]
 //
 // Shoots every GPUI screen on main, dark and light, at a 1280x800 window,
 // next to the S0.10 Electron baseline shot of the same screen
@@ -19,6 +19,8 @@
 // `--since DIR` (a previous run's folder) keeps only screens whose GPUI shots
 // changed; screens whose macOS rows are all ticked are left out unless
 // `--all`. `--pages-only` rebuilds the pages from an existing manifest.
+// `--electron-only` prepares the Electron half (`<out>/electron/`) with no
+// app run; a later run copies its JPEGs.
 //
 // It builds nothing: the app and backend are the compile sentinel's
 // (`~/cloud-test/gpui-builds/latest/`), hard-linked into a scratch
@@ -88,6 +90,7 @@ const { values } = parseArgs({
     since: { type: 'string' },
     all: { type: 'boolean', default: false },
     'pages-only': { type: 'boolean', default: false },
+    'electron-only': { type: 'boolean', default: false },
     sha: { type: 'string' }
   }
 })
@@ -266,6 +269,56 @@ async function seedProfile({ app, stateDir }) {
   }
 }
 
+/**
+ * The Electron half of a shot: the S0.10 baseline PNG as a page-sized JPEG in
+ * `imgDir`, made once in `<out>/electron/img/` and copied from there.
+ */
+function electronShot(screen, look, baselineDir, imgDir) {
+  const relative = baselinePath(screen, look)
+  if (!relative) return null
+  const source = join(baselineDir, relative)
+  if (!existsSync(source)) return { baseline: relative, missing: true }
+  const file = `${shotName(screen.id, look, 'electron')}.jpg`
+  const cacheDir = join(resolve(values.out), 'electron', 'img')
+  mkdirSync(cacheDir, { recursive: true })
+  const cached = join(cacheDir, file)
+  if (!existsSync(cached)) toJpeg(source, cached)
+  if (resolve(imgDir) !== cacheDir) copyFileSync(cached, join(imgDir, file))
+  return { baseline: relative, image: `img/${file}` }
+}
+
+/** `--electron-only`: the Electron half of every screen, with no app run. */
+function electronOnly({ screens, baselineDir, parsed }) {
+  const runDir = join(resolve(values.out), 'electron')
+  const imgDir = join(runDir, 'img')
+  mkdirSync(imgDir, { recursive: true })
+  const entries = shootingOrder(screens).map((screen) => ({
+    id: screen.id,
+    title: screen.title,
+    deck: screen.deck,
+    baseline: screen.baseline,
+    parity: rowsFor(parsed, screen),
+    shots: LOOKS.map((look) => {
+      const electron = electronShot(screen, look, baselineDir, imgDir)
+      return {
+        look,
+        ...(electron ? { electron } : {}),
+        gpui: { error: "Waiting for the compile sentinel's build" }
+      }
+    })
+  }))
+  return {
+    runDir,
+    manifest: {
+      sha: 'electron',
+      date: new Date().toISOString().slice(0, 10),
+      window: WINDOW,
+      baseline: baselineDir,
+      screens: entries
+    }
+  }
+}
+
 async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed }) {
   const jxa = join(stateDir, 'windows.js')
   writeFileSync(jxa, WINDOWS_JXA)
@@ -345,17 +398,8 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
           shot.gpui = { error: String(error?.message ?? error).slice(0, 300) }
           log(`${name}: ${shot.gpui.error}`)
         }
-        const relative = baselinePath(screen, look)
-        if (relative) {
-          const source = join(baselineDir, relative)
-          if (existsSync(source)) {
-            const jpg = join(imgDir, `${shotName(screen.id, look, 'electron')}.jpg`)
-            toJpeg(source, jpg)
-            shot.electron = { baseline: relative, image: `img/${basename(jpg)}` }
-          } else {
-            shot.electron = { baseline: relative, missing: true }
-          }
-        }
+        const electron = electronShot(screen, look, baselineDir, imgDir)
+        if (electron) shot.electron = electron
         entry.shots.push(shot)
       }
       if (screen.toast) await sleep(200)
@@ -414,6 +458,27 @@ function writePages(manifest, runDir, previous) {
 
 async function main() {
   const parsed = parseParity(readFileSync(join(repoRoot, 'docs', 'gpui', 'parity.md'), 'utf8'))
+  if (values['electron-only']) {
+    const { runDir, manifest } = electronOnly({
+      screens: pickScreens(values.screens),
+      baselineDir: resolve(values.baseline),
+      parsed
+    })
+    writeFileSync(join(runDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+    writePages(manifest, runDir, null)
+    const pairs = manifest.screens.flatMap((entry) => entry.shots.map((shot) => ({ entry, shot })))
+    const ready = pairs.filter(({ shot }) => shot.electron?.image).length
+    log(`Electron half: ${ready}/${pairs.length} shots ready in ${join(runDir, 'img')}`)
+    for (const { entry, shot } of pairs.filter(({ shot }) => !shot.electron?.image)) {
+      log(
+        `no Electron shot: ${entry.id}/${shot.look}` +
+          (shot.electron?.missing
+            ? ` (${shot.electron.baseline} is missing)`
+            : ' (the baseline has no such screen)')
+      )
+    }
+    return
+  }
   const buildDir = resolve(values.build)
   const sha = buildSha(buildDir)
   const runDir = join(resolve(values.out), sha)

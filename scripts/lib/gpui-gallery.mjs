@@ -354,6 +354,7 @@ const escape = (text) =>
     .replaceAll('"', '&quot;')
 
 const PAGE_STYLE = `
+  gx-wide > section[data-question] { min-width: 0; max-width: 100%; box-sizing: border-box; --gx-option-min: 0px; }
   .pair { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }
   .pair figure { margin: 0; min-width: 0; }
   .pair img { display: block; box-sizing: border-box; width: 100%; max-width: 100%; height: auto; border-radius: 10px; border: 1px solid var(--gx-line); }
@@ -401,11 +402,13 @@ export function screenCard(entry) {
     ? `<p class="rows"><b>${parity.rows.length} rows</b> (${parity.ticked} ticked on macOS): ${escape(rowRanges(parity.rows.map((row) => row.id)))}. Sections: ${escape(parity.sections.join('; '))}.</p>`
     : '<p class="rows">No parity rows matched this screen.</p>'
   return `
+  <gx-wide><section data-question="${escape(entry.id)}" data-choice="Matches">
   <h2 id="${escape(entry.id)}">${escape(entry.title)}</h2>
   ${rows}
-  <gx-wide><gx-tabs>
+  <gx-tabs>
 ${tabs}
-  </gx-tabs></gx-wide>
+  </gx-tabs>
+  </section></gx-wide>
   <gx-question tag="${escape(entry.id)}" title="${escape(entry.title)}: does GPUI match Electron?">
     <gx-choice value="Matches">Matches<small>I tick this screen's rows on macOS.</small></gx-choice>
     <gx-choice value="Small issues">Small issues<small>Say what in the note; the owning lane gets it.</small></gx-choice>
