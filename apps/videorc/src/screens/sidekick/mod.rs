@@ -29,7 +29,7 @@ use videorc_app_core::studio::ui_local::UiLocal;
 use videorc_app_core::user_error::{
     Failure, UserErrorContext, UserErrorKind, toast_user_error, user_error_message,
 };
-use videorc_app_core::{BackendClient, BackendEvent, Studio};
+use videorc_app_core::{BackendClient, BackendEvent, BackendState, Studio};
 use videorc_kit::dialog::DialogHandle;
 use videorc_kit::page_tabs::PageTabs;
 use videorc_kit::theme::FONT;
@@ -149,6 +149,9 @@ pub struct SidekickScreen {
     studio: Arc<AppStudio>,
     runtime: tokio::runtime::Handle,
     local_dir: PathBuf,
+    /// The backend's bootstrap, for the single-use file capabilities
+    /// Community's Export… and Import… hand the backend.
+    backend_state: tokio::sync::watch::Receiver<BackendState>,
     tab: Tab,
     settings: Option<CohostSettingsView>,
     state: CohostState,
@@ -171,6 +174,7 @@ impl SidekickScreen {
         studio: Arc<AppStudio>,
         runtime: tokio::runtime::Handle,
         local_dir: PathBuf,
+        backend_state: tokio::sync::watch::Receiver<BackendState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let tab = Tab::from_id(UiLocal::in_dir(&local_dir).buddy_tab());
@@ -179,6 +183,7 @@ impl SidekickScreen {
             studio: studio.clone(),
             runtime: runtime.clone(),
             local_dir,
+            backend_state,
             tab,
             settings: None,
             state: CohostState::default(),

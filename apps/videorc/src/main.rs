@@ -520,6 +520,7 @@ fn main() -> Result<()> {
                 studio.clone(),
                 core_handle.clone(),
                 paths.user_data_dir.clone(),
+                library_files.backend.clone(),
                 cx,
             )
         });

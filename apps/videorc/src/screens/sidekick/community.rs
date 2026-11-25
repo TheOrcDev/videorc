@@ -19,6 +19,8 @@ use videorc_app_core::buddy::community::{
 };
 use videorc_app_core::buddy::copy as words;
 use videorc_app_core::client::RpcError;
+use videorc_app_core::resources::capability::{IssueOptions, ResourceKind};
+use videorc_app_core::resources::issue_capability;
 use videorc_app_core::stream_manager::buddy::CohostSettingsView;
 use videorc_app_core::user_error::{
     Failure, UserError, UserErrorContext, UserErrorKind, user_error_message,
@@ -39,6 +41,7 @@ use videorc_kit::spinner::Spinner;
 use videorc_kit::switch::Switch;
 use videorc_kit::textarea::{Textarea, TextareaState};
 use videorc_kit::theme::{self, TypeScale, hsla};
+use videorc_kit::toast::{ToastData, ToastKind};
 use videorc_kit::tokens::{radius, size, text};
 use videorc_kit::tooltip::tooltip;
 use videorc_protocol::community::{CommunitySettings, REGULAR_STREAMS_MAX, REGULAR_STREAMS_MIN};
@@ -247,6 +250,16 @@ pub struct CommunityState {
     pub memory_target: Option<PersonMemory>,
     pub copied: bool,
     copied_epoch: u64,
+    /// Export… or Import… while its file is being written or read.
+    pub file_busy: Option<CommunityFile>,
+}
+
+/// Export… and Import… (D12): a picked folder or file goes to the backend
+/// as a single-use capability, never as a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommunityFile {
+    Export,
+    Import,
 }
 
 impl CommunityState {
@@ -308,6 +321,7 @@ impl CommunityState {
             memory_target: None,
             copied: false,
             copied_epoch: 0,
+            file_busy: None,
         }
     }
 }
@@ -1025,6 +1039,8 @@ pub fn render_community(
                                     }
                                 }),
                         )
+                        .child(file_button(CommunityFile::Export, state.file_busy, cx))
+                        .child(file_button(CommunityFile::Import, state.file_busy, cx))
                         .child(
                             Button::new("forget-everyone")
                                 .variant(ButtonVariant::Outline)
@@ -1805,4 +1821,230 @@ fn forget_everyone_dialog(state: &CommunityState, cx: &mut Context<SidekickScree
                 });
             }),
     )
+}
+
+fn file_button(
+    which: CommunityFile,
+    busy: Option<CommunityFile>,
+    cx: &mut Context<SidekickScreen>,
+) -> Button {
+    let (id, label, working) = match which {
+        CommunityFile::Export => ("community-export", "Export…", "Exporting…"),
+        CommunityFile::Import => ("community-import", "Import…", "Importing…"),
+    };
+    let entity = cx.entity();
+    Button::new(id)
+        .variant(ButtonVariant::Outline)
+        .size(ButtonSize::Xs)
+        .label(if busy == Some(which) { working } else { label })
+        .disabled(busy.is_some())
+        .on_click(move |_, _, cx| {
+            entity.update(cx, |screen, cx| screen.pick_community_file(which, cx));
+        })
+}
+
+/// `plural(n, one, many)`: "1 person", "3 people".
+fn plural(count: u64, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Why a community file failed: the capability Videorc couldn't issue, or
+/// the backend's answer.
+enum FileFailure {
+    Issue(String),
+    Rpc(RpcError),
+}
+
+impl SidekickScreen {
+    /// Export… picks a folder, Import… a file; a cancelled picker does
+    /// nothing.
+    pub(super) fn pick_community_file(&mut self, which: CommunityFile, cx: &mut Context<Self>) {
+        if self
+            .community
+            .as_ref()
+            .is_none_or(|community| community.file_busy.is_some())
+        {
+            return;
+        }
+        let export = which == CommunityFile::Export;
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: !export,
+            directories: export,
+            multiple: false,
+            prompt: Some((if export { "Export" } else { "Import" }).into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update(cx, |screen, cx| screen.run_community_file(which, path, cx));
+        })
+        .detach();
+    }
+
+    fn run_community_file(
+        &mut self,
+        which: CommunityFile,
+        path: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(community) = self.community.as_mut() else {
+            return;
+        };
+        community.file_busy = Some(which);
+        cx.notify();
+        let bootstrap = self.backend_state.borrow().bootstrap().cloned();
+        let backend = self.studio.backend().clone();
+        let target = path.clone();
+        let job = self.runtime.spawn(async move {
+            let bootstrap = bootstrap.ok_or_else(|| {
+                FileFailure::Issue("Videorc is reconnecting. Try again in a moment.".into())
+            })?;
+            let (kind, field, method) = match which {
+                CommunityFile::Export => (
+                    ResourceKind::OutputDirectory,
+                    "outputDirectoryCapability",
+                    "cohost.community.export",
+                ),
+                CommunityFile::Import => (
+                    ResourceKind::InputFile,
+                    "sourceCapability",
+                    "cohost.community.import",
+                ),
+            };
+            let (_, issued) = issue_capability(&bootstrap, &target, kind, IssueOptions::default())
+                .await
+                .map_err(FileFailure::Issue)?;
+            backend
+                .request(method, json!({ field: issued.capability_id }))
+                .await
+                .map_err(FileFailure::Rpc)
+        });
+        cx.spawn(async move |this, cx| {
+            let answer = job.await;
+            let _ = this.update(cx, |screen, cx| {
+                if let Some(community) = screen.community.as_mut() {
+                    community.file_busy = None;
+                }
+                match answer {
+                    Ok(Ok(value)) => {
+                        screen.community_file_done(which, &path, &value, cx);
+                        if which == CommunityFile::Import {
+                            screen.refresh_community(cx);
+                        }
+                    }
+                    Ok(Err(failure)) => screen.community_file_failed(which, &path, failure, cx),
+                    Err(_) => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// A finished file is news out of view: one toast (id `community-file`).
+    fn community_file_done(
+        &mut self,
+        which: CommunityFile,
+        path: &std::path::Path,
+        value: &Value,
+        cx: &mut Context<Self>,
+    ) {
+        let count = |key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0);
+        let people = plural(count("people"), "person", "people");
+        let toast = match which {
+            CommunityFile::Export => {
+                let written = value
+                    .get("fileName")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                ToastData::new(
+                    ToastKind::Success,
+                    format!("Exported {people} to {written}"),
+                )
+                .description(format!(
+                    "In {}. The file is yours: Import… reads it on another computer.",
+                    file_name(path)
+                ))
+            }
+            CommunityFile::Import => {
+                let toast = ToastData::new(
+                    ToastKind::Success,
+                    format!("Imported {people} from {}", file_name(path)),
+                );
+                let merged = count("merged");
+                if merged > 0 {
+                    toast.description(format!(
+                        "{} already here; their streams now count once.",
+                        plural(merged, "person was", "people were")
+                    ))
+                } else {
+                    toast
+                }
+            }
+        };
+        press_community_toast(toast, cx);
+    }
+
+    /// "Couldn't export your community" / "Couldn't import {file}".
+    fn community_file_failed(
+        &mut self,
+        which: CommunityFile,
+        path: &std::path::Path,
+        failure: FileFailure,
+        cx: &mut Context<Self>,
+    ) {
+        let context = UserErrorContext {
+            action: match which {
+                CommunityFile::Export => "export",
+                CommunityFile::Import => "import",
+            },
+            object: "your community",
+        };
+        let copy = match &failure {
+            FileFailure::Rpc(error) => user_error_message(Failure::Rpc(error), Some(context)),
+            FileFailure::Issue(text) => user_error_message(
+                Failure::Sentence {
+                    text,
+                    warning: false,
+                },
+                Some(context),
+            ),
+        };
+        if copy.kind == UserErrorKind::Canceled {
+            return;
+        }
+        let title = match which {
+            CommunityFile::Export => copy.title,
+            CommunityFile::Import => format!("Couldn't import {}", file_name(path)),
+        };
+        let kind = if copy.warning {
+            ToastKind::Warning
+        } else {
+            ToastKind::Error
+        };
+        press_community_toast(
+            ToastData::new(kind, title).description(copy.description),
+            cx,
+        );
+    }
+}
+
+fn press_community_toast(toast: ToastData, cx: &mut Context<SidekickScreen>) {
+    let hub = cx
+        .global::<crate::screens::notifications::Shared>()
+        .0
+        .clone();
+    hub.update(cx, |hub, cx| {
+        hub.press_toast("community-file".to_string(), toast, cx)
+    });
 }
