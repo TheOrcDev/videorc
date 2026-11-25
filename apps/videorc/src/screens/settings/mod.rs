@@ -545,7 +545,11 @@ impl Render for SettingsScreen {
             )
             .child(
                 div().id(self.tab.id()).flex_1().min_h(px(0.)).child(
+                    // `fill`: the content is at least the page's height, so a
+                    // tab's column pair stretches and its rule runs to the
+                    // foot (`CONFIG_GRID_PAIR`'s `flex-1 content-stretch`).
                     videorc_kit::scroll_area::ScrollArea::new(self.tab.id())
+                        .fill(true)
                         .children(self.error.clone().map(|error| {
                             videorc_kit::alert::Alert::new("settings-error").title(error)
                         }))
