@@ -114,6 +114,8 @@ pub struct ChatPane {
     mention_names: Vec<String>,
     live: bool,
     can_send: bool,
+    /// P962: the destinations whose chat only a sign-in brings.
+    sign_in_rows: Vec<pane::SignInRow>,
     search: Entity<InputState>,
     draft: Entity<InputState>,
     chat_on_stream: bool,
@@ -182,6 +184,7 @@ impl ChatPane {
         });
         let seed = live_chat.borrow().clone();
         let (messages, platforms, mention_names, can_send) = view_from_chat(&seed);
+        let sign_in_rows = pane::chat_sign_in_rows(&seed.providers);
         let delivery_cursor = seed.delivery.cursor();
         let session_id = seed.session_id.clone();
         let mut events = studio.backend().subscribe();
@@ -227,6 +230,7 @@ impl ChatPane {
             mention_names,
             live,
             can_send,
+            sign_in_rows,
             search,
             draft,
             chat_on_stream: false,
@@ -484,6 +488,7 @@ impl ChatPane {
         self.platforms = platforms;
         self.mention_names = mention_names;
         self.can_send = can_send;
+        self.sign_in_rows = pane::chat_sign_in_rows(&chat.providers);
         self.composer = self.live && can_send;
         self.session_id = chat.session_id.clone();
         let progress = chat.delivery.progress(Some(self.delivery_cursor));
@@ -972,6 +977,7 @@ impl Render for ChatPane {
             .flex_col()
             .aria_label(CHAT_PANE)
             .child(filters)
+            .children(sign_in_rows(&self.sign_in_rows, border, muted))
             .child(list)
             .when(self.composer, |pane| {
                 pane.child(
@@ -1067,4 +1073,59 @@ fn view_from_chat(chat: &LiveChat) -> (Vec<Arc<LiveChatMessage>>, Vec<String>, V
         .collect();
     let can_send = chat.session_id.is_some() && !writable_providers(&chat.providers).is_empty();
     (messages, platforms, mention_names, can_send)
+}
+
+/// "X chat needs Sign in" and "Sign in to Videorc to read X chat." (P962,
+/// `ChatSignInRows`): one quiet row per destination over the chat, never a
+/// failure, each with the one button that brings its chat. Sign in to
+/// Videorc starts the account sign-in and brings the main window up; Use
+/// Sign in opens the destination in Destinations → Setup there.
+fn sign_in_rows(
+    rows: &[pane::SignInRow],
+    border: gpui::Hsla,
+    muted: gpui::Hsla,
+) -> Option<AnyElement> {
+    if rows.is_empty() {
+        return None;
+    }
+    let mut list = div()
+        .id("chat-sign-in")
+        .flex_none()
+        .flex()
+        .flex_col()
+        .border_b_1()
+        .border_color(border)
+        .aria_label("Chat that needs a sign-in");
+    for row in rows {
+        let mut line = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(12.))
+            .py(px(6.))
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .flex_1()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(row.message.clone()),
+            );
+        let button = Button::new(SharedString::from(format!("chat-sign-in-{}", row.id)))
+            .size(ButtonSize::Xs)
+            .variant(ButtonVariant::Outline)
+            .accessibility_label(row.button_label());
+        if row.videorc {
+            line = line.child(button.label("Sign in to Videorc").on_click(|_, _, app| {
+                crate::app::exit::ExitGuard::show_main_window(app);
+                crate::app::accounts::sign_in(app);
+            }));
+        } else if let Some(target) = row.target_id.clone() {
+            line = line.child(button.label("Use Sign in").on_click(move |_, _, app| {
+                crate::app::shell::open_destination_in_main(target.clone(), app);
+            }));
+        }
+        list = list.child(line);
+    }
+    Some(list.into_any_element())
 }

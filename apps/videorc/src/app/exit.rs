@@ -145,6 +145,11 @@ impl ExitGuard {
         let _ = main.update(cx, |_, window, _| window.remove_window());
     }
 
+    /// The main window, once it is open.
+    pub fn main_window(cx: &App) -> Option<AnyWindowHandle> {
+        cx.try_global::<Self>().and_then(|this| this.main_window)
+    }
+
     /// The Dock's click with no window showing (Electron's `activate`,
     /// P1513): the main window comes back where it was.
     pub fn show_main_window(cx: &mut App) {

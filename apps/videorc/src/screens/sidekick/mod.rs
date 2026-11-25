@@ -175,6 +175,11 @@ pub struct SidekickScreen {
 }
 
 impl SidekickScreen {
+    /// Why Sidekick isn't running (`cohost.state`'s reason), for the
+    /// account row's needs-sign-in dot (P025).
+    pub(crate) fn cohost_reason(&self) -> Option<&str> {
+        self.state.reason.as_deref()
+    }
     pub fn new(
         studio: Arc<AppStudio>,
         runtime: tokio::runtime::Handle,

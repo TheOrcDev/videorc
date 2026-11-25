@@ -1,4 +1,4 @@
-//! The sidebar's account row and its menu (P024–P034, Electron's
+//! The sidebar's account row and its menu (P024–P034, with P025's dot; Electron's
 //! `account-menu-trigger.tsx` and `account-menu-body.tsx`): the trigger
 //! shows the account's name or "Sign in"; the menu's header names the
 //! account and its plan, then Account or Sign in, View Premium, Health,
@@ -18,6 +18,7 @@ use videorc_kit::{
     button::{Button, ButtonVariant},
     dropdown_menu::{DropdownMenu, Menu, MenuItem, MenuItemTone},
     icon::{IconName, icon},
+    status_dot::{StatusDot, StatusTone},
     theme::hsla,
     tokens::Theme,
 };
@@ -109,7 +110,12 @@ fn build_menu(account: &Account, tier: &'static str, shell: &WeakEntity<Shell>, 
 }
 
 /// The sidebar's account row: its trigger, and the menu it opens.
-pub fn row(state: &AccountsState, shell: WeakEntity<Shell>, t: &Theme) -> impl IntoElement {
+pub fn row(
+    state: &AccountsState,
+    needs_sign_in: bool,
+    shell: WeakEntity<Shell>,
+    t: &Theme,
+) -> impl IntoElement {
     let account = state.account.clone();
     let tier = state.tier_label();
     let name = account.display_name();
@@ -128,7 +134,12 @@ pub fn row(state: &AccountsState, shell: WeakEntity<Shell>, t: &Theme) -> impl I
                 .gap(px(8.))
                 .min_w(px(0.))
                 .child(picture)
-                .child(div().truncate().child(name)),
+                .child(div().truncate().child(name))
+                // P025: bare, so the trigger's name stays the words it shows;
+                // the Go Live check, the toast and the chat row say why.
+                .when(needs_sign_in, |row| {
+                    row.child(StatusDot::new("account-needs-sign-in").tone(StatusTone::Warn))
+                }),
         );
     DropdownMenu::new("account-menu")
         .trigger(trigger)
