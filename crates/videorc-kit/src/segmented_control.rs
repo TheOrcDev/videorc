@@ -164,8 +164,10 @@ impl SegmentedControl {
         self
     }
 
-    /// Electron's default `w-fit`: the track hugs its segments and each is
-    /// as wide as its words (Community's Show). Without it the track fills
+    /// Electron's default `w-fit` (CSS `fit-content`): the track hugs its
+    /// segments, each as wide as its words (Community's Show), but never
+    /// wider than its column; in a column narrower than its words it shares
+    /// the width and wraps like the default (Stream quality at 330 px). Without it the track fills
     /// its column (`w-full`) and the segments share it as Chrome does: equal
     /// shares, a segment never narrower than its words, and a line that
     /// cannot hold them wraps (Stream quality).
@@ -398,8 +400,13 @@ impl RenderOnce for SegmentedControl {
             });
         let track_inner = *width_state.read(cx) - 4.0;
         let fit = self.fit;
+        // `w-fit` is CSS `fit-content`: min(max-content, available). The
+        // track asks for its words and is capped at its column; measured
+        // narrower than its words, it shares and wraps as a full track does.
+        let fits_words =
+            |mins: &[f32]| track_inner <= 0.0 || track_inner + 0.5 >= mins.iter().sum::<f32>();
         let widths: Option<Vec<f32>> = match &mins {
-            Some(mins) if fit => Some(mins.clone()),
+            Some(mins) if fit && fits_words(mins.as_slice()) => Some(mins.clone()),
             Some(mins) if track_inner > 0.0 => Some(
                 segment_widths(mins, track_inner)
                     .into_iter()
@@ -522,7 +529,9 @@ impl RenderOnce for SegmentedControl {
             .gap_y(px(2.0))
             .min_h(px(height))
             .p(px(2.0))
-            .when_some(track_width, |track, width| track.flex_none().w(px(width)))
+            .when_some(track_width, |track, width| {
+                track.flex_none().w(px(width)).max_w(gpui::relative(1.0))
+            })
             .on_prepaint({
                 let width_state = width_state.clone();
                 move |bounds, window, cx| {
