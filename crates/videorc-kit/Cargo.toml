@@ -12,3 +12,4 @@ gpui_base.workspace = true
 resvg.workspace = true
 image.workspace = true
 smallvec.workspace = true
+qrcode = { workspace = true }

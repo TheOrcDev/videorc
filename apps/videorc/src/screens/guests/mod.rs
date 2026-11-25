@@ -1,6 +1,9 @@
 //! Guests ⌘7 (plan 260 Phase 3, L4): Room, Invite link and Who's here from
 //! `videorc_app_core::guests::view` and `wire`, drawn with `videorc-kit`.
-//! Words match Electron's guests-tab / guests-view.
+//! Words match Electron's guests-tab / guests-view. Separate files (cloud ISO)
+//! is plan 249 S22 / P932–P936.
+
+mod iso;
 
 use std::sync::Arc;
 
@@ -142,6 +145,19 @@ pub struct GuestsPanel {
     rename: DialogHandle,
     confirm: DialogHandle,
     pending: Option<Pending>,
+    // Separate files (cloud ISO).
+    iso_for_show: Option<String>,
+    iso_answer: Option<videorc_app_core::guests::iso::IsoAnswer>,
+    iso_status_code: Option<String>,
+    iso_status_failed: bool,
+    iso_busy: bool,
+    iso_asking: bool,
+    iso_agreed: bool,
+    iso_enable_error: Option<String>,
+    iso_row_error: Option<String>,
+    iso_enable: DialogHandle,
+    iso_close_enable: bool,
+    iso_load_generation: u64,
 }
 
 impl GuestsPanel {
@@ -180,6 +196,18 @@ impl GuestsPanel {
             rename: DialogHandle::new(false),
             confirm: DialogHandle::new(false),
             pending: None,
+            iso_for_show: None,
+            iso_answer: None,
+            iso_status_code: None,
+            iso_status_failed: false,
+            iso_busy: false,
+            iso_asking: false,
+            iso_agreed: false,
+            iso_enable_error: None,
+            iso_row_error: None,
+            iso_enable: DialogHandle::new(false),
+            iso_close_enable: false,
+            iso_load_generation: 0,
         };
         panel.rebuild(cx);
         panel
@@ -213,6 +241,18 @@ impl GuestsPanel {
                 self.closing = false;
             }
             cx.notify();
+        }
+        self.sync_iso_show(cx);
+        if self.connected
+            && self
+                .room()
+                .is_some_and(|room| room.phase == RoomPhase::Open)
+            && self.iso_answer.is_none()
+            && self.iso_status_code.is_none()
+            && !self.iso_status_failed
+            && self.show_id().is_some()
+        {
+            self.load_iso(cx);
         }
     }
 
@@ -506,6 +546,7 @@ impl GuestsPanel {
 
 impl Render for GuestsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.flush_iso_dialogs(window, cx);
         let t = theme::current(window, cx).theme();
         let access = guests_access(self.facts.as_ref());
         let room = self.room().cloned();
@@ -771,9 +812,7 @@ impl Render for GuestsPanel {
                     )),
             );
 
-        let mut people_section = PanelSection::new("guests-people")
-            .title(WHOS_HERE)
-            .last(true);
+        let mut people_section = PanelSection::new("guests-people").title(WHOS_HERE);
         if full {
             people_section = people_section.child(
                 Alert::new("guests-room-full")
@@ -910,11 +949,13 @@ impl Render for GuestsPanel {
                         .gap(px(16.))
                         .child(room_section)
                         .child(invite)
-                        .child(people_section),
+                        .child(people_section)
+                        .child(self.iso_section(room_open, offline, &entity)),
                 ),
             )
             .child(new_link_dialog)
             .child(close_dialog)
+            .child(self.iso_enable_dialog(&entity, cx))
             .children(moderation)
     }
 }

@@ -226,6 +226,27 @@ pub fn iso_enable_params(
     })
 }
 
+/// Limits on an enable request, or the defaults while separate files are off.
+pub fn iso_request_limits(request: Option<&Value>) -> IsoLimits {
+    let Some(request) = request else {
+        return ISO_DEFAULT_LIMITS;
+    };
+    IsoLimits {
+        max_active_entries: request
+            .get("maxActiveEntries")
+            .and_then(Value::as_u64)
+            .filter(|&n| n > 0 && n <= u32::MAX as u64)
+            .map(|n| n as u32)
+            .unwrap_or(ISO_DEFAULT_LIMITS.max_active_entries),
+        max_minutes: request
+            .get("maxMinutes")
+            .and_then(Value::as_u64)
+            .filter(|&n| n > 0 && n <= u32::MAX as u64)
+            .map(|n| n as u32)
+            .unwrap_or(ISO_DEFAULT_LIMITS.max_minutes),
+    }
+}
+
 /// A refusal's words, by the backend's error code.
 pub fn iso_error_text(code: Option<&str>) -> Option<&'static str> {
     Some(match code? {

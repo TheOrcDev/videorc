@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, FontWeight, IntoElement, MouseButton, MouseDownEvent,
-    MouseUpEvent, SharedString, Window, canvas, div, prelude::*, px, relative,
+    MouseUpEvent, SharedString, Toggled, Window, canvas, div, prelude::*, px, relative,
 };
 use smallvec::SmallVec;
 
@@ -106,7 +106,7 @@ impl RenderOnce for SoundPadGrid {
             .w_full()
             .children(self.children.into_iter().map(move |child| {
                 div()
-                    .flex_grow()
+                    .flex_grow_1()
                     .flex_shrink_0()
                     .min_w(px(min_w))
                     .flex_basis(relative(1.0 / columns as f32))
@@ -294,7 +294,13 @@ impl RenderOnce for SoundPad {
             .aria_label(name)
             .when(
                 matches!(mode, SoundPadMode::Toggle | SoundPadMode::Loop),
-                |pad| pad.aria_pressed(playing),
+                |pad| {
+                    pad.aria_toggled(if playing {
+                        Toggled::True
+                    } else {
+                        Toggled::False
+                    })
+                },
             )
             .relative()
             .flex()
@@ -428,7 +434,7 @@ fn paint_progress_ring(
     if size <= px(0.0) {
         return;
     }
-    let d = size.0.round().max(1.0) as u32;
+    let d = size.as_f32().round().max(1.0) as u32;
     let r = d as f32 / 2.0 - 1.5;
     let circ = std::f32::consts::TAU * r;
     let accent_css = format!(
@@ -454,6 +460,6 @@ fn paint_progress_ring(
         offset = circ * (1.0 - progress),
     );
     if let Some(image) = chrome::rasterise_for_kit(&svg, d, d) {
-        let _ = window.paint_image(bounds, gpui::Corners::default(), image, 0, false);
+        let _ = window.paint_image(bounds, bounds, gpui::Corners::default(), image, 0, false);
     }
 }

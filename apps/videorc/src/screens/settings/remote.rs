@@ -207,14 +207,32 @@ impl SettingsScreen {
         );
         if let Some(status) = &self.phone {
             if status.enabled {
+                let (tone, summary) = r::phone_remote_summary(status);
+                let blocked = tone == r::SummaryTone::Warning;
+                let pair_hint = if blocked {
+                    "Pairing works again once the problem above is fixed.".to_string()
+                } else {
+                    summary.clone()
+                };
+                let mut pair_button = Button::new("pair-phone")
+                    .label("Pair a phone…")
+                    .variant(ButtonVariant::Outline)
+                    .disabled(self.disabled() || blocked)
+                    .on_click(cx.listener(|this, _, _, cx| this.begin_phone_pairing(None, cx)));
+                if blocked {
+                    pair_button = pair_button.tooltip(summary);
+                }
                 phones = phones.item(
-                    ListRow::new("pair-phone-row", "Phones").child(
-                        Button::new("pair-phone")
-                            .label("Pair a phone…")
-                            .variant(ButtonVariant::Outline)
-                            .disabled(true)
-                            .tooltip(view::NOT_IN_THIS_BUILD),
-                    ),
+                    div()
+                        .child(ListRow::new("pair-phone-row", "Phones").child(pair_button))
+                        .child(
+                            div()
+                                .px(px(12.))
+                                .pb(px(8.))
+                                .type_scale(text::META)
+                                .text_color(hsla(t.muted_foreground))
+                                .child(pair_hint),
+                        ),
                 );
                 let names = r::phone_display_names(&status.devices);
                 for (index, phone) in status.devices.iter().enumerate() {
