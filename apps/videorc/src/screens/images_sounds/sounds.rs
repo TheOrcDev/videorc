@@ -1,13 +1,19 @@
 //! Sounds ⇧⌘S: the soundboard's sounds.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use gpui::{Context, SharedString, Window, div, prelude::*, px};
+use gpui::{Context, Entity, PathPromptOptions, SharedString, Window, div, prelude::*, px};
 use serde_json::json;
+use tokio::sync::watch;
 use videorc_app_core::protocol::{Sound, SoundMode, SoundboardState};
-use videorc_app_core::soundboard::{self, ImportPhase};
+use videorc_app_core::resources::{
+    capability::{IssueOptions, ResourceKind},
+    issue_capability,
+};
+use videorc_app_core::soundboard::{self, ImportPhase, SOUND_VOLUME_DB_MAX, SOUND_VOLUME_DB_MIN};
 use videorc_app_core::studio::StudioBackend;
-use videorc_app_core::{BackendClient, Studio};
+use videorc_app_core::{BackendClient, BackendState, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle, DialogSize};
@@ -17,6 +23,7 @@ use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::select::Select;
+use videorc_kit::slider::{Slider, SliderEvent, SliderState};
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
 
@@ -32,6 +39,7 @@ enum BoardState {
 pub struct SoundsPanel {
     studio: Arc<AppStudio>,
     runtime: tokio::runtime::Handle,
+    backend: watch::Receiver<BackendState>,
     connected: bool,
     board: Option<SoundboardState>,
     board_state: BoardState,
@@ -42,13 +50,18 @@ pub struct SoundsPanel {
     load_failures: usize,
     rename: DialogHandle,
     rename_id: Option<String>,
-    rename_input: gpui::Entity<InputState>,
+    rename_input: Entity<InputState>,
+    /// Per-sound volume faders (P1312).
+    volume: BTreeMap<String, Entity<SliderState>>,
+    /// Sound id whose fader is mid-drag; skip sync from board while set.
+    volume_live: Option<String>,
 }
 
 impl SoundsPanel {
     pub fn new(
         studio: Arc<AppStudio>,
         runtime: tokio::runtime::Handle,
+        backend: watch::Receiver<BackendState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -67,6 +80,7 @@ impl SoundsPanel {
         let mut panel = Self {
             studio,
             runtime,
+            backend,
             connected: false,
             board: None,
             board_state: BoardState::Loading,
@@ -78,6 +92,8 @@ impl SoundsPanel {
             rename: DialogHandle::new(false),
             rename_id: None,
             rename_input,
+            volume: BTreeMap::new(),
+            volume_live: None,
         };
         panel.rebuild(cx);
         panel.refresh(cx);
@@ -264,10 +280,130 @@ impl SoundsPanel {
         self.update_sound(id, json!({ "name": name }));
         self.refresh(cx);
     }
+
+    fn ensure_volume_sliders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let sounds: Vec<(String, i32)> = self
+            .sounds()
+            .iter()
+            .map(|sound| (sound.id.clone(), sound.volume_db))
+            .collect();
+        let ids: std::collections::BTreeSet<_> = sounds.iter().map(|(id, _)| id.clone()).collect();
+        self.volume.retain(|id, _| ids.contains(id));
+        for (id, volume_db) in sounds {
+            if let Some(slider) = self.volume.get(&id) {
+                if self.volume_live.as_ref() != Some(&id) {
+                    let current = slider.read(cx).value().end().round() as i32;
+                    if current != volume_db {
+                        slider.update(cx, |state, cx| {
+                            state.set_value(volume_db as f32, window, cx);
+                        });
+                    }
+                }
+                continue;
+            }
+            let slider = cx.new(|_| {
+                SliderState::new()
+                    .min(SOUND_VOLUME_DB_MIN as f32)
+                    .max(SOUND_VOLUME_DB_MAX as f32)
+                    .step(1.)
+                    .default_value(volume_db as f32)
+            });
+            let sound_id = id.clone();
+            cx.subscribe(&slider, move |this, _, event: &SliderEvent, cx| {
+                let value = match event {
+                    SliderEvent::Change(v) | SliderEvent::Release(v) => v.end().round() as i32,
+                };
+                this.volume_live = match event {
+                    SliderEvent::Change(_) => Some(sound_id.clone()),
+                    SliderEvent::Release(_) => None,
+                };
+                if matches!(event, SliderEvent::Release(_)) {
+                    this.update_sound(sound_id.clone(), json!({ "volumeDb": value }));
+                    if let Some(sound) = this.board.as_mut().and_then(|board| {
+                        board.sounds.iter_mut().find(|sound| sound.id == sound_id)
+                    }) {
+                        sound.volume_db = value;
+                    }
+                }
+                cx.notify();
+            })
+            .detach();
+            self.volume.insert(id, slider);
+        }
+    }
+
+    fn import_sounds(&mut self, cx: &mut Context<Self>) {
+        if self.import_phase != ImportPhase::Idle
+            || soundboard::import_blocked_reason(false, ImportPhase::Idle, self.sounds().len())
+                .is_some()
+        {
+            return;
+        }
+        self.import_phase = ImportPhase::Choosing;
+        cx.notify();
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some(soundboard::IMPORT.into()),
+        });
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            let paths = match picked.await {
+                Ok(Ok(Some(paths))) if !paths.is_empty() => paths,
+                _ => {
+                    let _ = this.update(cx, |panel, cx| {
+                        panel.import_phase = ImportPhase::Idle;
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let _ = this.update(cx, |panel, cx| {
+                panel.import_phase = ImportPhase::Importing;
+                cx.notify();
+            });
+            let job = runtime.spawn(async move {
+                let bootstrap = backend
+                    .borrow()
+                    .bootstrap()
+                    .cloned()
+                    .ok_or_else(|| "Videorc is reconnecting.".to_string())?;
+                for path in paths {
+                    let (_, issued) = issue_capability(
+                        &bootstrap,
+                        &path,
+                        ResourceKind::InputFile,
+                        IssueOptions::default(),
+                    )
+                    .await?;
+                    let _ = studio
+                        .backend()
+                        .sounds_request(
+                            "sounds.import",
+                            json!({ "sourceCapability": issued.capability_id }),
+                        )
+                        .await
+                        .map_err(|error| error.message)?;
+                }
+                Ok::<(), String>(())
+            });
+            let _ = job.await;
+            let _ = this.update(cx, |panel, cx| {
+                panel.import_phase = ImportPhase::Idle;
+                panel.refresh(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
 }
 
 impl Render for SoundsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_volume_sliders(window, cx);
         let t = theme::current(window, cx).theme();
         let offline = !self.connected;
         let sounds = self.sounds().to_vec();
@@ -279,10 +415,16 @@ impl Render for SoundsPanel {
             soundboard::section_description(if loaded { Some(sounds.len()) } else { None });
 
         let import_button = |id: &'static str, reason: Option<&'static str>, phase: ImportPhase| {
+            let entity = entity.clone();
             Button::new(id)
                 .label(soundboard::import_label(phase))
                 .variant(ButtonVariant::Outline)
                 .disabled(reason.is_some())
+                .on_click(move |_, _, cx| {
+                    if reason.is_none() {
+                        entity.update(cx, |panel, cx| panel.import_sounds(cx));
+                    }
+                })
         };
 
         let mut notices = div().flex().flex_col().gap(px(8.));
@@ -386,13 +528,34 @@ impl Render for SoundsPanel {
                                     }),
                             )
                             .child(mode_select)
-                            .child(
-                                div()
-                                    .w(px(56.))
-                                    .type_scale(text::META)
-                                    .text_color(hsla(t.muted_foreground))
-                                    .child(format!("{:+} dB", sound.volume_db)),
-                            )
+                            .child({
+                                let volume_db = self
+                                    .volume
+                                    .get(&sound.id)
+                                    .map(|slider| slider.read(cx).value().end().round() as i32)
+                                    .unwrap_or(sound.volume_db);
+                                let mut volume_row =
+                                    div().flex().items_center().gap(px(6.)).w(px(140.));
+                                if let Some(slider) = self.volume.get(&sound.id) {
+                                    volume_row = volume_row.child(
+                                        div().w(px(88.)).child(
+                                            Slider::new(slider)
+                                                .accessibility_label(format!(
+                                                    "{} volume",
+                                                    sound.name
+                                                ))
+                                                .disabled(offline),
+                                        ),
+                                    );
+                                }
+                                volume_row.child(
+                                    div()
+                                        .w(px(48.))
+                                        .type_scale(text::META)
+                                        .text_color(hsla(t.muted_foreground))
+                                        .child(soundboard::format_volume_db(volume_db)),
+                                )
+                            })
                             .child(key_select)
                             .child(
                                 Button::new(format!("sound-rename-{}", sound.id))
