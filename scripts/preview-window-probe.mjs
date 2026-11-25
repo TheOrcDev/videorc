@@ -40,7 +40,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui, stopProcess } from './lib/app-launcher.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import {
   windowsPreviewLifecycleDiagnosticFailures,
@@ -48,6 +48,13 @@ import {
   windowsPreviewPresenterFailures
 } from './lib/windows-preview-lifecycle-gates.mjs'
 import { configureWindowsD3d11ProbeSources } from './lib/windows-d3d11-preview-sources.mjs'
+
+// Plan 260 Phase 3: VIDEORC_APP=gpui runs the GPUI app's own window probe
+// (its native preview is checked against the backend's frame, cell by cell).
+if (smokeAppIsGpui()) {
+  const { runGpuiPreviewWindowProbe } = await import('./gpui-preview-window-probe.mjs')
+  process.exit(await runGpuiPreviewWindowProbe())
+}
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const expectWindowsD3d11 = process.env.VIDEORC_EXPECT_WINDOWS_D3D11 === '1'
