@@ -70,6 +70,7 @@ pub mod stream_report;
 pub mod targets;
 pub mod time_zones;
 pub mod watchdog;
+pub mod watchdog_notify;
 pub mod watchdog_section;
 
 use accounts::{
