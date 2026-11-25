@@ -164,7 +164,9 @@ async function runSmoke() {
   const userDataDir = join(stateRoot, 'user-data')
   const outputDirectory = join(stateRoot, 'recordings')
   const databasePath = join(appDataDir, 'videorc.sqlite3')
-  const recoveryDirectory = join(appDataDir, 'session-finalization-recovery')
+  // Where Electron's isolated backend keeps its database; the live backend
+  // says where its own is once it runs (the GPUI app isolates it elsewhere).
+  let recoveryDirectory = join(appDataDir, 'session-finalization-recovery')
   const realFfmpeg = resolveToolPath(process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg', 'FFmpeg')
   const realFfprobe = resolveToolPath(
     process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? siblingFfprobePath(realFfmpeg) ?? 'ffprobe',
@@ -212,6 +214,15 @@ async function runSmoke() {
     const smoke = launched.connections['preview-motion-ready']
     const backendPid = requiredPid(backendConnection?.pid, 'backend-ready backend PID')
     const appPid = requiredPid(smoke?.appPid, 'preview-motion-ready Electron PID')
+    // The recovery records sit beside the database the backend really uses
+    // (the renderer's health answer redacts the path; the smoke server
+    // reports it for an isolated run).
+    {
+      const isolation = await requestSmokeCommand(smoke, 'inspect-backend-state-isolation', {})
+      if (typeof isolation?.databasePath === 'string') {
+        recoveryDirectory = join(dirname(isolation.databasePath), 'session-finalization-recovery')
+      }
+    }
     assert.equal(processExists(appPid), true, `Electron main process ${appPid} is not alive.`)
     assert.equal(processExists(backendPid), true, `Backend process ${backendPid} is not alive.`)
 

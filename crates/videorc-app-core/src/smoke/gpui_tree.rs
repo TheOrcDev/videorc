@@ -127,6 +127,7 @@ impl Reader<'_> {
         let ids = raw
             .get("element_id")
             .and_then(Value::as_str)
+            .map(element_id_words)
             .map(|id| match raw.get("view").and_then(Value::as_str) {
                 // The view's type name, without its module path, qualifies
                 // the id (`StudioPage::record`), so `record` and the
@@ -190,6 +191,21 @@ impl Reader<'_> {
             height: (y1 - y0) / self.scale,
         })
     }
+}
+
+/// An element id as the app wrote it: gpui-pre's dump prints `ElementId`'s
+/// debug form (`Name("session-record")`, `Integer(3)`), and a smoke selects
+/// by the words (`session-record`). Anything else is kept as it is.
+fn element_id_words(id: &str) -> &str {
+    for (open, close) in [("Name(\"", "\")"), ("Integer(", ")"), ("Uuid(", ")")] {
+        if let Some(inner) = id
+            .strip_prefix(open)
+            .and_then(|rest| rest.strip_suffix(close))
+        {
+            return inner;
+        }
+    }
+    id
 }
 
 #[cfg(test)]
@@ -258,6 +274,20 @@ mod tests {
         assert!(!switch.enabled);
         // The cycle back to the root is dropped, not walked forever.
         assert_eq!(root.children[1].children.len(), 2);
+    }
+
+    #[test]
+    fn an_element_id_is_matched_by_its_words() {
+        assert_eq!(
+            element_id_words(r#"Name("session-record")"#),
+            "session-record"
+        );
+        assert_eq!(
+            element_id_words(r#"Name("actions-1/trigger")"#),
+            "actions-1/trigger"
+        );
+        assert_eq!(element_id_words("Integer(3)"), "3");
+        assert_eq!(element_id_words("record"), "record");
     }
 
     #[test]

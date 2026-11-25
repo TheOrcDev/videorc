@@ -247,11 +247,20 @@ fn main() -> Result<()> {
     // `smokeCommandServerEnabled`), read once here: a smoke run keeps the
     // Studio from picking devices for it.
     let smoke_packaged = smoke::shell::packaged();
-    let smoke_run = videorc_app_core::smoke::SmokeSwitch::resolve(
+    let smoke_switch = videorc_app_core::smoke::SmokeSwitch::resolve(
         |name| std::env::var(name).ok(),
         smoke_packaged,
-    )
-    .is_some();
+    );
+    let smoke_run = smoke_switch.is_some();
+    // Electron's main sets VIDEORC_ENABLE_SMOKE_RPC=1 for its backend when
+    // the smoke server is on in a dev app (the smokes' backend RPCs, the
+    // recording matrix's FFmpeg tone); the launch's default is 0.
+    if smoke_switch.is_some_and(|switch| switch.backend_smoke_rpc()) {
+        launch.extra_env.push((
+            videorc_app_core::smoke::vars::BACKEND_SMOKE_RPC.to_string(),
+            "1".to_string(),
+        ));
+    }
 
     // The core's own runtime: two workers, beside GPUI's executor. The core
     // keeps running with every window closed.

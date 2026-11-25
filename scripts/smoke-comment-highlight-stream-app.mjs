@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import {
@@ -220,6 +220,18 @@ async function runScenarioGroup({ label, scenarios, indexOffset, env = {} }) {
     ws = await connectBackend(launched.connections['backend-ready'], timeoutMs)
     const smoke = launched.connections['preview-motion-ready']
     const health = await request(ws, timeoutMs, 'health.ping', { ffmpegPath })
+    // The image cache sits beside the database the backend really uses: the
+    // GPUI app isolates it under the profile, not Electron's app-data. The
+    // renderer's health answer redacts the path; the smoke server reports it.
+    const isolation = await smokeCommand(smoke, 'inspect-backend-state-isolation').catch(() => null)
+    if (typeof isolation?.databasePath === 'string') {
+      const databaseDirectory = dirname(isolation.databasePath)
+      if (resolve(databaseDirectory) !== resolve(appDataDirectory)) {
+        for (const image of Object.values(smokeChatImages)) {
+          seedCachedChatImage(databaseDirectory, image)
+        }
+      }
+    }
     if (!health?.ffmpeg?.available) {
       throw new Error(
         health?.ffmpeg?.message ?? 'FFmpeg is unavailable for comment-highlight stream smoke.'

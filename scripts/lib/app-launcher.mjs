@@ -383,8 +383,12 @@ export function smokeAppLaunchRefusal(env = {}, processEnv = process.env) {
 /**
  * The GPUI app's dev binary (`cargo build -p videorc-app`), in the profile
  * the backend is built in, so the app finds its backend beside it.
+ * VIDEORC_GPUI_APP_BINARY names a prebuilt one instead (the compile
+ * sentinel's `~/cloud-test/gpui-builds/latest/Videorc`, its backend beside
+ * it), and then nothing is built.
  */
 export function gpuiAppBinaryPath({ env = process.env, platform = process.platform } = {}) {
+  if (env?.VIDEORC_GPUI_APP_BINARY) return env.VIDEORC_GPUI_APP_BINARY
   const profile = env?.VIDEORC_DEV_BACKEND_PROFILE === 'release' ? 'release' : 'debug'
   return join(repoRoot, 'target', profile, platform === 'win32' ? 'Videorc.exe' : 'Videorc')
 }
@@ -479,8 +483,12 @@ export async function launchDevApp({
   // `skipPrebuild`: the caller built the backend already (`prebuildDevBackend`,
   // the cloud smoke); the host lock, the memory wait and the live wait still
   // run.
+  // A prebuilt GPUI app (VIDEORC_GPUI_APP_BINARY) needs no cargo build.
+  const prebuiltGpui =
+    smokeAppIsGpui({ ...process.env, ...env }) &&
+    Boolean({ ...process.env, ...env }.VIDEORC_GPUI_APP_BINARY)
   await prepareSmokeLaunch({
-    dev: !launchViaMacosLaunchServices && !requestedSpawnSpec && !skipPrebuild,
+    dev: !launchViaMacosLaunchServices && !requestedSpawnSpec && !skipPrebuild && !prebuiltGpui,
     env: { ...process.env, ...env },
     onLine
   })
