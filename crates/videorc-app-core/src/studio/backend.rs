@@ -15,8 +15,8 @@ use videorc_protocol::{
 
 use crate::client::methods::Method;
 use crate::client::methods::{
-    AudioProcessingUpdate, DevicesList, HealthPing, PreviewScreenStart, RecordingStatusGet,
-    RemoteIntentAck, RemoteIntentAckParams, RemoteSurfacePublish, SceneGet,
+    AudioProcessingUpdate, CloudShowResume, DevicesList, HealthPing, PreviewScreenStart,
+    RecordingStatusGet, RemoteIntentAck, RemoteIntentAckParams, RemoteSurfacePublish, SceneGet,
     SessionHealthEventsList, SessionLogsList, SessionStart, SessionStop, SessionsList,
     SupportBundleExport,
 };
@@ -55,6 +55,18 @@ pub trait StudioBackend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<RecordingStatus, RpcError>> + Send {
         let _ = folder_capability;
         self.session_start(params)
+    }
+    /// Plan 184 C5b: `cloud.show.resume`, the same start bound to the solo
+    /// show that is live on Videorc Cloud, with the folder's capability as
+    /// [`Self::session_start_into`] carries it. A backend without a cloud
+    /// (a test fake) answers nothing.
+    fn cloud_show_resume_into(
+        &self,
+        params: StartSessionParams,
+        folder_capability: Option<String>,
+    ) -> impl Future<Output = Result<RecordingStatus, RpcError>> + Send {
+        let _ = (params, folder_capability);
+        async { Err(RpcError::not_connected(CloudShowResume::NAME)) }
     }
     fn session_stop(
         &self,
@@ -300,19 +312,15 @@ impl StudioBackend for BackendClient {
         params: StartSessionParams,
         folder_capability: Option<String>,
     ) -> Result<RecordingStatus, RpcError> {
-        let Some(capability) = folder_capability else {
-            return self.call::<SessionStart>(&params).await;
-        };
-        let mut value = serde_json::to_value(&params).map_err(|error| {
-            RpcError::new(
-                SessionStart::NAME,
-                crate::client::codes::INVALID_PARAMS,
-                error.to_string(),
-            )
-        })?;
-        value["output"]["outputDirectoryCapability"] = Value::String(capability);
-        let answer = self.request(SessionStart::NAME, value).await?;
-        crate::client::socket::decode_result::<SessionStart>(answer)
+        start_into::<SessionStart>(self, params, folder_capability).await
+    }
+
+    async fn cloud_show_resume_into(
+        &self,
+        params: StartSessionParams,
+        folder_capability: Option<String>,
+    ) -> Result<RecordingStatus, RpcError> {
+        start_into::<CloudShowResume>(self, params, folder_capability).await
     }
 
     async fn session_stop(&self, params: SessionStopParams) -> Result<RecordingStatus, RpcError> {
@@ -456,6 +464,32 @@ impl StudioBackend for BackendClient {
     async fn clips_request(&self, method: &'static str, params: Value) -> Result<Value, RpcError> {
         self.request(method, params).await
     }
+}
+
+/// A session start through `M` (`session.start`, or the cloud's
+/// `cloud.show.resume`), with the chosen recordings folder's capability in
+/// `output.outputDirectoryCapability` when there is one.
+async fn start_into<M>(
+    client: &BackendClient,
+    params: StartSessionParams,
+    folder_capability: Option<String>,
+) -> Result<RecordingStatus, RpcError>
+where
+    M: Method<Params = StartSessionParams, Result = RecordingStatus>,
+{
+    let Some(capability) = folder_capability else {
+        return client.call::<M>(&params).await;
+    };
+    let mut value = serde_json::to_value(&params).map_err(|error| {
+        RpcError::new(
+            M::NAME,
+            crate::client::codes::INVALID_PARAMS,
+            error.to_string(),
+        )
+    })?;
+    value["output"]["outputDirectoryCapability"] = Value::String(capability);
+    let answer = client.request(M::NAME, value).await?;
+    crate::client::socket::decode_result::<M>(answer)
 }
 
 /// An answer as its wire type, or `invalid-response` (the typed client's

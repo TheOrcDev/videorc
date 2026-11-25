@@ -121,6 +121,7 @@ mod test_support;
 pub mod timecode;
 pub mod transport;
 pub mod ui_local;
+mod vertical_leg;
 pub mod vertical_stream;
 pub mod virtual_camera;
 pub mod watchdog_alerts;
@@ -514,10 +515,34 @@ pub enum StartOutcome {
     Busy,
 }
 
+/// `SessionStartRpc`: the request a start goes out as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum StartRpc {
+    /// `session.start`: Record and Go Live.
+    #[default]
+    SessionStart,
+    /// `cloud.show.resume` (plan 184 C5b): the same start bound to the solo
+    /// show that is live on Videorc Cloud. Its destinations are the
+    /// runner's: no platform owner, no cleanup, success or not.
+    CloudShowResume,
+}
+
+/// How a start goes out, beside its intent and destinations.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StartVia {
+    pub(crate) rpc: StartRpc,
+    /// Go Live's prepared destinations. The session's platform owner is
+    /// installed with them from the start's answer, before the start lets a
+    /// waiting stop run (`platformLifecycleOwnerRef.current = { sessionId,
+    /// streaming }` in `runStartSession`).
+    pub(crate) owner: Option<Value>,
+}
+
 /// S3.1a: a start on its way, and how a second caller hears its answer.
 struct InFlightStart {
     intent: SessionStartIntent,
     streaming: Option<StreamingSettings>,
+    rpc: StartRpc,
     answer: watch::Receiver<Option<StartOutcome>>,
 }
 
@@ -678,6 +703,8 @@ struct Inner {
     /// S1.6b part 5e: the Scene page's canvas editor is open
     /// (`sceneEditMode`).
     scene_edit_mode: bool,
+    /// S1.6b part 4c-2: the vertical stream's live sends.
+    vertical_leg: vertical_leg::VerticalLeg,
 }
 
 /// S2.6c: the exclusion list's bookkeeping.
@@ -892,6 +919,12 @@ pub struct Studio<B: StudioBackend> {
     /// S1.6b part 5d: the live audio queue has work nobody drains; the
     /// driver's drain takes it.
     live_audio_kick: Notify,
+    /// S1.6b part 4c-2: the vertical stream's leg has a send (or its scene
+    /// to put on again) nobody drains; the driver's drain takes it.
+    vertical_leg_kick: Notify,
+    /// A new connection found the talk show's room an earlier one held: the
+    /// driver's rejoin runs beside the event receiver.
+    talk_rejoin: Notify,
     /// S1.6a part 6b: the app's recordings folder capability issuer.
     output_authorizer: Mutex<Option<OutputAuthorizer>>,
     /// S1.6c: the bootstrap read Upcoming; the driver asks the platforms
@@ -961,6 +994,7 @@ impl<B: StudioBackend> Studio<B> {
             recordings_folder_facts: None,
             clips: clips_actions::ClipsCore::default(),
             scene_edit_mode: false,
+            vertical_leg: vertical_leg::VerticalLeg::default(),
         };
         // Writes a previous run journaled wait in the cache until the
         // snapshot is in; then they are sent.
@@ -1006,6 +1040,8 @@ impl<B: StudioBackend> Studio<B> {
             settings_retry: Notify::new(),
             live_read_done: Notify::new(),
             live_audio_kick: Notify::new(),
+            vertical_leg_kick: Notify::new(),
+            talk_rejoin: Notify::new(),
             output_authorizer: Mutex::new(None),
             provider_refresh: Notify::new(),
             platforms_tx,
@@ -1064,11 +1100,13 @@ impl<B: StudioBackend> Studio<B> {
     /// Feeds the client's events until it closes, and runs the settings
     /// retries when they fall due. S1.6b part 5d: the live audio queue
     /// drains beside the events, so an `audio.processing.update` in flight
-    /// never holds them up.
+    /// never holds them up. S1.6b part 4c-2: the vertical stream's live
+    /// sends the same.
     pub async fn drive(self: Arc<Self>, events: broadcast::Receiver<BackendEvent>) {
         tokio::select! {
             () = self.drive_events(events) => {}
             () = self.drain_live_audio_when_kicked() => {}
+            () = self.drain_vertical_leg_when_kicked() => {}
         }
     }
 
@@ -1077,6 +1115,9 @@ impl<B: StudioBackend> Studio<B> {
         // inside an event's handling; a reconnect's check replaces (drops)
         // the last one.
         let mut providers: Option<BoxFuture<'_, ()>> = None;
+        // The talk show's rejoin after a backend restart runs here the same
+        // way; a newer connection's attempt replaces (drops) the last one.
+        let mut rejoin: Option<BoxFuture<'_, ()>> = None;
         loop {
             let (due, live_due, low_light_due, clips_due) = {
                 let inner = self.lock();
@@ -1121,6 +1162,12 @@ impl<B: StudioBackend> Studio<B> {
                     None => std::future::pending().await,
                 }
             };
+            let rejoining = async {
+                match rejoin.as_mut() {
+                    Some(rejoining) => rejoining.await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 received = events.recv() => match received {
                     Ok(event) => self.handle_event(event).await,
@@ -1131,6 +1178,10 @@ impl<B: StudioBackend> Studio<B> {
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
                 () = asking => providers = None,
+                () = rejoining => rejoin = None,
+                () = self.talk_rejoin.notified() => {
+                    rejoin = Some(self.rejoin_talk_room().boxed());
+                }
                 () = self.provider_refresh.notified() => {
                     let generation = self.lock().bootstrap_generation;
                     providers = Some(self.refresh_upcoming_providers(generation).boxed());
@@ -1161,6 +1212,11 @@ impl<B: StudioBackend> Studio<B> {
                 self.bootstrap(generation).await;
                 // S1.6b part 5d: a session that runs on this connection.
                 self.follow_live_audio().await;
+                // The talk show's room an earlier connection held: back in
+                // it by itself (the bootstrap read this backend's status).
+                if self.talk_room_rejoin_due().is_some() {
+                    self.talk_rejoin.notify_one();
+                }
             }
             BackendEvent::RecordingStatus(status) => {
                 let (effects, state_changed, clips_woke) = {
@@ -1882,15 +1938,21 @@ impl<B: StudioBackend> Studio<B> {
             return StartOutcome::Busy;
         };
         // `runStartSession`'s retry re-runs the exact start: Go Live to the
-        // destinations it went to. The cloud's Resume and Go Live's preflight
-        // (which reopens the dialog) arrive with S1.6c.
-        let streaming = match failure.kind {
-            SessionStartFailureKind::Record => None,
-            SessionStartFailureKind::Live | SessionStartFailureKind::Resume => {
-                self.lock().live_streaming.clone()
+        // destinations it went to, and the cloud's Resume as a resume again
+        // (the same `rpc`). Go Live's preflight (which reopens the dialog)
+        // arrives with S1.6c.
+        let (streaming, rpc) = match failure.kind {
+            SessionStartFailureKind::Record => (None, StartRpc::SessionStart),
+            SessionStartFailureKind::Live => {
+                (self.lock().live_streaming.clone(), StartRpc::SessionStart)
             }
+            SessionStartFailureKind::Resume => (
+                self.lock().live_streaming.clone(),
+                StartRpc::CloudShowResume,
+            ),
         };
-        self.start(failure.intent, streaming).await
+        self.start_via(failure.intent, streaming, StartVia { rpc, owner: None })
+            .await
     }
 
     /// `runStartSession` (`use-studio.tsx`): the optimistic
@@ -1902,6 +1964,18 @@ impl<B: StudioBackend> Studio<B> {
         &self,
         intent: SessionStartIntent,
         streaming: Option<StreamingSettings>,
+    ) -> StartOutcome {
+        self.start_via(intent, streaming, StartVia::default()).await
+    }
+
+    /// [`Self::start`] as `via` sends it: `session.start`, with Go Live's
+    /// prepared destinations for the session's platform owner, or the
+    /// cloud's `cloud.show.resume` (`runStartSession`'s `rpc`).
+    pub(crate) async fn start_via(
+        &self,
+        intent: SessionStartIntent,
+        streaming: Option<StreamingSettings>,
+        via: StartVia,
     ) -> StartOutcome {
         // S3.1a: a start already on its way answers a second caller asking
         // for the same start with its own answer (`sessionStartInFlightRef`);
@@ -1915,7 +1989,11 @@ impl<B: StudioBackend> Studio<B> {
             self.wait_for_layout_proof().await;
             let mut in_flight = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
             match in_flight.as_ref() {
-                Some(start) if start.intent == intent && start.streaming == streaming => {
+                Some(start)
+                    if start.intent == intent
+                        && start.streaming == streaming
+                        && start.rpc == via.rpc =>
+                {
                     break (None, Some(start.answer.clone()), None);
                 }
                 Some(_) => return StartOutcome::Busy,
@@ -1928,6 +2006,7 @@ impl<B: StudioBackend> Studio<B> {
                     *in_flight = Some(InFlightStart {
                         intent,
                         streaming: streaming.clone(),
+                        rpc: via.rpc,
                         answer: heard,
                     });
                     break (Some(answer), None, Some(hold));
@@ -1943,7 +2022,7 @@ impl<B: StudioBackend> Studio<B> {
         let answer = answer.expect("set above");
         // Cleared however this start ends, a dropped future included.
         let clear = ClearInFlight(&self.in_flight);
-        let outcome = self.start_once(intent, streaming).await;
+        let outcome = self.start_once(intent, streaming, via).await;
         // Every other way out (refused, failed, dropped) answers the hold.
         drop(scene_hold);
         drop(clear);
@@ -1955,12 +2034,35 @@ impl<B: StudioBackend> Studio<B> {
         &self,
         intent: SessionStartIntent,
         streaming: Option<StreamingSettings>,
+        via: StartVia,
     ) -> StartOutcome {
         let _running = self.start_lock.lock().await;
+        // `if (!isSessionActive && !(await settlePreviousPlatformLifecycle()))
+        // return false`: before any start (Record too, #1888), the last
+        // livestream's platform cleanup finishes, or the start is refused
+        // (`LIVESTREAM_STILL_SETTLING`, said by the settle). Under the start
+        // lock no stop runs, so no settlement of this Studio's stop is
+        // waited for here.
+        let session_active = {
+            let inner = self.lock();
+            (inner.session.is_active() && !session_is_replay_only(inner.session.status()))
+                || inner.session.start_pending()
+                || inner.session.stop_pending()
+        };
+        if !session_active && !self.settle_previous_platform_lifecycle().await {
+            return StartOutcome::Refused {
+                message: crate::livestream::lifecycle_copy::LIVESTREAM_STILL_SETTLING.to_string(),
+            };
+        }
+        let resuming = via.rpc == StartRpc::CloudShowResume;
         let (params, attempted, start_sources) = {
-            let mut inner = self.lock();
+            let mut guard = self.lock();
+            let inner = &mut *guard;
             if !inner.session.begin_start(intent) {
                 return StartOutcome::Busy;
+            }
+            if resuming {
+                inner.session.mark_start_resumes();
             }
             // The session call arms the clock when no click did, and the
             // request carries the click's time (`requestedAtMs`).
@@ -1995,11 +2097,49 @@ impl<B: StudioBackend> Studio<B> {
                 ));
                 None
             });
+            // Plan 231 D4 (S1.6b part 4c-2): the vertical stream starts on
+            // the 9:16 layout of the scene on stream (`buildSimulcastParams`
+            // over the start's own config: its flags, its destinations, the
+            // layout at the output boundary).
+            let simulcast = {
+                let session = vertical_stream::session_capture_config(
+                    &view.capture_doc,
+                    intent.record,
+                    intent.stream,
+                    streaming
+                        .as_ref()
+                        .and_then(|streaming| serde_json::to_value(streaming).ok()),
+                    camera_background::camera_output_layout(
+                        &view.capture_doc["layout"],
+                        view.capture.sources.camera_id.as_deref(),
+                        &view.studio,
+                    ),
+                );
+                let scene_on_stream = inner
+                    .scenes
+                    .on_stream
+                    .clone()
+                    .and_then(|id| inner.stored_scene(&id));
+                vertical_stream::start_simulcast(&session, scene_on_stream.as_ref()).and_then(
+                    |leg| match serde_json::from_value::<videorc_protocol::SimulcastParams>(leg) {
+                        Ok(leg) => Some(leg),
+                        Err(error) => {
+                            // The start goes on without the leg; the backend
+                            // names the refusal of a vertical destination.
+                            self.config.logger.warn(format!(
+                                "[session-start] the vertical stream's layout isn't sendable: {error}"
+                            ));
+                            None
+                        }
+                    },
+                )
+            };
             (
                 build_start_params(&view.capture, &view.studio, intent, streaming).map(
                     |mut params| {
                         params.requested_at_ms = Some(requested_at_ms);
                         params.scene = scene;
+                        params.simulcast = simulcast;
                         params
                     },
                 ),
@@ -2043,7 +2183,11 @@ impl<B: StudioBackend> Studio<B> {
             inner.live_audio_start_in_flight = true;
         }
         let start_in_flight = LiveAudioStartInFlight(&self.inner);
-        let answer = self.backend.session_start_into(params, folder).await;
+        let answer = match via.rpc {
+            StartRpc::SessionStart => self.backend.session_start_into(params, folder).await,
+            // Plan 184 C5b: the same start, bound to the live show.
+            StartRpc::CloudShowResume => self.backend.cloud_show_resume_into(params, folder).await,
+        };
         // The guard only covers a dropped future; an answered start clears
         // the flag under the lock that seeds the snapshot, so no status in
         // between makes a sync without it.
@@ -2066,6 +2210,25 @@ impl<B: StudioBackend> Studio<B> {
                     };
                     (resolution, effects)
                 };
+                // The session's platform owner, from the answer and before
+                // this start lets go of its lock: a stop that waited for the
+                // start (`sessionStartInFlightRef`) then finds the owner to
+                // claim. A resume never owns its destinations (R2 B-H1).
+                if resolution.session_active
+                    && !resuming
+                    && let Some(streaming) = via.owner
+                    && let Some(session_id) = resolution
+                        .status
+                        .session_id
+                        .clone()
+                        .filter(|id| !id.is_empty())
+                {
+                    self.platform
+                        .install(crate::livestream::platform_owner::Owner {
+                            session_id,
+                            streaming,
+                        });
+                }
                 self.publish();
                 // #1643: the start's scene is committed and the session's
                 // state known: a scene change held for it now goes to the
@@ -2281,9 +2444,11 @@ impl<B: StudioBackend> Studio<B> {
         self.publish();
     }
 
-    /// `stopSession`: waits for a start in flight, then `session.stop`
-    /// unless the session already ended. True when the stop answered (or
-    /// nothing was running), false when the request failed.
+    /// `stopSession`: waits for a start in flight (which installs the
+    /// session's platform owner from its answer, so the stop claims it),
+    /// then `session.stop` unless the session already ended. True when the
+    /// stop answered (or nothing was running), false when the request
+    /// failed.
     pub async fn stop(&self) -> bool {
         // A Stop while one is on its way answers with that stop's answer,
         // never a fresh `session.stop` after it failed
@@ -2318,6 +2483,11 @@ impl<B: StudioBackend> Studio<B> {
         // answered way out, `AbandonStop` on a dropped future.
         let marked = self.lock().session.begin_stop();
         let ok = if marked {
+            // Electron's `platformLifecycleRun.current += 1` at the top of
+            // its stop, before it joins a start in flight: a Go Live whose
+            // start this stop waits for installs its owner from the answer
+            // (the stop then claims it), but never activates a broadcast.
+            self.platform.next_run();
             let _abandon = AbandonStop(self);
             self.publish();
             self.stop_once().await
@@ -2716,6 +2886,11 @@ impl<B: StudioBackend> Studio<B> {
             // S1.6b part 5b: the low-light read follows the camera in use and
             // the connection (`useCameraLowLight`'s effect).
             inner.capture.sync(inner.settings.get(keys::CAPTURE_CONFIG));
+            // S1.6b part 4c-2: the vertical stream follows the scene on
+            // stream (`sendSimulcastLeg`'s effects).
+            if inner.follow_vertical_leg() {
+                self.vertical_leg_kick.notify_one();
+            }
             let camera_id = inner.capture.view.config.sources.camera_id.clone();
             let connected = matches!(inner.connection, Connection::Connected { .. });
             if inner
@@ -2910,8 +3085,10 @@ fn epoch_ms() -> u64 {
 /// `rtmpServerUrl` and `streamKey` ([`CaptureConfig::rtmp`]), as the renderer
 /// sends it.
 /// The scene with its background is the start's (`Inner::start_scene`,
-/// set by `start_once`); this leaves it `None`.
-/// Camera looks, captions, simulcast and the replay ring are Phase 3. The
+/// set by `start_once`); this leaves it `None`. The vertical leg
+/// (`buildSimulcastParams`) is the start's too: it needs the scene on
+/// stream, so `start_once` sets it and the Clips ring's own session has none.
+/// Captions and the replay ring are Phase 3. The
 /// chosen recordings folder rides apart, as its capability
 /// ([`StudioBackend::session_start_into`], S1.6a part 6b); without one the
 /// backend records into its default directory (`VIDEORC_RECORDINGS_DIR`
@@ -2949,7 +3126,7 @@ pub fn build_start_params(
         studio,
     );
     // `buildSimulcastParams` (the vertical leg from the on-stream scene's
-    // 9:16 layout, #1543) lands with the scenes (S1.6b).
+    // 9:16 layout, #1543) is `start_once`'s, with the scene on stream.
     let simulcast = None;
     Ok(StartSessionParams {
         sources: capture.sources.clone(),

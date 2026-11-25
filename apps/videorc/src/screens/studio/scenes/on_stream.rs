@@ -32,10 +32,10 @@ use videorc_app_core::studio::scene_on_stream::{
 };
 use videorc_app_core::studio::sources_page::GrantAction;
 use videorc_kit::section_label::SectionLabel;
-use videorc_kit::select::Select;
+use videorc_kit::select::{Select, SelectOption};
 use videorc_kit::theme::{TypeScale, faded_over, hsla, with_alpha};
 use videorc_kit::tokens::{Theme, text};
-use videorc_kit::tooltip::tooltip;
+use videorc_kit::tooltip::{tooltip, tooltip_with_accelerator};
 use videorc_kit::{
     Alert, AlertVariant, Badge, BadgeVariant, Button, ButtonVariant, Kbd, Segment,
     SegmentedControl, kbd_group,
@@ -469,7 +469,8 @@ impl ScenesSection {
             .child(quiet_line(copy::SAVES_HERE, t));
 
         // P320, P330–P332: Hide screen / Show screen, its key inside it
-        // while the row has room, its reason on hover while it can't run.
+        // while the row has room and always in its tooltip, its reason on
+        // hover while it can't run.
         let privacy = &view.privacy;
         let mut hide = Button::new("scene-hide-screen")
             .variant(ButtonVariant::Outline)
@@ -496,7 +497,14 @@ impl ScenesSection {
                 .child(hide)
                 .tooltip(tooltip(reason))
                 .into_any_element(),
-            None => hide.tooltip(privacy.action_label).into_any_element(),
+            None => match privacy.accelerator.clone() {
+                Some(accelerator) => div()
+                    .id("scene-hide-screen-tip")
+                    .child(hide)
+                    .tooltip(tooltip_with_accelerator(privacy.action_label, accelerator))
+                    .into_any_element(),
+                None => hide.tooltip(privacy.action_label).into_any_element(),
+            },
         };
         // P322: Change screen… beside Hide screen, off with its reason.
         let change_screen = Button::new("scene-change-screen")
@@ -582,7 +590,9 @@ impl ScenesSection {
         .children(alert);
 
         // P325, P326: the studio's layouts (the kit's Select lists words, so
-        // the chosen one's diagram stands before it).
+        // the chosen one's diagram stands before it). A layout that is off is
+        // greyed (the camera's line says why); one that asks for a screen
+        // first (D19) is offered and opens Change screen….
         let layout = &view.layout;
         let mut select = Select::new("scene-layout")
             .accessibility_label(copy::LAYOUT)
@@ -597,15 +607,10 @@ impl ScenesSection {
                     })
                 }
             });
-        // The kit's Select has no disabled option: a layout that is off is
-        // left out, and the camera's line says why. One that asks for a
-        // screen first (D19) is offered and opens Change screen….
-        for choice in layout
-            .choices
-            .iter()
-            .filter(|choice| choice.value == layout.preset || !choice.disabled)
-        {
-            select = select.option(choice.value, choice.label.clone());
+        for choice in &layout.choices {
+            select = select.option_item(
+                SelectOption::new(choice.value, choice.label.clone()).disabled(choice.disabled),
+            );
         }
         let layout_control = div()
             .flex()
@@ -660,8 +665,13 @@ impl ScenesSection {
                         }
                     }
                 });
-            for choice in vertical.choices.iter().filter(|choice| !choice.disabled) {
-                select = select.option(choice.preset, choice.label.clone());
+            // A layout with gaps is greyed, as in Electron; its reason is the
+            // line under the field.
+            for choice in &vertical.choices {
+                select = select.option_item(
+                    SelectOption::new(choice.preset, choice.label.clone())
+                        .disabled(choice.disabled),
+                );
             }
             let control = div()
                 .flex()

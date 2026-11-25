@@ -101,6 +101,14 @@ struct Script {
     livestream_held: Option<(String, Arc<Semaphore>)>,
     /// A gated livestream RPC is waiting.
     held_reached: bool,
+    /// Plan 184 C5b: every `cloud.show.resume` and how it answers (none
+    /// left: the show's session, live).
+    resumed_with: Vec<StartSessionParams>,
+    resume_answers: VecDeque<Result<RecordingStatus, RpcError>>,
+    /// S1.6b part 4c-2: every send to the vertical stream's leg
+    /// (`scene.layout.apply_live` with `simulcastLeg`). The backend commits
+    /// it to the leg only: the program's scene and revision stay.
+    leg_sends: Vec<Value>,
 }
 
 struct Scripted {
@@ -231,6 +239,20 @@ impl StudioBackend for Scripted {
         self.session_start(params).await
     }
 
+    async fn cloud_show_resume_into(
+        &self,
+        params: StartSessionParams,
+        _folder_capability: Option<String>,
+    ) -> Result<RecordingStatus, RpcError> {
+        self.note("cloud.show.resume");
+        let mut script = self.script.lock().unwrap();
+        script.resumed_with.push(params);
+        script
+            .resume_answers
+            .pop_front()
+            .unwrap_or_else(|| Ok(live("s-show")))
+    }
+
     async fn session_stop(&self, _params: SessionStopParams) -> Result<RecordingStatus, RpcError> {
         self.note("session.stop");
         let gate = self.script.lock().unwrap().stop_gate.clone();
@@ -321,16 +343,25 @@ impl StudioBackend for Scripted {
     /// S1.6b part 3b: a scene commit answers the committed scene at the next
     /// revision; the live proof's reads say it is drawn and on air.
     async fn scene_request(&self, method: &'static str, params: Value) -> Result<Value, RpcError> {
-        let applying = matches!(
-            method,
-            "scene.layout.apply_preview" | "scene.layout.apply_live"
-        );
+        let leg = params["simulcastLeg"] == true;
+        let applying = !leg
+            && matches!(
+                method,
+                "scene.layout.apply_preview" | "scene.layout.apply_live"
+            );
         let gate = self.script.lock().unwrap().apply_gate.clone();
         if let (true, Some(gate)) = (applying, gate) {
             gate.acquire().await.unwrap().forget();
         }
         let mut script = self.script.lock().unwrap();
         match method {
+            "scene.layout.apply_live" if leg => {
+                script.leg_sends.push(params.clone());
+                Ok(json!({
+                    "intentId": params["intentId"],
+                    "sceneRevision": script.scene_revision,
+                }))
+            }
             "scene.layout.apply_preview" | "scene.layout.apply_live" => {
                 script
                     .layout_commits
@@ -4624,4 +4655,526 @@ async fn a_second_dashboard_change_within_a_second_still_reaches_the_store() {
         .await
         .expect("the trailing push lands within its second");
     assert_eq!(state.session_id.as_deref(), Some("s-dash"));
+}
+
+// --- S1.6b part 4c-2: the vertical stream at the start and on air --------
+
+/// A 16:9 studio with a camera and a display, and one vertical destination
+/// armed (the Output switch as `stream_enabled` says).
+fn capture_config_with_vertical_destination(stream_enabled: bool) -> Value {
+    let mut config = capture_config_with_twitch();
+    config["streamEnabled"] = json!(stream_enabled);
+    config["streaming"]["targets"][0]["outputOrientation"] = json!("vertical");
+    config["sources"] = capture_config_with_camera()["sources"].clone();
+    config
+}
+
+fn leg_sends(backend: &Scripted) -> Vec<Value> {
+    backend.script.lock().unwrap().leg_sends.clone()
+}
+
+/// The 9:16 layout of a stored scene, as the Studio holds it.
+fn vertical_layout_of(studio: &Studio<Scripted>, id: &str) -> Value {
+    studio
+        .snapshot()
+        .scenes
+        .library
+        .expect("the library")
+        .scenes
+        .into_iter()
+        .find(|scene| scene.id == id)
+        .expect("the scene")
+        .vertical
+}
+
+#[tokio::test]
+async fn go_live_starts_the_vertical_stream_on_the_scene_on_streams_9_16_layout() {
+    // The saved mode is Record only: the leg follows what the start does.
+    let (backend, studio) = scenes_studio(capture_config_with_vertical_destination(false)).await;
+    let on_stream = studio
+        .snapshot()
+        .scenes
+        .on_stream_id
+        .expect("a scene is always on stream");
+    let vertical = vertical_layout_of(&studio, &on_stream);
+
+    assert_eq!(studio.start_livestream(None).await, StartOutcome::Started);
+    let leg = backend.script.lock().unwrap().started_with[0]
+        .simulcast
+        .clone()
+        .expect("a vertical destination needs the leg");
+    assert_eq!(
+        serde_json::to_value(&leg.layout).unwrap()["layoutPreset"],
+        vertical["layoutPreset"],
+        "the scene on stream's 9:16 layout"
+    );
+    assert!(leg.video.width < leg.video.height, "a portrait canvas");
+    assert!(leg.scene.is_none());
+
+    // Record never streams: no leg, whatever is armed.
+    stop_to_idle(&studio).await;
+    assert_eq!(studio.start_recording().await, StartOutcome::Started);
+    assert!(
+        backend.script.lock().unwrap().started_with[1]
+            .simulcast
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_scene_switch_on_air_cuts_the_vertical_stream_too_and_an_edit_of_its_layout_goes_live() {
+    let (backend, studio) = scenes_studio(capture_config_with_vertical_destination(true)).await;
+    assert_eq!(studio.start_livestream(None).await, StartOutcome::Started);
+    studio.drain_vertical_leg().await;
+    assert_eq!(
+        leg_sends(&backend),
+        Vec::<Value>::new(),
+        "the start carried the leg"
+    );
+
+    // A commit sends the 9:16 layout of the scene it puts on stream.
+    assert!(apply(&studio, "default-camera-only").await);
+    studio.drain_vertical_leg().await;
+    let vertical = vertical_layout_of(&studio, "default-camera-only");
+    let sends = leg_sends(&backend);
+    assert!(!sends.is_empty(), "the commit moved the leg");
+    for send in &sends {
+        assert_eq!(send["simulcastLeg"], true);
+        assert_eq!(send["layout"]["layoutPreset"], vertical["layoutPreset"]);
+        assert_eq!(send["sources"]["cameraId"], "camera:1");
+        assert!(send["video"]["width"].as_u64() < send["video"]["height"].as_u64());
+        assert!(send["intentId"].as_u64().unwrap() >= 1);
+        assert!(send.get("background").is_none());
+    }
+    // The program's commits never carry the leg's flag.
+    assert!(
+        layout_commits(&backend)
+            .iter()
+            .all(|(_, params)| params.get("simulcastLeg").is_none())
+    );
+
+    // The Vertical stream panel's edit is no commit of the program: it goes
+    // live on the vertical stream from here.
+    let commits = layout_commits(&backend).len();
+    let framing = if vertical["verticalScreenFraming"] == "fit" {
+        "fill"
+    } else {
+        "fit"
+    };
+    let patch = json!({ "verticalScreenFraming": framing })
+        .as_object()
+        .cloned()
+        .unwrap();
+    assert!(studio.edit_vertical_stream_layout(patch).await);
+    studio.drain_vertical_leg().await;
+    let edited = leg_sends(&backend);
+    assert_eq!(edited.len(), sends.len() + 1, "one send for the edit");
+    assert_eq!(
+        edited.last().unwrap()["layout"]["verticalScreenFraming"],
+        framing
+    );
+    assert_eq!(layout_commits(&backend).len(), commits);
+
+    // Any other write of that scene derives the leg already sent, which is
+    // never sent twice.
+    studio.cancel_stop();
+    studio.drain_vertical_leg().await;
+    assert_eq!(leg_sends(&backend).len(), edited.len());
+
+    // Off air nothing is sent.
+    stop_to_idle(&studio).await;
+    let patch = json!({ "verticalScreenFraming": "fit" })
+        .as_object()
+        .cloned()
+        .unwrap();
+    studio.edit_vertical_stream_layout(patch).await;
+    studio.drain_vertical_leg().await;
+    assert_eq!(leg_sends(&backend).len(), edited.len());
+}
+
+#[tokio::test]
+async fn a_leg_that_would_borrow_a_screen_puts_its_scene_on_again_once() {
+    let (backend, studio) = scenes_studio(capture_config_with_vertical_destination(true)).await;
+    // A Camera only scene that shows another display than the one captured.
+    let library = studio.snapshot().scenes.library.unwrap();
+    let mut talk = library
+        .scenes
+        .iter()
+        .find(|scene| scene.id == "default-camera-only")
+        .unwrap()
+        .clone();
+    talk.id = "talk".to_string();
+    talk.name = "Talk".to_string();
+    talk.shows = SceneShows::Display {
+        screen_id: "screen:screencapturekit:2".to_string(),
+        screen_name: Some("Second display".to_string()),
+        screen_uuid: None,
+    };
+    assert!(
+        studio
+            .insert_scenes(&[talk], None, &Default::default())
+            .await
+    );
+    // No leg draws a screen for it: it keeps the capture an earlier scene
+    // left (D18), and nothing asks for its own.
+    assert!(apply(&studio, "talk").await);
+    let mut notices = studio.notices();
+    let commits = layout_commits(&backend).len();
+    studio.drain_vertical_leg().await;
+    assert_eq!(layout_commits(&backend).len(), commits);
+    assert_eq!(said(&mut notices), []);
+
+    // Its 9:16 layout now draws a screen: the scene goes on again with its
+    // own (a commit, or the refusal said), asked once.
+    let patch = json!({ "layoutPreset": "vertical-screen-camera" })
+        .as_object()
+        .cloned()
+        .unwrap();
+    assert!(studio.edit_vertical_stream_layout(patch).await);
+    studio.drain_vertical_leg().await;
+    settled(&studio).await;
+    let asked = layout_commits(&backend).len() - commits + said(&mut notices).len();
+    assert!(asked > 0, "the scene was put on again");
+    assert_eq!(
+        leg_sends(&backend),
+        Vec::<Value>::new(),
+        "no session, no leg send"
+    );
+    let commits = layout_commits(&backend).len();
+    studio.cancel_stop();
+    studio.drain_vertical_leg().await;
+    settled(&studio).await;
+    assert_eq!(layout_commits(&backend).len(), commits, "asked once");
+    assert_eq!(said(&mut notices), []);
+}
+
+// --- Plan 184 C5b: Resume a solo show (`cloud.show.resume`) ---------------
+
+#[tokio::test]
+async fn resume_starts_the_solo_show_again_bound_to_it_with_nothing_set_up() {
+    use videorc_app_core::studio::session::SessionStartFailureKind;
+
+    let backend = Scripted::new();
+    backend.with(|script| {
+        script.settings.insert(
+            keys::CAPTURE_CONFIG.to_string(),
+            Value::String(capture_config_with_twitch().to_string()),
+        );
+        script
+            .stop_answers
+            .push_back(Ok(status(RecordingState::Idle, Some("s-show"))));
+    });
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let asked = livestream_methods(&backend).len();
+
+    assert!(studio.resume_cloud_show().await);
+    assert_eq!(backend.count("cloud.show.resume"), 1);
+    assert_eq!(backend.count("session.start"), 0, "never a plain start");
+    let set_up: Vec<String> = livestream_methods(&backend)[asked..]
+        .iter()
+        .filter(|method| method.starts_with("streamTargets.") || method.starts_with("stream."))
+        .cloned()
+        .collect();
+    assert_eq!(
+        set_up,
+        Vec::<String>::new(),
+        "no preflight, no metadata update, no broadcast"
+    );
+    {
+        let script = backend.script.lock().unwrap();
+        let params = &script.resumed_with[0];
+        // Go Live's livestream intent: the stream, and the recording the
+        // Output page asks for.
+        assert!(params.output.stream_enabled && params.output.record_enabled);
+        let streaming = params.streaming.as_ref().expect("the saved destinations");
+        assert_eq!(streaming.targets[0].id, "twitch");
+    }
+    assert_eq!(
+        studio.snapshot().session.status.session_id.as_deref(),
+        Some("s-show")
+    );
+
+    // A refused resume is reported as one, and Retry resumes again.
+    assert!(studio.stop().await);
+    backend.with(|script| {
+        script.resume_answers.push_back(Err(RpcError::new(
+            "cloud.show.resume",
+            "cloud-show-ended",
+            "The cloud stream ended.",
+        )));
+    });
+    assert!(!studio.resume_cloud_show().await);
+    let failure = studio
+        .snapshot()
+        .session
+        .start_failure
+        .expect("the refusal");
+    assert_eq!(failure.kind, SessionStartFailureKind::Resume);
+    assert_eq!(failure.message, "The cloud stream ended.");
+    assert_eq!(studio.retry_start().await, StartOutcome::Started);
+    assert_eq!(backend.count("cloud.show.resume"), 3);
+    assert_eq!(backend.count("session.start"), 0);
+}
+
+#[tokio::test]
+async fn resume_is_refused_while_a_start_runs_and_says_why_when_blocked() {
+    // Offline: refused with the reason, as Go Live is, and nothing is sent.
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    let mut notices = studio.notices();
+    assert!(!studio.resume_cloud_show().await);
+    assert_eq!(said(&mut notices).len(), 1);
+    assert_eq!(backend.count("cloud.show.resume"), 0);
+
+    // Busy: a start is on its way.
+    let backend = Scripted::new();
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| {
+        script.settings.insert(
+            keys::CAPTURE_CONFIG.to_string(),
+            Value::String(capture_config_with_twitch().to_string()),
+        );
+        script.start_gate = Some(gate.clone());
+    });
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let resume_meanwhile = async {
+        while backend.count("session.start") == 0 {
+            tokio::task::yield_now().await;
+        }
+        let resumed = studio.resume_cloud_show().await;
+        gate.add_permits(1);
+        resumed
+    };
+    let (outcome, resumed) = tokio::join!(studio.start_recording(), resume_meanwhile);
+    assert_eq!(outcome, StartOutcome::Started);
+    assert!(!resumed);
+    assert_eq!(backend.count("cloud.show.resume"), 0);
+}
+
+// --- #1888's drift: the platform cleanup around a start -------------------
+
+/// A YouTube destination a Go Live prepared, as the session's owner holds
+/// it.
+fn prepared_youtube() -> Value {
+    json!({
+        "id": "youtube", "platform": "youtube", "label": "YouTube", "enabled": true,
+        "authMode": "oauth", "accountId": "a1",
+        "platformBroadcastId": "b1", "platformStreamId": "st1",
+        "serverUrl": "rtmp://a.rtmp.youtube.com/live2", "streamKey": "",
+        "streamKeyPresent": true,
+        "status": { "state": "ready", "message": "Ready." },
+        "createdAt": "2026-11-08T00:00:00Z", "updatedAt": "2026-11-08T00:00:00Z"
+    })
+}
+
+fn youtube_transitions(backend: &Scripted) -> Vec<Value> {
+    backend
+        .script
+        .lock()
+        .unwrap()
+        .livestream_calls
+        .iter()
+        .filter(|(method, _)| method == "streamTargets.youtube.transition")
+        .map(|(_, params)| params["status"].clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_record_start_first_finishes_the_last_livestreams_cleanup_or_is_refused() {
+    let mut capture = capture_config_with_twitch();
+    let mut saved = prepared_youtube();
+    saved["enabled"] = json!(false);
+    capture["streaming"]["targets"]
+        .as_array_mut()
+        .unwrap()
+        .push(saved);
+    let backend = Scripted::new();
+    backend.with(|script| {
+        script.settings.insert(
+            keys::CAPTURE_CONFIG.to_string(),
+            Value::String(capture.to_string()),
+        );
+    });
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    // The last livestream's owner, its broadcast still to complete.
+    let streaming = json!({ "enabled": true, "targets": [prepared_youtube()] });
+    studio.activate_prepared_for_tests(streaming, "s0").await;
+    assert_eq!(youtube_transitions(&backend), Vec::<Value>::new());
+
+    // YouTube doesn't take the completion: the cleanup isn't done, and
+    // Record is refused before anything starts.
+    backend.with(|script| {
+        script
+            .livestream
+            .entry("streamTargets.youtube.transition".to_string())
+            .or_default()
+            .push_back(Err(RpcError::new(
+                "streamTargets.youtube.transition",
+                "failed",
+                "YouTube did not answer.",
+            )));
+    });
+    let refused = studio.start_recording().await;
+    assert!(
+        matches!(refused, StartOutcome::Refused { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(backend.count("session.start"), 0);
+    assert!(!studio.snapshot().session.start_pending);
+    assert_eq!(youtube_transitions(&backend), [json!("complete")]);
+
+    // The next Record finishes it, then starts.
+    answer_livestream(
+        &backend,
+        "streamTargets.youtube.transition",
+        json!({ "lifecycleStatus": "complete" }),
+    );
+    assert_eq!(studio.start_recording().await, StartOutcome::Started);
+    assert_eq!(
+        youtube_transitions(&backend),
+        [json!("complete"), json!("complete")]
+    );
+    assert_eq!(backend.count("session.start"), 1);
+}
+
+#[tokio::test]
+async fn a_stop_that_waited_for_a_go_lives_start_claims_the_owner_the_start_installed() {
+    let mut capture = capture_config_with_twitch();
+    capture["streaming"]["targets"]
+        .as_array_mut()
+        .unwrap()
+        .push(prepared_youtube());
+    let backend = Scripted::new();
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| {
+        script.settings.insert(
+            keys::CAPTURE_CONFIG.to_string(),
+            Value::String(capture.to_string()),
+        );
+        script.start_gate = Some(gate.clone());
+        script.start_answers.push_back(Ok(live("s1")));
+        script
+            .stop_answers
+            .push_back(Ok(status(RecordingState::Idle, Some("s1"))));
+    });
+    answer_livestream(
+        &backend,
+        "streamTargets.youtube.transition",
+        json!({ "lifecycleStatus": "complete" }),
+    );
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+
+    // What the dialog prepared: the YouTube broadcast alone.
+    let mut streaming = capture["streaming"].clone();
+    streaming["targets"] = json!([prepared_youtube()]);
+    streaming["enabledTargetIds"] = json!(["youtube"]);
+    // Stop is pressed while `session.start` is out; the start answers only
+    // once the stop waits for it.
+    let stop_during_the_start = async {
+        while backend.count("session.start") == 0 {
+            tokio::task::yield_now().await;
+        }
+        let release = async {
+            while !studio.snapshot().session.stop_pending {
+                tokio::task::yield_now().await;
+            }
+            gate.add_permits(1);
+        };
+        let (stopped, ()) = tokio::join!(studio.stop(), release);
+        stopped
+    };
+    let ((), stopped) = tokio::join!(
+        studio.start_prepared_for_tests(streaming),
+        stop_during_the_start
+    );
+    assert!(stopped);
+
+    // The stop claimed the owner the start installed from its answer: the
+    // broadcast is completed, and the activation it overtook never starts.
+    assert_eq!(youtube_transitions(&backend), [json!("complete")]);
+    let methods = livestream_methods(&backend);
+    assert!(
+        !methods
+            .iter()
+            .any(|method| method == "streamTargets.youtube.streamStatus"),
+        "{methods:?}"
+    );
+    assert_eq!(backend.count("session.stop"), 1);
+}
+
+// --- The talk show's rejoin after a backend restart (`talkShow.rejoining`) --
+
+#[tokio::test]
+async fn a_restarted_backend_puts_the_talk_show_back_in_its_room_and_says_so_meanwhile() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    let (keep_open, events) = broadcast::channel::<BackendEvent>(16);
+    tokio::spawn({
+        let studio = studio.clone();
+        async move {
+            let _keep_open = keep_open;
+            studio.drive(events).await;
+        }
+    });
+    studio.handle_event(ready()).await;
+    studio
+        .handle_event(cloud_state(talk_show_status("show-7", false)))
+        .await;
+    assert!(!studio.cloud_now().talk_rejoining);
+
+    // The backend restarts: the new one holds the show as resumable, with
+    // this computer's controller renewed, and the room is not open.
+    let resumable = json!({
+        "phase": "hold",
+        "show": { "id": "show-7", "kind": "talk", "resumable": true },
+        "controller": { "controllerEpoch": 3 }
+    });
+    // The bootstrap's reads, then the rejoin's own.
+    for _ in 0..4 {
+        answer_livestream(&backend, "cloud.status", resumable.clone());
+    }
+    answer_livestream(
+        &backend,
+        "cloud.room.resume",
+        talk_show_status("show-7", false),
+    );
+    let gate = Arc::new(Semaphore::new(0));
+    backend.with(|script| {
+        script.livestream_held = Some(("cloud.room.resume".to_string(), gate.clone()));
+    });
+    studio.handle_event(ready()).await;
+
+    // While its resume is out the notice reads "Reconnecting to your show…".
+    eventually("the rejoin says so", || studio.cloud_now().talk_rejoining).await;
+    gate.add_permits(1);
+    eventually("the rejoin ends", || !studio.cloud_now().talk_rejoining).await;
+    let resumes = livestream_methods(&backend)
+        .iter()
+        .filter(|method| *method == "cloud.room.resume")
+        .count();
+    assert_eq!(resumes, 1, "asked once");
+    assert!(
+        cloud_outputs(&studio).is_some(),
+        "the room is open again: the answer is committed"
+    );
+
+    // A reconnect to the backend that still holds the room asks nothing.
+    backend.with(|script| {
+        script.livestream.remove("cloud.status");
+    });
+    for _ in 0..4 {
+        answer_livestream(&backend, "cloud.status", talk_show_status("show-7", false));
+    }
+    studio.handle_event(ready()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert!(!studio.cloud_now().talk_rejoining);
+    let resumes = livestream_methods(&backend)
+        .iter()
+        .filter(|method| *method == "cloud.room.resume")
+        .count();
+    assert_eq!(resumes, 1);
 }

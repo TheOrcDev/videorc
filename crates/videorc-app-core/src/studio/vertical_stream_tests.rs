@@ -173,3 +173,119 @@ fn the_panel_shows_beside_a_16_9_studio_and_says_what_a_source_blocks() {
         Some(READ_ONLY_REASON)
     );
 }
+
+/// A 16:9 studio with one vertical destination armed.
+fn armed_config() -> Value {
+    json!({
+        "recordEnabled": true,
+        "streamEnabled": true,
+        "video": {
+            "preset": "tutorial-1080p30", "width": 1920, "height": 1080,
+            "fps": 30, "bitrateKbps": 6000
+        },
+        "layout": {"layoutPreset": "screen-camera", "cameraMirror": true},
+        "sources": {"cameraId": "camera:1", "screenId": "screen:1"},
+        "streaming": {
+            "enabled": true,
+            "targets": [{
+                "id": "shorts", "platform": "youtube", "label": "Shorts",
+                "enabled": true, "outputOrientation": "vertical"
+            }],
+            "defaultOutputPreset": "tutorial-1080p30",
+            "defaultBitrateKbps": 6000,
+            "enabledTargetIds": ["shorts"]
+        }
+    })
+}
+
+fn portrait(video: &Value) -> bool {
+    video["width"].as_u64().unwrap() < video["height"].as_u64().unwrap()
+}
+
+#[test]
+fn the_legs_canvas_is_portrait_and_only_while_a_vertical_stream_is_armed() {
+    let config = armed_config();
+    let video = simulcast_leg_video(&config).expect("armed");
+    assert!(portrait(&video), "{video}");
+    assert_eq!(video["preset"], "custom", "a transposed canvas is Custom");
+    assert_eq!(video["fps"], 30);
+
+    // The Output switch off, the destination off or left out, or a 9:16
+    // studio: no second leg.
+    let mut off = config.clone();
+    off["streamEnabled"] = json!(false);
+    assert_eq!(simulcast_leg_video(&off), None);
+    let mut disabled = config.clone();
+    disabled["streaming"]["targets"][0]["enabled"] = json!(false);
+    assert_eq!(simulcast_leg_video(&disabled), None);
+    let mut left_out = config.clone();
+    left_out["streaming"]["enabledTargetIds"] = json!([]);
+    assert_eq!(simulcast_leg_video(&left_out), None);
+    let mut vertical_studio = config.clone();
+    vertical_studio["layout"]["layoutPreset"] = json!("vertical-camera-top");
+    assert_eq!(simulcast_leg_video(&vertical_studio), None);
+}
+
+#[test]
+fn a_start_carries_the_leg_of_the_scene_on_stream_for_what_it_starts() {
+    let talk = scene(
+        json!({
+            "layoutPreset": "vertical-camera-top", "cameraMirror": false,
+            "cameraCorner": "bottom-right", "cameraSize": "medium",
+            "cameraShape": "circle", "cameraMargin": 24
+        }),
+        SceneShows::None,
+    );
+    // The saved mode is Record only; Go Live streams to the destinations
+    // this start goes to (`captureConfigForIntent`).
+    let mut saved = armed_config();
+    saved["streamEnabled"] = json!(false);
+    let streaming = saved["streaming"].clone();
+    let layout = json!({"layoutPreset": "screen-camera", "cameraMirror": true});
+    let go_live = session_capture_config(&saved, false, true, Some(streaming), layout.clone());
+    assert_eq!(go_live["recordEnabled"], false);
+    assert_eq!(go_live["streamEnabled"], true);
+    let leg = start_simulcast(&go_live, Some(&talk)).expect("a leg");
+    assert_eq!(leg["layout"]["layoutPreset"], "vertical-camera-top");
+    assert_eq!(leg["layout"]["cameraMirror"], true, "the program's look");
+    assert!(portrait(&leg["video"]));
+    // The typed params the start sends read it.
+    let typed: videorc_protocol::SimulcastParams = serde_json::from_value(leg).unwrap();
+    assert!(typed.video.width < typed.video.height);
+    assert!(typed.scene.is_none());
+    assert!(typed.layout.camera_mirror);
+
+    // Record never streams, whatever the saved mode says; no scene on
+    // stream, no leg.
+    let record = session_capture_config(&armed_config(), true, false, None, layout);
+    assert_eq!(start_simulcast(&record, Some(&talk)), None);
+    assert_eq!(start_simulcast(&go_live, None), None);
+    // A start to destinations with no vertical one has no leg.
+    let mut horizontal = armed_config()["streaming"].clone();
+    horizontal["targets"][0]["outputOrientation"] = json!("horizontal");
+    let plain = session_capture_config(
+        &armed_config(),
+        false,
+        true,
+        Some(horizontal),
+        json!({"layoutPreset": "screen-camera"}),
+    );
+    assert_eq!(start_simulcast(&plain, Some(&talk)), None);
+}
+
+#[test]
+fn a_live_edit_of_the_leg_is_built_like_the_start() {
+    let talk = scene(
+        json!({"layoutPreset": "vertical-camera-top"}),
+        SceneShows::None,
+    );
+    let config = armed_config();
+    let request = simulcast_leg_live_request_of(&config, Some(&talk)).expect("armed");
+    let start = start_simulcast(&config, Some(&talk)).unwrap();
+    assert_eq!(request["simulcastLeg"], true);
+    assert_eq!(request["sources"], config["sources"]);
+    assert_eq!(request["layout"], start["layout"]);
+    assert_eq!(request["video"], start["video"]);
+    assert!(request.get("background").is_none());
+    assert_eq!(simulcast_leg_live_request_of(&config, None), None);
+}

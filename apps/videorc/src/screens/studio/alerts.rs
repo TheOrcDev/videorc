@@ -356,8 +356,9 @@ pub fn resume_card_of(
     cloud_resume_card(CloudResumeInputs {
         status: cloud.status.as_ref(),
         session_active: transport_active(&snapshot.session),
-        // The talk show's rejoin after a backend restart is not in app-core.
-        talk_rejoining: false,
+        // `talkShow.rejoining`: back in the room by itself after a backend
+        // restart (`Studio::drive`'s rejoin).
+        talk_rejoining: cloud.talk_rejoining,
         // `startsBusy`: a start in flight (Go Live's checks are not in
         // app-core, as for the transport).
         pending: snapshot.session.start_pending,
@@ -421,8 +422,9 @@ impl CloudResumeSlot {
         self.dialogs = Some(dialogs);
     }
 
-    /// Resume or Continue here: a talk show rejoins its room; a solo show's
-    /// start bound to the live show is not in app-core yet. Never Go Live.
+    /// Resume or Continue here: a talk show rejoins its room; a solo show
+    /// starts again bound to the live show (`cloud.show.resume`). Never Go
+    /// Live: no dialog, no preflight, no broadcast.
     fn resume(&self) {
         let Some(card) = &self.card else {
             return;
@@ -437,9 +439,10 @@ impl CloudResumeSlot {
                     .spawn(async move { studio.resume_talk_room().await });
             }
             ResumeTarget::CloudShow => {
-                eprintln!(
-                    "[videorc-app] Resume: the cloud show's own start (cloud.show.resume) is not in app-core yet"
-                );
+                let studio = self.studio.clone();
+                self.runtime.spawn(async move {
+                    studio.resume_cloud_show().await;
+                });
             }
         }
     }

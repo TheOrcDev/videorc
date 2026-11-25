@@ -568,6 +568,10 @@ pub struct SessionState {
     /// `recordingFailureSessionRef`: one failure notice per session.
     failure_dedupe_key: Option<String>,
     start_lifecycle: Option<StartLifecycle>,
+    /// The start in flight is the cloud's Resume (`rpc ===
+    /// 'cloud.show.resume'`, plan 184 C5b): its failure reads "Couldn't
+    /// resume the stream".
+    start_resumes: bool,
     start_pending: bool,
     stop_pending: bool,
 }
@@ -614,6 +618,7 @@ impl SessionState {
             runtime_notice: None,
             failure_dedupe_key: None,
             start_lifecycle: None,
+            start_resumes: false,
             start_pending: false,
             stop_pending: false,
         }
@@ -903,6 +908,7 @@ impl SessionState {
             return false;
         }
         self.start_pending = true;
+        self.start_resumes = false;
         self.active_intent = Some(intent);
         self.start_failure = None;
         self.clear_runtime_notice();
@@ -916,6 +922,16 @@ impl SessionState {
         });
         self.apply_status(optimistic);
         true
+    }
+
+    /// Plan 184 C5b: the start in flight is the cloud's Resume
+    /// (`cloud.show.resume`), so a refusal is reported as one
+    /// (`reportSessionStartFailure(…, 'resume')`). Nothing without a start
+    /// in flight.
+    pub fn mark_start_resumes(&mut self) {
+        if self.start_pending {
+            self.start_resumes = true;
+        }
     }
 
     /// The answer to `session.start`, reconciled against the statuses pushed
@@ -934,6 +950,7 @@ impl SessionState {
         let resolution = reconcile_start_response(response, authoritative.as_ref());
         let effects = self.apply_reported_status(resolution.status.clone(), now);
         self.start_pending = false;
+        self.start_resumes = false;
         self.start_lifecycle = None;
         (resolution, effects)
     }
@@ -942,9 +959,14 @@ impl SessionState {
     /// it in the start flow's catch).
     pub fn fail_start(&mut self, message: String, now: Instant) -> Vec<SessionEffect> {
         let intent = self.active_intent.unwrap_or(SessionStartIntent::RECORD);
+        let kind = if std::mem::take(&mut self.start_resumes) {
+            SessionStartFailureKind::Resume
+        } else {
+            SessionStartFailureKind::of_intent(intent)
+        };
         let failure = SessionStartFailure {
             message,
-            kind: SessionStartFailureKind::of_intent(intent),
+            kind,
             intent,
             at: now,
         };
@@ -988,6 +1010,7 @@ impl SessionState {
             self.active_intent = None;
         }
         self.start_pending = false;
+        self.start_resumes = false;
         self.start_lifecycle = None;
         true
     }
@@ -1489,6 +1512,47 @@ mod tests {
             SessionPhase::Idle,
             "a refusal before the start leaves the session"
         );
+    }
+
+    #[test]
+    fn a_refused_resume_is_reported_as_a_resume_and_the_next_start_is_its_own() {
+        let now = Instant::now();
+        let mut session = SessionState::new();
+        // Nothing in flight: nothing to mark.
+        session.mark_start_resumes();
+        let intent = SessionStartIntent::livestream(false);
+        assert!(session.begin_start(intent));
+        session.mark_start_resumes();
+        let effects = session.fail_start("The cloud stream ended.".to_string(), now);
+        let failure = match &effects[..] {
+            [SessionEffect::StartFailed(failure)] => failure.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(failure.kind, SessionStartFailureKind::Resume);
+        assert_eq!(failure.intent, intent, "Retry runs the same start");
+        assert_eq!(
+            session_start_failed_title(failure.kind),
+            "Couldn't resume the stream"
+        );
+        assert_eq!(session.phase(), SessionPhase::Idle);
+        // A Go Live after it is a Go Live again.
+        assert!(session.begin_start(intent));
+        let effects = session.fail_start("No destination is enabled.".to_string(), now);
+        assert!(matches!(
+            &effects[..],
+            [SessionEffect::StartFailed(failure)] if failure.kind == SessionStartFailureKind::Live
+        ));
+        // An answered resume leaves no mark behind for the start after it.
+        assert!(session.begin_start(intent));
+        session.mark_start_resumes();
+        session.finish_start(live("s1"), now);
+        session.apply_reported_status(status(RecordingState::Idle, Some("s1")), now);
+        assert!(session.begin_start(intent));
+        let effects = session.fail_start("Busy.".to_string(), now);
+        assert!(matches!(
+            &effects[..],
+            [SessionEffect::StartFailed(failure)] if failure.kind == SessionStartFailureKind::Live
+        ));
     }
 
     #[test]

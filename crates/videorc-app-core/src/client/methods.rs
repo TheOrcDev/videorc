@@ -73,6 +73,13 @@ method!(
     SessionStart, "session.start", StartSessionParams => RecordingStatus
 );
 method!(
+    /// Plan 184 C5b: Resume a solo show that is live on Videorc Cloud. The
+    /// same start as `session.start`, bound to the live show: the backend
+    /// feeds the show's ingest and the runner keeps every platform leg
+    /// (120 s deadline).
+    CloudShowResume, "cloud.show.resume", StartSessionParams => RecordingStatus
+);
+method!(
     /// Stop: ends the recording and the stream together (120 s deadline).
     SessionStop, "session.stop", SessionStopParams => RecordingStatus
 );
@@ -324,6 +331,11 @@ mod tests {
     #[test]
     fn the_wire_names_are_the_backend_methods() {
         assert_eq!(SessionStart::NAME, "session.start");
+        assert_eq!(CloudShowResume::NAME, "cloud.show.resume");
+        assert_eq!(
+            backend_request_timeout(CloudShowResume::NAME),
+            backend_request_timeout(SessionStart::NAME)
+        );
         assert_eq!(SessionStop::NAME, "session.stop");
         assert_eq!(RecordingStatusGet::NAME, "recording.status");
         assert_eq!(PreviewSurfaceCreate::NAME, "preview.surface.create");

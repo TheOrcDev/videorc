@@ -5,10 +5,12 @@
 //! and the Vertical stream panel edits that layout
 //! (`components/studio/vertical-stream-layout-control.tsx`).
 //!
-//! The leg's canvas (`simulcastLegVideo`: the vertical destinations' common
-//! profile, in portrait) is S1.6c's `livestream::plan::simulcast_video`; the
-//! session start's leg and the live leg sends after a commit use it once it
-//! is on `main`. The builders here take that canvas as an input.
+//! The leg's canvas ([`simulcast_leg_video`], `simulcastLegVideo`: the
+//! vertical destinations' common profile, in portrait) is S1.6c's
+//! `livestream::plan::simulcast_video`. The session start's leg is
+//! [`start_simulcast`] (S1.6b part 4c-2); the live leg sends after a commit
+//! and for the scene on stream are `super::vertical_leg`'s. The builders
+//! here take the canvas as an input.
 
 use serde_json::{Map, Value, json};
 
@@ -16,6 +18,7 @@ use super::capture_config::{self, VERTICAL_LAYOUT_PRESETS};
 use super::js_value::string;
 use super::settings::{SettingWrite, keys};
 use super::{Studio, StudioBackend};
+use crate::livestream::plan;
 use crate::scenes::framing::recalled_layout_framing;
 use crate::scenes::model::{GapSource, GapState, SourceGap, scene_gallery_reason};
 use crate::scenes::v2::{Scene, SceneShows, layout_preset_label};
@@ -70,6 +73,64 @@ pub fn simulcast_params(
         "layout": simulcast_leg_layout(&scene.vertical, program),
         "video": video,
     }))
+}
+
+/// `simulcastLegVideo`: the vertical stream's canvas, or none when no
+/// vertical stream is armed: the vertical destinations' common profile
+/// (`simulcastStreamVideo`), in portrait.
+pub fn simulcast_leg_video(config: &Value) -> Option<Value> {
+    if !capture_config::simulcast_armed(config) {
+        return None;
+    }
+    let video = plan::simulcast_video_of(config, &plan::recording_video(config));
+    Some(capture_config::coerce_video_to_orientation(
+        &json!({
+            "preset": video.preset,
+            "width": video.width,
+            "height": video.height,
+            "fps": video.fps,
+            "bitrateKbps": video.bitrate_kbps,
+        }),
+        true,
+    ))
+}
+
+/// The capture config a start is built from (`sessionCaptureConfig` in
+/// `runStartSession`): `captureConfigForIntent`'s flags in place of the
+/// saved mode, the destinations this start goes to, and the layout at the
+/// output boundary (`cameraOutputLayout`).
+pub fn session_capture_config(
+    capture: &Value,
+    record: bool,
+    stream: bool,
+    streaming: Option<Value>,
+    layout: Value,
+) -> Value {
+    let mut session = capture.as_object().cloned().unwrap_or_default();
+    session.insert("recordEnabled".into(), Value::Bool(record));
+    session.insert("streamEnabled".into(), Value::Bool(stream));
+    if let Some(streaming) = streaming {
+        session.insert("streaming".into(), streaming);
+    }
+    session.insert("layout".into(), layout);
+    Value::Object(session)
+}
+
+/// The session start's leg (`buildStartSessionParams`' `simulcast`):
+/// [`simulcast_params`] for the scene on stream over the start's config, on
+/// [`simulcast_leg_video`]'s canvas. None when no vertical stream is armed
+/// or no scene is on stream.
+pub fn start_simulcast(session: &Value, scene: Option<&Scene>) -> Option<Value> {
+    let video = simulcast_leg_video(session);
+    simulcast_params(scene, &session["layout"], video.as_ref())
+}
+
+/// [`simulcast_leg_live_request`] for a capture config: its sources, its
+/// layout as the program, and [`simulcast_leg_video`]'s canvas
+/// (`simulcastLegLiveRequest(config, scene)`).
+pub fn simulcast_leg_live_request_of(config: &Value, scene: Option<&Scene>) -> Option<Value> {
+    let video = simulcast_leg_video(config);
+    simulcast_leg_live_request(&config["sources"], scene, &config["layout"], video.as_ref())
 }
 
 /// `simulcastLegLiveRequest`: the scene transaction that moves the vertical

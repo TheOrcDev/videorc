@@ -47,9 +47,8 @@
 //! - **Delete** ([`Studio::delete_scene`]) and **the Screen pick**
 //!   ([`Studio::set_scene_on_stream_shows`]).
 //!
-//! Not here yet: rooms, the vertical leg's own sends (part 4), the camera's
-//! background on the layout (part 4), and the bell's routing of these
-//! toasts.
+//! The vertical leg's own sends after a commit are `super::vertical_leg`'s
+//! (part 4c-2). Not here yet: rooms, and the bell's routing of these toasts.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -920,7 +919,7 @@ impl Inner {
 
     /// What the capture shows now, with the working app
     /// (`showsFromSources(visualSources({...sources, app}))`).
-    fn working_shows(&self) -> SceneShows {
+    pub(super) fn working_shows(&self) -> SceneShows {
         let mut sources = self.capture.config["sources"].clone();
         if let (Value::Object(map), Some(app)) = (&mut sources, &self.scenes.switch.working_app) {
             map.insert("app".into(), app.clone());
@@ -1350,8 +1349,24 @@ impl<B: StudioBackend> Studio<B> {
             // reconciles to it.
             inner.remember_commit(committed.clone());
             inner.note_switch_phase(intent, SceneSwitchPatch::phase(SceneSwitchPhase::Drawing));
-            committed
+            // Dual-orientation (plan 231 D4): the vertical leg shows the 9:16
+            // layout of the scene this commit puts or keeps on stream, over
+            // the committed program, so a scene switch cuts both legs to the
+            // same scene, each in its own layout. Always from what
+            // committed. Idempotent on the backend.
+            let leg = session_active
+                && inner.queue_committed_leg(
+                    &committed.sources,
+                    &committed.layout,
+                    committed.saved_id.as_deref(),
+                    false,
+                );
+            (committed, leg)
         };
+        let (committed, leg) = committed;
+        if leg {
+            self.kick_vertical_leg();
+        }
         self.publish();
         // The receipt answers now; the proof and the Studio's state follow.
         // The settle task owns the transaction's end from here.
@@ -1386,7 +1401,22 @@ impl<B: StudioBackend> Studio<B> {
         let disposition =
             layout_transaction_proof_disposition(latest, intent, matches!(proof, Ok(true)));
         if disposition != ProofDisposition::IgnoreStale {
+            let (sources, layout, saved_id) = (
+                committed.sources.clone(),
+                committed.layout.clone(),
+                committed.saved_id.clone(),
+            );
             self.apply_transaction_state(committed).await;
+            // A Vertical stream edit made while this commit waited for its
+            // proof went out for the scene on stream before it; derived once
+            // more for this commit's scene, if the leg did not end on it.
+            if session_active
+                && self
+                    .lock()
+                    .queue_committed_leg(&sources, &layout, saved_id.as_deref(), true)
+            {
+                self.kick_vertical_leg();
+            }
             if disposition == ProofDisposition::ApplyUnproven {
                 self.say_unproven(proof.err(), revision.unwrap_or(0), generation);
             }

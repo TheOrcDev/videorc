@@ -4,6 +4,12 @@
 //! a lost show, a restart, the cap, the announcement) is a notification since
 //! plan 250 and lands with the notification centre (S1.6e).
 //!
+//! Back in the room by itself after a backend restart (owner call
+//! 2026-11-19; `use-talk-show-room.ts`' rejoin effect over
+//! `lib/talk-show-auto-rejoin.ts`, here `guests::session::run_auto_rejoin`):
+//! the room this app had open is asked for again once per connection, and
+//! [`CloudState::talk_rejoining`] (`talkShow.rejoining`) says so meanwhile.
+//!
 //! The status also drives the platform cleanup (`platform_lifecycle`): a
 //! hand-off drops the session's owner, and the show's end settles its
 //! cleanup unless the show was handed off (`cloudTerminalOwner`).
@@ -14,6 +20,10 @@ use tokio::sync::watch;
 use super::screen_views::cloud_recording_active;
 use super::{Studio, StudioBackend};
 use crate::client::RpcError;
+use crate::guests::session::{
+    AutoRejoinFailure, AutoRejoinHeld, AutoRejoinIo, AutoRejoinOutcome, TalkShowFacts,
+    run_auto_rejoin,
+};
 use crate::livestream::cloud_outputs::{self, CloudTestOutput};
 use crate::livestream::cloud_provider::cloud_terminal_owner;
 use crate::livestream::cloud_show::HAND_OFF_UNCONFIRMED;
@@ -36,6 +46,7 @@ const SHOW_HAND_OFF: &str = "cloud.show.handOff";
 const SHOW_CHECK: &str = "cloud.show.check";
 const SELFTEST_RUN: &str = "cloud.selftest.run";
 const RECORDING_STOP: &str = "cloud.recording.stop";
+const ROOM_RESUME: &str = "cloud.room.resume";
 /// `stopCloudRecording`'s failure: "Couldn't stop the cloud recording".
 const STOP_THE_CLOUD_RECORDING: UserErrorContext = UserErrorContext {
     action: "stop the cloud recording",
@@ -54,7 +65,101 @@ pub struct CloudState {
     /// Stop recording's `cloud.recording.stop` is out (`stopRequestPending`
     /// in a talk show): Record reads "Stopping…" and a second click waits.
     pub recording_stop_pending: bool,
+    /// `talkShow.rejoining`: the Studio is going back into its talk show's
+    /// room by itself after a backend restart. The Resume notice reads
+    /// "Reconnecting to your show…" and its Resume waits.
+    pub talk_rejoining: bool,
+    /// `heldRoomRef`: the show whose room this app has open, and the
+    /// connection (the bootstrap generation) that held it.
+    held_room: Option<(String, u64)>,
+    /// `autoResumedRef`: the connection this app already sent its own
+    /// resume to.
+    auto_resumed: Option<u64>,
     checked_at_ms: u64,
+}
+
+/// Ends `talk_rejoining` however the rejoin ends, a replaced (dropped)
+/// attempt included (the effect's cleanup: `setRejoining(false)`).
+struct TalkRejoining<'a>(&'a watch::Sender<CloudState>);
+
+impl Drop for TalkRejoining<'_> {
+    fn drop(&mut self) {
+        self.0
+            .send_if_modified(|state| std::mem::take(&mut state.talk_rejoining));
+    }
+}
+
+/// `cloudStatus.room.phase === 'open'`.
+fn room_open(status: &CloudStatus) -> bool {
+    status
+        .room
+        .as_ref()
+        .and_then(|room| room.get("phase"))
+        .and_then(Value::as_str)
+        == Some("open")
+}
+
+/// What one connection's rejoin needs from the Studio (`runAutoRejoin`'s
+/// callbacks).
+struct RejoinIo<'a, B: StudioBackend> {
+    studio: &'a Studio<B>,
+    generation: u64,
+    /// The resume's answer, for the commit after it.
+    resumed: Option<CloudStatus>,
+}
+
+impl<B: StudioBackend> RejoinIo<'_, B> {
+    async fn ask(&mut self, method: &'static str) -> anyhow::Result<(Value, TalkShowFacts)> {
+        let answer = self
+            .studio
+            .backend
+            .livestream_request(method, Value::Null)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let facts = serde_json::from_value::<TalkShowFacts>(answer.clone())?;
+        Ok((answer, facts))
+    }
+}
+
+impl<B: StudioBackend> AutoRejoinIo for RejoinIo<'_, B> {
+    async fn read_status(&mut self) -> anyhow::Result<TalkShowFacts> {
+        let (answer, facts) = self.ask(STATUS).await?;
+        // `onStatus`: each status the backend answered, for the Studio to
+        // show (never one a newer connection overtook).
+        if !self.cancelled()
+            && let Some(status) = CloudStatus::from_value(&answer)
+        {
+            self.studio.commit_cloud(status).await;
+        }
+        Ok(facts)
+    }
+
+    async fn resume(&mut self) -> anyhow::Result<TalkShowFacts> {
+        let generation = self.generation;
+        self.studio.edit_cloud(|state| {
+            state.auto_resumed = Some(generation);
+            false
+        });
+        let (answer, facts) = self.ask(ROOM_RESUME).await?;
+        self.resumed = CloudStatus::from_value(&answer);
+        Ok(facts)
+    }
+
+    async fn sleep(&mut self, ms: u64) {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
+
+    fn cancelled(&self) -> bool {
+        self.studio.lock().bootstrap_generation != self.generation
+    }
+
+    fn on_reconnecting(&mut self) {
+        self.studio.edit_cloud(|state| {
+            let changed = !state.talk_rejoining;
+            state.talk_rejoining = true;
+            changed
+        });
+    }
 }
 
 /// Clears `recording_stop_pending` however the stop ends, a dropped future
@@ -109,13 +214,20 @@ impl<B: StudioBackend> Studio<B> {
     /// (Continue here) ends the latch. A show that ended (not handed off,
     /// no stop running) gives its owner back to be settled.
     fn commit_cloud_status(&self, next: CloudStatus) -> Option<Owner> {
-        let (recording_session, stopping) = {
+        let (recording_session, stopping, generation) = {
             let inner = self.lock();
             (
                 inner.session.status().session_id.clone(),
                 inner.session.stop_pending(),
+                inner.bootstrap_generation,
             )
         };
+        // `heldRoomRef`: the room this app has open, under this connection.
+        let open_show = next
+            .show
+            .as_ref()
+            .map(|show| show.id.clone())
+            .filter(|id| !id.is_empty() && room_open(&next));
         let mut latched = None;
         let mut terminal = None;
         self.edit_cloud(|state| {
@@ -139,6 +251,20 @@ impl<B: StudioBackend> Studio<B> {
             }
             terminal = cloud_terminal_owner(previous.as_ref(), &next)
                 .filter(|id| !state.handed_off.contains(id));
+            match open_show {
+                Some(show) => state.held_room = Some((show, generation)),
+                // Closed, ended or taken over under the connection that held
+                // it: nothing is owed to a later restart.
+                None => {
+                    if state
+                        .held_room
+                        .as_ref()
+                        .is_some_and(|(_, held)| *held == generation)
+                    {
+                        state.held_room = None;
+                    }
+                }
+            }
             state.status = Some(next);
             true
         });
@@ -162,6 +288,77 @@ impl<B: StudioBackend> Studio<B> {
     pub(super) async fn read_cloud(&self) {
         if let Ok(status) = self.cloud_request(STATUS, Value::Null).await {
             self.commit_cloud(status).await;
+        }
+    }
+
+    /// The show whose room an earlier connection held and this one was not
+    /// asked to resume yet (`held.client !== client && autoResumedRef.current
+    /// !== client`): the rejoin's work.
+    pub(super) fn talk_room_rejoin_due(&self) -> Option<(String, u64)> {
+        let generation = self.lock().bootstrap_generation;
+        let state = self.cloud_tx.borrow();
+        match &state.held_room {
+            Some((show, held)) if *held != generation && state.auto_resumed != Some(generation) => {
+                Some((show.clone(), generation))
+            }
+            _ => None,
+        }
+    }
+
+    /// Back in the room by itself after a backend restart: a restarted
+    /// backend takes the host out of the room and holds the show as
+    /// resumable until someone asks for it. This asks, once per connection,
+    /// when the room it had open is still this computer's
+    /// (`auto_rejoin_decision`); the resume it sends is the one the notice's
+    /// button sends. [`Studio::drive`] runs it beside the events, and a
+    /// newer connection's attempt replaces (drops) it.
+    pub(super) async fn rejoin_talk_room(&self) {
+        let Some((show_id, generation)) = self.talk_room_rejoin_due() else {
+            return;
+        };
+        let _rejoining = TalkRejoining(&self.cloud_tx);
+        let mut io = RejoinIo {
+            studio: self,
+            generation,
+            resumed: None,
+        };
+        let outcome = run_auto_rejoin(&AutoRejoinHeld { show_id }, &mut io).await;
+        let resumed = io.resumed.take();
+        match outcome {
+            AutoRejoinOutcome::Cancelled => {}
+            AutoRejoinOutcome::Resumed(_) => {
+                self.edit_cloud(|state| std::mem::take(&mut state.talk_rejoining));
+                if let Some(status) = resumed {
+                    self.commit_cloud(status).await;
+                }
+            }
+            ended => {
+                // Whatever ended it, this room is not asked for again by
+                // itself.
+                self.edit_cloud(|state| {
+                    if state
+                        .held_room
+                        .as_ref()
+                        .is_some_and(|(_, held)| *held != generation)
+                    {
+                        state.held_room = None;
+                    }
+                    std::mem::take(&mut state.talk_rejoining)
+                });
+                if let AutoRejoinOutcome::Failed(failure) = ended {
+                    let reason = match failure {
+                        AutoRejoinFailure::Unconfirmed => {
+                            "the show was not confirmed as this computer's".to_string()
+                        }
+                        AutoRejoinFailure::ResumeFailed(reason) => {
+                            reason.unwrap_or_else(|| "the resume failed".to_string())
+                        }
+                    };
+                    self.config.logger.warn(format!(
+                        "[talk-show] could not rejoin the room by itself: {reason}"
+                    ));
+                }
+            }
         }
     }
 

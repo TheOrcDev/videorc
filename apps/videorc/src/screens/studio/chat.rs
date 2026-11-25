@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, ClipboardItem, Context, FocusHandle, FollowMode, FontStyle, FontWeight,
-    HighlightStyle, Image, ImageFormat, KeyDownEvent, ListAlignment, ListState, ObjectFit,
-    StrikethroughStyle, StyledText, WeakEntity, Window, div, img, list, prelude::*, px,
+    HighlightStyle, Image, ImageFormat, KeyDownEvent, ListAlignment, ListState, StrikethroughStyle,
+    StyledText, WeakEntity, Window, div, list, prelude::*, px,
 };
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -42,8 +42,11 @@ use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{self, TypeScale, hsla, with_alpha};
 use videorc_kit::toast::{ToastData, ToastKind};
 use videorc_kit::tokens::{Theme, radius, text};
-use videorc_kit::tooltip::{tooltip, tooltip_with_shortcut};
-use videorc_kit::{Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Empty, PanelSection};
+use videorc_kit::tooltip::{tooltip, tooltip_with_accelerator};
+use videorc_kit::{
+    Avatar, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, ChatPlatform, Empty,
+    PanelSection,
+};
 
 use super::transport::AppStudio;
 use crate::screens::notifications::{Delivery, Shared as Notices};
@@ -55,11 +58,14 @@ const OVERLAY_LAYOUT_EVENT: &str = "overlays.layout";
 /// filter.
 pub const EVENTS: [&str; 2] = [driver::STATUS_EVENT, OVERLAY_LAYOUT_EVENT];
 
-/// `Avatar size="sm"`.
-const AVATAR_PX: f32 = 24.;
 /// The row's words: `text-sm leading-snug`.
 const ROW_TEXT_PX: f32 = 14.;
 const ROW_LINE_PX: f32 = 19.;
+/// The platform mark: one 20 px height for every platform (plan 165,
+/// YouTube's minimum).
+const MARK_PX: f32 = 20.;
+/// The jump chip's ArrowDown (`data-icon="inline-end"`).
+const JUMP_ICON_PX: f32 = 12.;
 /// How many rows the list measures beyond its edges.
 const OVERDRAW_PX: f32 = 256.;
 /// Avatars kept beyond the rows on screen before the cache is trimmed.
@@ -71,7 +77,7 @@ const SCROLL_SETTLE: Duration = Duration::from_millis(100);
 /// A row's picture: the cached avatar, or the monogram while it loads or
 /// when it can't.
 #[derive(Clone)]
-enum Avatar {
+enum Picture {
     Loading,
     Ready(Arc<Image>),
     Failed,
@@ -96,17 +102,26 @@ impl Gate {
     }
 }
 
-/// The `comments-window` key as GPUI writes it, for the Open Stream Manager
-/// tooltip (`shortcutAccelerator('comments-window')`).
-fn stream_manager_keys() -> Option<&'static str> {
-    static KEYS: OnceLock<Option<&'static str>> = OnceLock::new();
-    *KEYS.get_or_init(|| {
-        shortcut_accelerator(OPEN_STREAM_MANAGER_SHORTCUT).map(|accelerator| {
-            let keys: &'static str =
-                Box::leak(crate::app::menus::keystroke(&accelerator).into_boxed_str());
-            keys
-        })
-    })
+/// The `comments-window` accelerator, for the Open Stream Manager tooltip
+/// (`shortcutAccelerator('comments-window')`).
+fn stream_manager_accelerator() -> Option<&'static str> {
+    static KEYS: OnceLock<Option<String>> = OnceLock::new();
+    KEYS.get_or_init(|| shortcut_accelerator(OPEN_STREAM_MANAGER_SHORTCUT))
+        .as_deref()
+}
+
+/// `ChatPlatformIcon`'s platform: the backend's id, anything else custom.
+fn chat_platform(platform: &str) -> ChatPlatform {
+    match platform {
+        "youtube" => ChatPlatform::Youtube,
+        "twitch" => ChatPlatform::Twitch,
+        "kick" => ChatPlatform::Kick,
+        "x" => ChatPlatform::X,
+        "facebook" => ChatPlatform::Facebook,
+        "tiktok" => ChatPlatform::Tiktok,
+        "instagram" => ChatPlatform::Instagram,
+        _ => ChatPlatform::Custom,
+    }
 }
 
 /// `setSettings({...current, studioChat: on})`.
@@ -146,7 +161,7 @@ pub struct ChatSection {
     /// Space press the active row.
     focus: FocusHandle,
     active: Option<String>,
-    avatars: Rc<HashMap<String, Avatar>>,
+    avatars: Rc<HashMap<String, Picture>>,
 }
 
 impl ChatSection {
@@ -422,7 +437,7 @@ impl ChatSection {
         if self.avatars.contains_key(&url) {
             return;
         }
-        Rc::make_mut(&mut self.avatars).insert(url.clone(), Avatar::Loading);
+        Rc::make_mut(&mut self.avatars).insert(url.clone(), Picture::Loading);
         let backend = self.studio.backend().clone();
         let remote = url.clone();
         let job = self.runtime.spawn(async move {
@@ -442,9 +457,9 @@ impl ChatSection {
                             ImageKind::Gif => ImageFormat::Gif,
                             ImageKind::Webp => ImageFormat::Webp,
                         };
-                        Avatar::Ready(Arc::new(Image::from_bytes(format, bytes)))
+                        Picture::Ready(Arc::new(Image::from_bytes(format, bytes)))
                     }
-                    None => Avatar::Failed,
+                    None => Picture::Failed,
                 };
                 Rc::make_mut(&mut section.avatars).insert(url, avatar);
                 cx.notify();
@@ -643,6 +658,7 @@ impl ChatSection {
             self.incomplete = false;
         }
         let show_jump = !following && !self.rows.is_empty();
+        let jump_ink = hsla(theme::resolve(None, window, cx).secondary_foreground);
         let (jump_label, jump_name) = view::jump_chip(self.unread, self.incomplete);
         let body: AnyElement = if self.rows.is_empty() {
             div()
@@ -701,6 +717,7 @@ impl ChatSection {
                             .variant(ButtonVariant::Secondary)
                             .size(ButtonSize::Xs)
                             .accessibility_label(jump_name)
+                            .child(icon(IconName::ArrowDown, JUMP_ICON_PX, jump_ink))
                             .on_click(cx.listener(|section, _, _, cx| section.follow(cx))),
                     )
             }))
@@ -723,8 +740,11 @@ impl Render for ChatSection {
             .accessibility_label(copy::OPEN_STREAM_MANAGER)
             .on_click(|_, _, cx| crate::screens::stream_manager::window::show(cx));
         let open_tip = div().id("studio-chat-open-stream-manager-tip");
-        let open = match stream_manager_keys() {
-            Some(keys) => open_tip.tooltip(tooltip_with_shortcut(copy::OPEN_STREAM_MANAGER, keys)),
+        let open = match stream_manager_accelerator() {
+            Some(accelerator) => open_tip.tooltip(tooltip_with_accelerator(
+                copy::OPEN_STREAM_MANAGER,
+                accelerator,
+            )),
             None => open_tip.tooltip(tooltip(copy::OPEN_STREAM_MANAGER)),
         }
         .child(open);
@@ -763,7 +783,7 @@ fn chat_row(
     row: &ChatRowView,
     index: usize,
     active: Option<&str>,
-    avatars: &HashMap<String, Avatar>,
+    avatars: &HashMap<String, Picture>,
     section: &WeakEntity<ChatSection>,
     t: &'static Theme,
 ) -> AnyElement {
@@ -781,30 +801,15 @@ fn chat_row(
         .avatar_url
         .as_ref()
         .and_then(|url| match avatars.get(url) {
-            Some(Avatar::Ready(image)) => Some(image.clone()),
-            Some(Avatar::Loading | Avatar::Failed) | None => None,
+            Some(Picture::Ready(image)) => Some(image.clone()),
+            Some(Picture::Loading | Picture::Failed) | None => None,
         });
-    let avatar = div()
-        .flex_none()
-        .mt(px(1.))
-        .size(px(AVATAR_PX))
-        .rounded_full()
-        .overflow_hidden()
-        .bg(hsla(t.muted))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(match picture {
-            Some(image) => img(image)
-                .size_full()
-                .object_fit(ObjectFit::Cover)
-                .into_any_element(),
-            None => div()
-                .type_scale(text::META)
-                .text_color(muted)
-                .child(row.initials.clone())
-                .into_any_element(),
-        });
+    // `Avatar size="sm"` with the monogram behind the picture.
+    let avatar = match picture {
+        Some(image) => Avatar::new(row.initials.clone()).sm().image(image),
+        None => Avatar::new(row.initials.clone()).sm(),
+    }
+    .mt(px(1.));
 
     let words = div()
         .flex()
@@ -853,14 +858,12 @@ fn chat_row(
         )
         .children(arrival)
         .children(chips)
-        // The platform mark closes the row (plan 165). The kit has no
-        // platform marks yet, so the platform's name stands in for it.
-        .child(
-            div()
-                .type_scale(text::META)
-                .text_color(muted)
-                .child(row.platform_label),
-        );
+        // The platform mark closes the row (plan 165): decorative, its words
+        // are in the row's name.
+        .child({
+            let platform = chat_platform(&row.platform);
+            icon(platform.icon(), MARK_PX, platform.tint_hsla(t))
+        });
 
     let focused = active == Some(row.id.as_str());
     let pressable = row.pressable();

@@ -409,8 +409,22 @@ impl<B: StudioBackend> Studio<B> {
         // The dialog closes as the start goes (`setGoLiveConfirmationOpen(false)`).
         self.edit_go_live(|state| *state = GoLiveState::default());
         let record = self.snapshot().settings.capture.record_enabled;
+        // The run this Go Live's activations belong to, read before the
+        // start (`lifecycleRunId`): a stop that waited for the start claims
+        // the owner it installed and moves the run on, and no activation
+        // starts after it.
+        let run = self.platform.run();
+        // The start installs the session's owner from its answer, before a
+        // waiting stop runs (`sessionStartInFlightRef`).
         let outcome = self
-            .start(SessionStartIntent::livestream(record), Some(typed))
+            .start_via(
+                SessionStartIntent::livestream(record),
+                Some(typed),
+                super::StartVia {
+                    rpc: super::StartRpc::SessionStart,
+                    owner: Some(streaming.clone()),
+                },
+            )
             .await;
         let session_id = self
             .snapshot()
@@ -424,11 +438,53 @@ impl<B: StudioBackend> Studio<B> {
             self.settle_prepared_platforms(streaming).await;
             return;
         };
-        self.platform.install(Owner {
-            session_id: session_id.clone(),
-            streaming: streaming.clone(),
-        });
-        self.activate_platforms(streaming, Some(session_id)).await;
+        self.activate_platforms(streaming, Some(session_id), run)
+            .await;
+    }
+
+    /// The scripted tests' Go Live from the start on: what the dialog
+    /// prepared goes out, the owner is installed by the start, then the
+    /// activation.
+    #[doc(hidden)]
+    pub async fn start_prepared_for_tests(&self, streaming: Value) {
+        self.start_prepared(streaming).await;
+    }
+
+    /// `resumeCloudShow` (plan 184 C5b): the Resume notice for a solo show
+    /// that is live on Videorc Cloud. The runner holds every platform leg,
+    /// so nothing is set up again: no dialog, no preflight, no metadata
+    /// update, no broadcast (a new YouTube broadcast here split the live one
+    /// and its VOD). The saved destinations go along as rows only; the
+    /// backend binds the start to the show (`cloud.show.resume`) and feeds
+    /// its ingest. Same guards as Go Live: busy, or blocked for a reason.
+    /// True when the session runs.
+    pub async fn resume_cloud_show(&self) -> bool {
+        let state = self.go_live_now();
+        if state.open || state.pending || self.start_in_flight() {
+            return false;
+        }
+        if let Some(reason) = self.live_start_blocked_reason() {
+            self.refuse_go_live(reason);
+            return false;
+        }
+        let (intent, streaming) = {
+            let capture = self.snapshot().settings.capture;
+            (
+                SessionStartIntent::livestream(capture.record_enabled),
+                capture.streaming,
+            )
+        };
+        let outcome = self
+            .start_via(
+                intent,
+                streaming,
+                super::StartVia {
+                    rpc: super::StartRpc::CloudShowResume,
+                    owner: None,
+                },
+            )
+            .await;
+        outcome == super::StartOutcome::Started
     }
 
     /// The scripted tests' way onto the air without a whole Go Live: the
@@ -440,7 +496,8 @@ impl<B: StudioBackend> Studio<B> {
             session_id: session_id.to_string(),
             streaming: streaming.clone(),
         });
-        self.activate_platforms(streaming, Some(session_id.to_string()))
+        let run = self.platform.run();
+        self.activate_platforms(streaming, Some(session_id.to_string()), run)
             .await;
     }
 
@@ -723,8 +780,9 @@ impl<B: StudioBackend> Studio<B> {
 
     /// On air: YouTube's broadcasts go live once their ingest is active
     /// (`activatePreparedYouTubeBroadcasts`), X's are published.
-    async fn activate_platforms(&self, mut streaming: Value, session_id: Option<String>) {
-        let run = self.platform.run();
+    /// `run` is the lifecycle run the activations belong to: once a stop, a
+    /// hand-off or the show's end moved it on, nothing more is activated.
+    async fn activate_platforms(&self, mut streaming: Value, session_id: Option<String>, run: u64) {
         let talk_show = self.talk_show_room_open();
         for id in lifecycle::youtube_activation_targets(&streaming) {
             if self.platform.run() != run {
