@@ -352,3 +352,23 @@ fn gpui_key_names_become_dom_codes() {
         assert_eq!(code_for_gpui_key(key), code, "{key}");
     }
 }
+
+#[test]
+fn a_released_lone_modifier_reads_as_held_keys() {
+    for key in ["shift", "control", "alt", "platform", "function"] {
+        let input = KeyInput {
+            code: code_for_gpui_key(key),
+            meta: false,
+            control: false,
+            alt: false,
+            shift: false,
+            key_up: false,
+        };
+        assert_eq!(
+            accelerator_from_key_input(&input, MAC),
+            KeyResult::Modifiers(Vec::new()),
+            "{key}"
+        );
+    }
+    assert_eq!(code_for_gpui_key("k"), "KeyK");
+}

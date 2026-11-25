@@ -111,7 +111,7 @@ impl SettingsScreen {
         let config = self.shortcut_config();
         let scenes = self.shortcut_scenes();
         let input = a::KeyInput {
-            code: key_code(&key.key),
+            code: a::code_for_gpui_key(&key.key),
             meta: key.modifiers.platform,
             control: key.modifiers.control,
             alt: key.modifiers.alt,
@@ -364,52 +364,4 @@ impl SettingsScreen {
             )
             .into_any_element()
     }
-}
-
-fn key_code(key: &str) -> String {
-    if key.len() == 1 {
-        let c = key.chars().next().unwrap();
-        if c.is_ascii_alphabetic() {
-            return format!("Key{}", c.to_ascii_uppercase());
-        }
-        if c.is_ascii_digit() {
-            return format!("Digit{c}");
-        }
-    }
-    if key
-        .strip_prefix('f')
-        .is_some_and(|n| n.parse::<u8>().is_ok_and(|n| (1..=24).contains(&n)))
-    {
-        return key.to_ascii_uppercase();
-    }
-    match key {
-        "escape" => "Escape",
-        "backspace" => "Backspace",
-        "delete" => "Delete",
-        "enter" => "Enter",
-        "space" => "Space",
-        "tab" => "Tab",
-        "up" => "ArrowUp",
-        "down" => "ArrowDown",
-        "left" => "ArrowLeft",
-        "right" => "ArrowRight",
-        "home" => "Home",
-        "end" => "End",
-        "pageup" => "PageUp",
-        "pagedown" => "PageDown",
-        "insert" => "Insert",
-        "-" => "Minus",
-        "=" => "Equal",
-        "[" => "BracketLeft",
-        "]" => "BracketRight",
-        "\\" => "Backslash",
-        ";" => "Semicolon",
-        "'" => "Quote",
-        "," => "Comma",
-        "." => "Period",
-        "/" => "Slash",
-        "`" => "Backquote",
-        _ => "Unsupported",
-    }
-    .into()
 }
