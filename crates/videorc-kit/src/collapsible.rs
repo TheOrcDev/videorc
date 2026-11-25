@@ -26,6 +26,8 @@ pub struct Collapsible {
     trigger: AnyElement,
     content: Option<AnyElement>,
     on_toggle: Option<ToggleHandler>,
+    /// Electron Base UI Collapsible is unstyled; the kit chrome is opt-in.
+    unstyled: bool,
     appearance: Option<Appearance>,
     base: Div,
 }
@@ -39,6 +41,7 @@ impl Collapsible {
             trigger: SharedString::from("").into_any_element(),
             content: None,
             on_toggle: None,
+            unstyled: false,
             appearance: None,
             base: div(),
         }
@@ -71,6 +74,12 @@ impl Collapsible {
         self
     }
 
+    /// No kit chrome: no caret, hover fill, chip radius, or content indent.
+    pub fn unstyled(mut self, unstyled: bool) -> Self {
+        self.unstyled = unstyled;
+        self
+    }
+
     /// Draws in this appearance instead of the window's (the gallery).
     pub fn appearance(mut self, appearance: Appearance) -> Self {
         self.appearance = Some(appearance);
@@ -90,45 +99,52 @@ impl RenderOnce for Collapsible {
         let open = self.open;
         let disabled = self.disabled;
         let on_toggle = self.on_toggle;
-        let chevron = icon(
-            if open {
-                IconName::CaretDown
-            } else {
-                IconName::CaretRight
-            },
-            14.0,
-            hsla(t.muted_foreground),
-        );
+        let unstyled = self.unstyled;
 
-        let mut header = div()
-            .id(self.id)
-            .flex()
-            .w_full()
-            .items_center()
-            .gap(px(8.0))
-            .rounded(px(radius::CHIP))
-            .px(px(4.0))
-            .py(px(6.0))
-            .child(chevron)
-            .child(div().flex_1().min_w(px(0.0)).child(self.trigger));
+        let mut header = div().id(self.id).flex().w_full().items_center();
+        if unstyled {
+            header = header.child(div().flex_1().min_w(px(0.0)).child(self.trigger));
+        } else {
+            let chevron = icon(
+                if open {
+                    IconName::CaretDown
+                } else {
+                    IconName::CaretRight
+                },
+                14.0,
+                hsla(t.muted_foreground),
+            );
+            header = header
+                .gap(px(8.0))
+                .rounded(px(radius::CHIP))
+                .px(px(4.0))
+                .py(px(6.0))
+                .child(chevron)
+                .child(div().flex_1().min_w(px(0.0)).child(self.trigger));
+        }
 
         if disabled {
             header = header.opacity(0.5);
         } else {
-            header = header
-                .cursor_pointer()
-                .hover(|style| style.bg(hsla(t.muted)))
-                .on_click(move |_, window, cx| {
-                    if let Some(on_toggle) = &on_toggle {
-                        on_toggle(!open, window, cx);
-                    }
-                });
+            header = header.cursor_pointer().on_click(move |_, window, cx| {
+                if let Some(on_toggle) = &on_toggle {
+                    on_toggle(!open, window, cx);
+                }
+            });
+            if !unstyled {
+                header = header.hover(|style| style.bg(hsla(t.muted)));
+            }
         }
 
         let mut root = self.base.flex().flex_col().w_full().child(header);
         if open {
             if let Some(content) = self.content {
-                root = root.child(div().w_full().pt(px(4.0)).pl(px(22.0)).child(content));
+                let panel = if unstyled {
+                    div().w_full().child(content)
+                } else {
+                    div().w_full().pt(px(4.0)).pl(px(22.0)).child(content)
+                };
+                root = root.child(panel);
             }
         }
         root

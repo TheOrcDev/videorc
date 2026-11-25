@@ -35,7 +35,7 @@ use videorc_kit::{
     input::{Input, InputState},
     select::Select,
     theme::{self, TypeScale, hsla},
-    tokens::{font, text},
+    tokens::text,
 };
 
 /// `AGENT_ADD_TIMEOUT_MS`: `claude mcp remove` then `add` take up to 28 s.
@@ -537,7 +537,7 @@ impl ConnectAgentDialog {
             .border_color(hsla(t.border))
             .bg(hsla(t.muted))
             .p(px(12.))
-            .font_family(font::MONO[0])
+            .font_family(crate::lcd::SCREEN_FONT)
             .type_scale(text::META)
             .text_color(hsla(t.foreground))
             .child(line_display(&shown.line, &shown.token, self.shown));

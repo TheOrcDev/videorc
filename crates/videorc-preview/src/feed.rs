@@ -333,6 +333,13 @@ pub enum FeedCommand {
     /// S3.1b: the smokes' suspend (true) destroys the surface and presents
     /// nothing until the resume (false) creates it again.
     Suspend(bool),
+    /// The Preview is closed (true): the same as the smokes' suspend, for
+    /// its own reason, so neither one's resume undoes the other's. Electron
+    /// destroys its native host when the Preview closes, so a closed Preview
+    /// draws nothing and the backend renders no preview frames; opening it
+    /// (false) creates the surface again and the first-frame contract starts
+    /// from the top.
+    Park(bool),
     /// S3.1b: take the backend's native host commands
     /// (`preview.surface.take_native_host_commands`): the element places
     /// its own layer, so they are read, logged and dropped.
@@ -435,6 +442,9 @@ pub struct Telemetry {
     pub last_scene_commit: Option<SceneCommitRecord>,
     /// S3.1b: the smokes' suspend holds the surface down.
     pub suspended: bool,
+    /// The Preview is closed: the surface is down until it opens
+    /// ([`FeedCommand::Park`]).
+    pub parked: bool,
     /// S3.1b: the backend's native host commands the feed took.
     pub host_commands_taken: u64,
     /// S3.1b: the backend's latest `preview.surface.status`.
@@ -862,6 +872,8 @@ struct Carried {
     bounds: Option<PreviewSurfaceBounds>,
     /// S3.1b: the smokes' suspend outlives a reconnect.
     suspended: bool,
+    /// A closed Preview's park outlives a reconnect too.
+    parked: bool,
     #[cfg(target_os = "macos")]
     presenter: Option<PresenterClient>,
     /// S4.2c: the Linux presenter the CPU frames go to.
@@ -893,6 +905,7 @@ async fn run(
     let mut carried = Carried {
         bounds: None,
         suspended: false,
+        parked: false,
         #[cfg(target_os = "macos")]
         presenter,
         #[cfg(target_os = "linux")]
@@ -1054,6 +1067,29 @@ impl Carried {
         Ok(texture)
     }
 
+    /// The surface is held down: the smokes' suspend or a closed Preview.
+    fn held(&self) -> bool {
+        self.suspended || self.parked
+    }
+
+    /// Why the surface is held down, for the log.
+    fn held_why(&self) -> &'static str {
+        match (self.suspended, self.parked) {
+            (true, _) => "suspended",
+            (false, true) => "parked (the Preview is closed)",
+            (false, false) => "held",
+        }
+    }
+
+    /// What brings it back, for the log.
+    fn held_until(&self) -> &'static str {
+        match (self.suspended, self.parked) {
+            (true, true) => "the resume and the Preview opening",
+            (true, false) => "the resume",
+            (false, _) => "the Preview opens",
+        }
+    }
+
     fn idle_command(&mut self, command: FeedCommand, telemetry: &Arc<Mutex<Telemetry>>) {
         match command {
             FeedCommand::Bounds(bounds) => self.bounds = Some(bounds),
@@ -1105,6 +1141,12 @@ impl Carried {
                 self.suspended = on;
                 if let Ok(mut t) = telemetry.lock() {
                     t.suspended = on;
+                }
+            }
+            FeedCommand::Park(on) => {
+                self.parked = on;
+                if let Ok(mut t) = telemetry.lock() {
+                    t.parked = on;
                 }
             }
             FeedCommand::Stop => {}
@@ -1559,6 +1601,7 @@ async fn session(
         t.scene_run_id = None;
         t.scene_commit_in_flight = false;
         t.suspended = carried.suspended;
+        t.parked = carried.parked;
     }
     let mut lease = Lease {
         socket: lease_socket,
@@ -1924,7 +1967,7 @@ async fn session_body(
         }
     }
     let mut sent_bounds = carried.bounds.clone().unwrap_or_else(default_bounds);
-    let mut surface_up = !carried.suspended;
+    let mut surface_up = !carried.held();
     if surface_up {
         create_surface(control, config, &sent_bounds, telemetry).await?;
         drain_if_pending(lease, config, telemetry).await;
@@ -1934,7 +1977,11 @@ async fn session_body(
     } else {
         config.logger.log(
             Level::Info,
-            "[preview] suspended: no surface until the resume",
+            &format!(
+                "[preview] {}: no surface until {}",
+                carried.held_why(),
+                carried.held_until()
+            ),
         );
     }
 
@@ -2083,7 +2130,7 @@ async fn session_body(
                         Err(error) => config.logger.log(Level::Warn, &format!("[preview] reset: destroy: {error}")),
                     }
                     sent_bounds = carried.bounds.clone().unwrap_or_else(default_bounds);
-                    if !carried.suspended {
+                    if !carried.held() {
                         create_surface(control, config, &sent_bounds, telemetry).await?;
                         surface_up = true;
                         {
@@ -2103,12 +2150,14 @@ async fn session_body(
                     drain_if_pending(lease, config, telemetry).await;
                     last_presented = None;
                 }
-                Some(FeedCommand::Suspend(on)) => {
-                    carried.suspended = on;
-                    if let Ok(mut t) = telemetry.lock() {
-                        t.suspended = on;
-                    }
-                    if on && surface_up {
+                Some(command @ (FeedCommand::Suspend(_) | FeedCommand::Park(_))) => {
+                    // The smokes' suspend and a closed Preview's park hold the
+                    // surface down for their own reasons: down while either
+                    // holds, back when neither does.
+                    let why = carried.held_why();
+                    carried.idle_command(command, telemetry);
+                    let held = carried.held();
+                    if held && surface_up {
                         pending = None;
                         let _ = lease.release().await;
                         match control.call::<PreviewSurfaceDestroy>(&()).await {
@@ -2116,8 +2165,8 @@ async fn session_body(
                             Err(error) => config.logger.log(Level::Warn, &format!("[preview] suspend: destroy: {error}")),
                         }
                         surface_up = false;
-                        config.logger.log(Level::Info, "[preview] suspended: the surface is down until the resume");
-                    } else if !on && !surface_up {
+                        config.logger.log(Level::Info, &format!("[preview] {}: the surface is down until {}", carried.held_why(), carried.held_until()));
+                    } else if !held && !surface_up {
                         sent_bounds = carried.bounds.clone().unwrap_or_else(default_bounds);
                         create_surface(control, config, &sent_bounds, telemetry).await?;
                         surface_up = true;
@@ -2135,7 +2184,13 @@ async fn session_body(
                                 }
                             }
                         }
-                        config.logger.log(Level::Info, "[preview] resumed: the surface is back");
+                        // S4.2c: the CPU ring opens with the surface, as at the
+                        // session's start (the reader's own reopen only asks
+                        // while it is polling an old ring).
+                        if let Some(cpu) = cpu.as_ref() {
+                            open_cpu_ring(lease, cpu, config, telemetry, "preview.cpu.open").await;
+                        }
+                        config.logger.log(Level::Info, &format!("[preview] {why} no more: the surface is back"));
                     }
                     drain_if_pending(lease, config, telemetry).await;
                 }

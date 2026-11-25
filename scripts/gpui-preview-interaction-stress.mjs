@@ -12,8 +12,8 @@
 //    converging on the compositor's scene. A preset the backend refuses
 //    without a real screen or camera is a named SKIP for the phase.
 // 2. The Preview window (macOS): a storm of moves and resizes
-//    (`preview-window-set-bounds` every 40 ms, no settle), then an alignment
-//    read (the screen against the presented frame, as probe:preview-window).
+//    (`preview-window-set-bounds` every 40 ms, no settle), then the layer's
+//    geometry check (displayed = set = slot, as probe:preview-window).
 // 3. Docked: the main window moved and sized in a storm
 //    (`main-window-set-bounds`).
 //
@@ -34,7 +34,7 @@ import {
   waitUntil
 } from './lib/gpui-preview-probe.mjs'
 import { PREVIEW_INTERACTION_STRESS_PROFILE } from './lib/preview-interaction-stress.mjs'
-import { alignedCells, GRID } from './gpui-preview-window-probe.mjs'
+import { geometryAligned } from './gpui-preview-window-probe.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 240000)
@@ -177,29 +177,42 @@ export async function runGpuiPreviewInteractionStress() {
           { budgetMs: 10000, everyMs: 100 }
         )
       }
-      // The overlapping burst: three intents in flight at once.
-      const burst = ['camera-only', 'screen-only', 'side-by-side']
-      const sent = await Promise.allSettled(
-        burst.map((preset) => command('select-layout-preset', { preset, settleMs: 0 }))
-      )
-      const refused = sent.find(
-        (each) =>
-          each.status === 'rejected' &&
-          /blocked|needs a (screen|camera)|refus/i.test(each.reason?.message ?? '')
-      )
-      if (refused) {
-        return {
-          skip: true,
-          reason: `the backend refuses a layout without a real device: ${refused.reason.message}`
+      // The presets this run can show: a camera layout needs a camera, which
+      // a test-pattern run has none of (Electron's gate supplies one with its
+      // synthetic motion), so the Studio refuses it by name.
+      const available = []
+      const refused = []
+      for (const preset of PREVIEW_INTERACTION_STRESS_PROFILE.sceneSequence) {
+        try {
+          await command('select-layout-preset', { preset, settleMs: 0 })
+          await converge(preset)
+          available.push(preset)
+        } catch (error) {
+          if (/Could not find layout preset|blocked|needs a (screen|camera)/i.test(error.message)) {
+            refused.push(preset)
+          } else {
+            failures.push(`${preset}: ${error.message}`)
+          }
         }
       }
+      if (available.length < 2) {
+        return {
+          skip: true,
+          reason: `only [${available.join(', ')}] can show without a camera (refused: ${refused.join(', ')}); run with a camera for this phase`
+        }
+      }
+      // The overlapping burst: every available intent in flight at once; the
+      // last must win.
+      await Promise.allSettled(
+        available.map((preset) => command('select-layout-preset', { preset, settleMs: 0 }))
+      )
       try {
-        await converge(burst.at(-1))
+        await converge(available.at(-1))
       } catch (error) {
         failures.push(`burst: ${error.message}`)
       }
       for (let round = 1; round <= sceneRounds; round++) {
-        for (const preset of PREVIEW_INTERACTION_STRESS_PROFILE.sceneSequence) {
+        for (const preset of available) {
           try {
             await command('select-layout-preset', { preset, settleMs: 0 })
             await converge(preset)
@@ -210,7 +223,7 @@ export async function runGpuiPreviewInteractionStress() {
       }
       return {
         failures,
-        summary: `${sceneRounds} rounds of ${PREVIEW_INTERACTION_STRESS_PROFILE.sceneSequence.length}`
+        summary: `${sceneRounds} rounds of [${available.join(', ')}]${refused.length ? `; refused without a camera: ${refused.join(', ')}` : ''}`
       }
     })
 
@@ -239,13 +252,14 @@ export async function runGpuiPreviewInteractionStress() {
         await sleep(STORM_EVERY_MS)
       }
       await sleep(600)
-      const screen = await command('preview-surface-sample', { rects: GRID })
-      const frame = await rpc('preview.debug.sample', { rects: GRID })
-      const matching = alignedCells(screen.samples ?? [], frame.samples ?? []).filter(
-        Boolean
-      ).length
-      const failures =
-        matching < 13 ? [`after the storm only ${matching}/16 cells match the frame`] : []
+      const failures = []
+      let aligned = 'aligned'
+      try {
+        await geometryAligned(command, 'after the storm')
+      } catch (error) {
+        aligned = 'misaligned'
+        failures.push(error.message)
+      }
       await command('preview-window-close')
       await waitUntil(
         'the Preview never docked back',
@@ -256,7 +270,7 @@ export async function runGpuiPreviewInteractionStress() {
           label: describePreview
         }
       )
-      return { failures, summary: `${STORM_STEPS} moves, then ${matching}/16 cells aligned` }
+      return { failures, summary: `${STORM_STEPS} moves, then the layer ${aligned}` }
     })
 
     await phase('docked: main-window move and resize storm', async () => {

@@ -26,6 +26,7 @@ use videorc_kit::chrome::focus_ring;
 use videorc_kit::dialog::{Dialog, DialogSize};
 use videorc_kit::empty::Empty;
 use videorc_kit::icon::{IconName, icon};
+use videorc_kit::label::Label;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::section_label::SectionLabel;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
@@ -37,7 +38,7 @@ use videorc_protocol::SceneSourceKind;
 
 use super::controls::{Field, Knob};
 use super::editor::copy;
-use super::inspector::meta_line;
+use super::inspector::{adjust_icon, meta_line};
 use super::model::copy as list_copy;
 use super::{SceneNavigate, ScenePage};
 use crate::screens::studio::background::image_tiles;
@@ -98,7 +99,7 @@ fn pick_fit(page: &ScenePage, value: &str) {
 
 impl ScenePage {
     /// A labelled `SegmentedControl` (`Field` + `FieldLabel`).
-    fn camera_row(&self, row: Row, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn camera_row(&self, row: Row, cx: &mut Context<Self>) -> AnyElement {
         let page = cx.entity().downgrade();
         let Row {
             id,
@@ -123,14 +124,9 @@ impl ScenePage {
         div()
             .flex()
             .flex_col()
-            .gap(px(6.))
+            .gap(px(12.))
             .min_w_0()
-            .child(
-                div()
-                    .type_scale(text::LABEL)
-                    .text_color(hsla(t.foreground))
-                    .child(label),
-            )
+            .child(Label::new(label))
             .child(control)
             .into_any_element()
     }
@@ -148,9 +144,10 @@ impl ScenePage {
 
         // P544, P556: the name section.
         // TODO(kit): ResetIcon (ArrowCounterClockwise) on Reset camera
-        // settings; AdjustIcon on the title.
+        // settings.
         sections.push(
             PanelSection::new("scene-camera-section")
+                .icon(adjust_icon(t))
                 .title(view.title.clone())
                 .children(self.visibility_row(view, cx))
                 .child(
@@ -189,7 +186,6 @@ impl ScenePage {
                         checked: Some(split),
                         pick: pick_split,
                     },
-                    t,
                     cx,
                 ));
             }
@@ -202,7 +198,6 @@ impl ScenePage {
                         checked: Some(side),
                         pick: pick_side,
                     },
-                    t,
                     cx,
                 ));
             }
@@ -215,7 +210,6 @@ impl ScenePage {
                         checked: corner,
                         pick: pick_corner,
                     },
-                    t,
                     cx,
                 ));
             }
@@ -230,7 +224,6 @@ impl ScenePage {
                         checked: Some(size),
                         pick: pick_size,
                     },
-                    t,
                     cx,
                 ));
             }
@@ -243,7 +236,6 @@ impl ScenePage {
                         checked: Some(shape),
                         pick: pick_shape,
                     },
-                    t,
                     cx,
                 ));
             }
@@ -267,7 +259,6 @@ impl ScenePage {
                             checked: Some(aspect),
                             pick: pick_aspect,
                         },
-                        t,
                         cx,
                     ))
                     .children(crops.then(|| meta_line(copy::ASPECT_CROPS, t)));
@@ -299,23 +290,24 @@ impl ScenePage {
                         checked: Some(fit),
                         pick: pick_fit,
                     },
-                    t,
                     cx,
                 ));
             }
             let mirror_page = cx.entity().downgrade();
             section = section
                 .child(
-                    SettingsRow::new("scene-camera-mirror", copy::MIRROR_CAMERA).child(
-                        Switch::new("scene-camera-mirror-switch")
-                            .accessibility_label(copy::MIRROR_CAMERA)
-                            .checked(lens.mirror)
-                            .on_change(move |on, _, cx| {
-                                let _ = mirror_page.update(cx, |page, _| {
-                                    page.patch_layout("cameraMirror", json!(on))
-                                });
-                            }),
-                    ),
+                    SettingsRow::new("scene-camera-mirror", copy::MIRROR_CAMERA)
+                        .flush(true)
+                        .child(
+                            Switch::new("scene-camera-mirror-switch")
+                                .accessibility_label(copy::MIRROR_CAMERA)
+                                .checked(lens.mirror)
+                                .on_change(move |on, _, cx| {
+                                    let _ = mirror_page.update(cx, |page, _| {
+                                        page.patch_layout("cameraMirror", json!(on))
+                                    });
+                                }),
+                        ),
                 )
                 .child(self.knob_row(Knob::CameraZoom, copy::ZOOM, false, None, t, cx))
                 .child(self.knob_row(Knob::PanX, copy::PAN_X, false, None, t, cx))

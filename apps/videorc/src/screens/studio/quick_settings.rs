@@ -6,7 +6,9 @@
 
 use std::sync::Arc;
 
-use gpui::{AnyElement, Context, EventEmitter, SharedString, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, Context, EventEmitter, FontWeight, SharedString, Window, div, prelude::*, px,
+};
 use tokio::sync::watch;
 use videorc_app_core::StudioSnapshot;
 use videorc_app_core::chat::LiveChat;
@@ -35,15 +37,17 @@ use videorc_kit::popover::Popover;
 use videorc_kit::select::Select;
 use videorc_kit::shortcut_keys::{ShortcutKeys, ShortcutStyle};
 use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::{Theme, text};
+use videorc_kit::tokens::{Theme, size, text};
 
 use super::background::{image_tiles, picker_body, thumbnail};
 use super::transport::{AppStudio, OpenPage};
-use crate::app::menus::ToggleStreamManager;
 use crate::lcd;
 
 /// Indent under the Camera row (`pl-9.5` ≈ 38 px).
 const FOOTER_INDENT_PX: f32 = 38.;
+
+/// `InspectorRow`'s label column (`w-22`).
+const ROW_LABEL_PX: f32 = 88.;
 
 fn runtime_platform() -> &'static str {
     match PermissionPlatform::current() {
@@ -66,7 +70,8 @@ fn fill_select(id: &'static str, picker: &PickerView, disabled: bool) -> Select 
             "Choose…".to_string()
         })
         .disabled(disabled)
-        .width(160.0)
+        // `trigger="inline"` fits its words (the kit Select is `w-fit`
+        // without a width); its ghost look is a kit request.
         .accessibility_label(section_copy::CAMERA)
         .value(selected.map(SharedString::from));
     for item in &picker.items {
@@ -254,20 +259,25 @@ impl QuickSettingsSection {
         );
 
         let open = cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Sources)));
+        // `InspectorRow`: `min-h-row py-0.5 pr-1 pl-3 gap-2.5`, the label
+        // `text-sm text-muted-foreground` in its `w-22` column.
         let mut column = div().flex().flex_col().child(
             div()
                 .flex()
-                .min_h(px(32.))
+                .min_h(px(size::ROW))
                 .items_center()
                 .gap(px(10.))
-                .px(px(12.))
+                .py(px(2.))
+                .pl(px(12.))
+                .pr(px(4.))
                 .child(icon(IconName::VideoCamera, 16., muted))
                 .child(
                     div()
-                        .w(px(72.))
+                        .w(px(ROW_LABEL_PX))
                         .flex_none()
                         .truncate()
-                        .type_scale(text::LABEL)
+                        .text_size(px(14.))
+                        .line_height(px(20.))
                         .text_color(muted)
                         .child(section_copy::CAMERA),
                 )
@@ -523,7 +533,17 @@ impl QuickSettingsSection {
                         .child(section_copy::STREAM_MANAGER),
                 )
                 .child(div().text_color(hsla(t.muted_foreground)).child("·"))
-                .child(ShortcutKeys::for_action(&ToggleStreamManager).style(ShortcutStyle::Text))
+                // `door.accelerator`, as Electron prints it: the menu's
+                // binding sits behind the shell's modal gate, which the
+                // keymap only reports to a focused view.
+                .child(
+                    div()
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(hsla(t.muted_foreground))
+                        .child(
+                            ShortcutKeys::accelerator(door.accelerator).style(ShortcutStyle::Text),
+                        ),
+                )
                 .into_any_element()
         };
         NavigableRow::with_control("quick-settings-chat", section_copy::CHAT, value)
@@ -545,18 +565,28 @@ impl QuickSettingsSection {
             camera.open_label,
             cx.listener(move |_, _, _, cx| cx.emit(OpenPage::of(open_page))),
         );
+        // `LcdDevicePicker`'s `LcdPanelRow` (`py-2 gap-4`): the dim label,
+        // then the pick and the cog on the right.
         let mut sources_body = div().flex().flex_col().child(
             div()
                 .flex()
+                .min_w_0()
                 .items_center()
                 .justify_between()
-                .gap(px(8.))
-                .child(div().text_color(lcd::dim(t)).child(section_copy::CAMERA))
+                .gap(px(16.))
+                .py(px(8.))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(lcd::dim(t))
+                        .child(lcd::caps(section_copy::CAMERA)),
+                )
                 .child(
                     div()
                         .flex()
                         .min_w_0()
                         .items_center()
+                        .justify_end()
                         .gap(px(8.))
                         .child(
                             fill_select("quick-settings-lcd-camera", &camera.row.picker, disabled)
@@ -590,13 +620,18 @@ impl QuickSettingsSection {
             "quick-settings-lcd-captions",
             t,
             section_copy::CAPTIONS,
-            self.view.captions.clone(),
+            div()
+                .truncate()
+                .child(lcd::caps(self.view.captions.clone())),
             cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Captions))),
         );
         // ShortcutKeys from the keymap (same as the default Chat row): never
         // a hand-typed key glyph (gpui-design-guards).
         let chat_value: AnyElement = if let Some(new_label) = &self.view.chat.new_label {
-            div().truncate().child(new_label.clone()).into_any_element()
+            div()
+                .truncate()
+                .child(lcd::caps(new_label.clone()))
+                .into_any_element()
         } else {
             div()
                 .flex()
@@ -607,10 +642,13 @@ impl QuickSettingsSection {
                     div()
                         .min_w_0()
                         .truncate()
-                        .child(section_copy::STREAM_MANAGER),
+                        .child(lcd::caps(section_copy::STREAM_MANAGER)),
                 )
-                .child(div().text_color(lcd::dim(t)).child("·"))
-                .child(ShortcutKeys::for_action(&ToggleStreamManager).style(ShortcutStyle::Text))
+                .child(div().child("·"))
+                .child(
+                    ShortcutKeys::accelerator(self.view.chat.accelerator)
+                        .style(ShortcutStyle::Text),
+                )
                 .into_any_element()
         };
         let chat = lcd::nav_row(
@@ -621,23 +659,26 @@ impl QuickSettingsSection {
             cx.listener(|section, _, _, cx| section.open_stream_manager(cx)),
         );
 
+        // Each screen in its own section (`RetroQuickSettings`), as the
+        // default look's groups are.
         div()
             .id("quick-settings")
             .flex()
             .flex_col()
-            .gap(px(12.))
-            .child(lcd::panel(
-                "quick-settings-lcd-sources",
-                t,
-                section_copy::SOURCES,
-                sources_body,
-            ))
-            .child(lcd::panel(
+            .child(
+                PanelSection::new("quick-settings-sources").child(lcd::panel(
+                    "quick-settings-lcd-sources",
+                    t,
+                    section_copy::SOURCES,
+                    sources_body,
+                )),
+            )
+            .child(PanelSection::new("quick-settings-doors").child(lcd::panel(
                 "quick-settings-lcd-doors",
                 t,
                 "Captions and Chat",
                 div().flex().flex_col().child(captions).child(chat),
-            ))
+            )))
             .child(self.choose_image_dialog(window, cx))
             .into_any_element()
     }

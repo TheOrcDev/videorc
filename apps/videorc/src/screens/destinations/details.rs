@@ -1,17 +1,16 @@
 //! Stream details basics on Setup (`MetadataEditor` title/description/privacy/save).
 
-use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, Entity, Focusable, Window, div, prelude::*, px};
 use gpui_base::input::InputEvent;
 use videorc_app_core::livestream::copy as page_copy;
-use videorc_app_core::livestream::details::{self, Privacy};
+use videorc_app_core::livestream::details;
 use videorc_app_core::livestream::{DetailsState, details as details_mod};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonVariant};
-use videorc_kit::input::{Input, InputState};
+use videorc_kit::icon::{IconName, icon};
+use videorc_kit::input::InputState;
 use videorc_kit::panel_section::PanelSection;
-use videorc_kit::segmented_control::{Segment, SegmentedControl};
-use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
-use videorc_kit::textarea::{Textarea, TextareaState};
+use videorc_kit::textarea::TextareaState;
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
 
@@ -72,17 +71,43 @@ impl DestinationsPanel {
         let Some(draft) = state.draft.as_ref() else {
             return;
         };
-        if inputs.seeded_at.as_deref() == Some(draft.updated_at.as_str()) {
+        // A save (a new `updatedAt`) refills both fields and is clean.
+        if inputs.seeded_at.as_deref() != Some(draft.updated_at.as_str()) {
+            inputs.title.update(cx, |input, cx| {
+                input.set_value(draft.title.clone(), window, cx);
+            });
+            inputs.description.update(cx, |input, cx| {
+                input.set_value(draft.description.clone(), window, cx);
+            });
+            inputs.seeded_at = Some(draft.updated_at.clone());
+            self.details_dirty = false;
             return;
         }
-        inputs.title.update(cx, |input, cx| {
-            input.set_value(draft.title.clone(), window, cx);
-        });
-        inputs.description.update(cx, |input, cx| {
-            input.set_value(draft.description.clone(), window, cx);
-        });
-        inputs.seeded_at = Some(draft.updated_at.clone());
-        self.details_dirty = false;
+        // The draft changed elsewhere (Go live's fields, then Cancel or
+        // not): Electron has one draft, so a field nobody is typing in
+        // follows it, and the edit is unsaved here too.
+        let mut followed = false;
+        let title = inputs.title.clone();
+        if !title.read(cx).focus_handle(cx).is_focused(window)
+            && title.read(cx).value().as_ref() != draft.title.as_str()
+        {
+            title.update(cx, |input, cx| {
+                input.set_value(draft.title.clone(), window, cx)
+            });
+            followed = true;
+        }
+        let description = inputs.description.clone();
+        if !description.read(cx).focus_handle(cx).is_focused(window)
+            && description.read(cx).value().as_ref() != draft.description.as_str()
+        {
+            description.update(cx, |input, cx| {
+                input.set_value(draft.description.clone(), window, cx)
+            });
+            followed = true;
+        }
+        if followed {
+            self.details_dirty = true;
+        }
     }
 
     pub(super) fn details_section(
@@ -108,16 +133,35 @@ impl DestinationsPanel {
 
         let dirty = self.details_dirty;
         let status = details_mod::details_status(dirty, state.validation.as_ref());
-        let mut section =
-            PanelSection::new("destinations-details").title(page_copy::STREAM_DETAILS);
+        let mut section = PanelSection::new("destinations-details")
+            .title(page_copy::STREAM_DETAILS)
+            .icon(icon(IconName::TextAa, 16., hsla(t.muted_foreground)));
+        // The header's end: the status, then Save (`variant="secondary"`).
+        let mut action = div().flex().items_center().gap(px(8.));
         if let Some((tone, label)) = status {
             let variant = match tone {
                 "good" => BadgeVariant::Success,
                 "warn" => BadgeVariant::Warning,
                 _ => BadgeVariant::Outline,
             };
-            section = section.action(Badge::new(label).variant(variant));
+            action = action.child(Badge::new(label).variant(variant));
         }
+        action = action.child(
+            Button::new("stream-details-save")
+                .label(if state.save_pending {
+                    page_copy::SAVING
+                } else {
+                    page_copy::SAVE
+                })
+                .variant(ButtonVariant::Secondary)
+                .icon(IconName::FloppyDisk)
+                .disabled(disabled || state.save_pending)
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| entity.update(cx, |this, _| this.save_details())
+                }),
+        );
+        section = section.action(action);
 
         let Some(inputs) = &self.details_inputs else {
             return section.into_any_element();
@@ -134,84 +178,41 @@ impl DestinationsPanel {
             .and_then(|v| v.issue("description", None))
             .map(|i| i.message.clone());
 
-        section = section.child(
-            SettingsGroup::new()
-                .row(
-                    SettingsRow::new("stream-title", page_copy::TITLE)
-                        .description(details::title_counter(
-                            &state
-                                .draft
-                                .as_ref()
-                                .map(|d| d.title.clone())
-                                .unwrap_or_default(),
-                        ))
-                        .child(
-                            Input::new("stream-title-input", &inputs.title)
-                                .accessibility_label(page_copy::TITLE)
-                                .disabled(disabled || state.save_pending)
-                                .invalid(title_issue.is_some()),
-                        ),
-                )
-                .row(
-                    SettingsRow::new("stream-description", page_copy::DESCRIPTION)
-                        .description(page_copy::OPTIONAL)
-                        .child(
-                            Textarea::new("stream-description-input", &inputs.description)
-                                .accessibility_label(page_copy::DESCRIPTION)
-                                .disabled(disabled || state.save_pending)
-                                .invalid(description_issue.is_some()),
-                        ),
-                )
-                .row(
-                    SettingsRow::new("stream-privacy", page_copy::PRIVACY)
-                        .description(
-                            state
-                                .draft
-                                .as_ref()
-                                .map(|d| d.default_privacy.hint())
-                                .unwrap_or(""),
-                        )
-                        .child({
-                            let privacy = state
-                                .draft
-                                .as_ref()
-                                .map(|d| d.default_privacy)
-                                .unwrap_or_default();
-                            let mut control = SegmentedControl::new("stream-privacy")
-                                .small(true)
-                                .accessibility_label(page_copy::PRIVACY)
-                                .disabled(disabled || state.save_pending)
-                                .value(Some(SharedString::from(privacy_value(privacy))))
-                                .on_change({
-                                    let entity = entity.clone();
-                                    move |value, _, cx| {
-                                        let privacy = privacy_from_value(value.as_ref());
-                                        entity.update(cx, |this, cx| {
-                                            this.studio.patch_metadata_draft(|draft| {
-                                                draft.default_privacy = privacy;
-                                            });
-                                            this.details_dirty = true;
-                                            cx.notify();
-                                        });
-                                    }
-                                });
-                            for privacy in Privacy::ALL {
-                                control = control
-                                    .option(Segment::new(privacy_value(privacy), privacy.label()));
-                            }
-                            control
-                        }),
+        // `BroadcastInfoFields`: privacy is YouTube's, drawn while a YouTube
+        // destination is on.
+        let capture = self.studio.snapshot().settings.capture_doc.clone();
+        let youtube_on = videorc_app_core::livestream::targets::targets(&capture)
+            .iter()
+            .any(|target| target.enabled && target.platform == "youtube");
+        let draft_now = state.draft.as_ref();
+        section = section.child(crate::screens::broadcast_fields::broadcast_info_fields(
+            t,
+            crate::screens::broadcast_fields::Fields {
+                id: "stream",
+                title: &inputs.title,
+                title_counter: details::title_counter(
+                    &draft_now.map(|d| d.title.clone()).unwrap_or_default(),
                 ),
-        );
-
-        if let Some(issue) = title_issue.or(description_issue) {
-            section = section.child(
-                div()
-                    .type_scale(text::META)
-                    .text_color(hsla(t.destructive))
-                    .child(issue),
-            );
-        }
+                title_error: title_issue,
+                description: &inputs.description,
+                description_error: description_issue,
+                privacy: youtube_on
+                    .then(|| draft_now.map(|d| d.default_privacy).unwrap_or_default()),
+                disabled: disabled || state.save_pending,
+            },
+            {
+                let entity = entity.clone();
+                move |privacy, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.studio.patch_metadata_draft(|draft| {
+                            draft.default_privacy = privacy;
+                        });
+                        this.details_dirty = true;
+                        cx.notify();
+                    });
+                }
+            },
+        ));
 
         let youtube_signed_in = self
             .studio
@@ -268,33 +269,6 @@ impl DestinationsPanel {
             }
         }
 
-        section = section.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(
-                    Button::new("stream-details-save")
-                        .label(if state.save_pending {
-                            page_copy::SAVING
-                        } else {
-                            page_copy::SAVE
-                        })
-                        .variant(ButtonVariant::Default)
-                        .disabled(disabled || state.save_pending || !dirty)
-                        .on_click({
-                            let entity = entity.clone();
-                            move |_, _, cx| entity.update(cx, |this, _| this.save_details())
-                        }),
-                )
-                .child(
-                    div()
-                        .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
-                        .child(page_copy::PRIVACY_NOTE),
-                ),
-        );
-
         section.into_any_element()
     }
 
@@ -303,21 +277,5 @@ impl DestinationsPanel {
         self.runtime.spawn(async move {
             studio.save_metadata_draft().await;
         });
-    }
-}
-
-fn privacy_value(privacy: Privacy) -> &'static str {
-    match privacy {
-        Privacy::Private => "private",
-        Privacy::Unlisted => "unlisted",
-        Privacy::Public => "public",
-    }
-}
-
-fn privacy_from_value(value: &str) -> Privacy {
-    match value {
-        "unlisted" => Privacy::Unlisted,
-        "public" => Privacy::Public,
-        _ => Privacy::Private,
     }
 }

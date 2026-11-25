@@ -5,7 +5,7 @@
 //! Settings, and Sign out, locked while recording or live, with its reason
 //! under it. Only the Videorc account is here, never a platform account.
 //!
-//! The picture is the initials (the kit's small avatar): the account's
+//! The picture is the initials (the kit's 20 px avatar): the account's
 //! picture loads through an
 //! avatar cache in Electron, never hot-linked, and the app has none yet.
 
@@ -144,12 +144,15 @@ pub fn row(
     let name = account.display_name();
     let health_label = health_label.into();
     let picture = if account.is_signed_in() {
-        Avatar::new(initials(&name)).sm().into_any_element()
+        // `size-5`: a 20 px face, so the initials keep the 11 px floor.
+        Avatar::new(initials(&name)).xs().into_any_element()
     } else {
         icon(IconName::UserCircle, 16., hsla(t.muted_foreground)).into_any_element()
     };
+    // `ACCOUNT_MENU_TRIGGER_CLASS`: `h-7` with a 6 px side pad (`px-1.5`).
     let trigger = Button::new("account-menu-trigger")
         .variant(ButtonVariant::Ghost)
+        .dense(true)
         .accessibility_label(name.clone())
         .child(
             div()

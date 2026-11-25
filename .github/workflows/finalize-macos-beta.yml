@@ -18,10 +18,6 @@ run-name: ${{ inputs.correlation }}
 permissions:
   contents: read
   actions: write
-concurrency:
-  group: finalize-macos-beta-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   prepare:
     if: ${{ github.ref == 'refs/heads/main' && vars.VIDEORC_RELEASE_CONTROLLER_ENABLED == 'true' }}

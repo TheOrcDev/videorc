@@ -209,8 +209,11 @@ impl SaveSection {
     }
 }
 
+/// `last`: the config grid's own hairline closes it (two columns), so the
+/// section draws none.
 pub(super) fn render_reactions(
     screen: &AvatarScreen,
+    last: bool,
     window: &mut Window,
     cx: &mut Context<AvatarScreen>,
 ) -> Option<AnyElement> {
@@ -222,6 +225,7 @@ pub(super) fn render_reactions(
     let screen_has_preview = screen.preview.read(cx).test_pack().is_some();
 
     let mut section = PanelSection::new("avatar-reactions")
+        .last(last)
         .title("Reactions")
         .description(format!(
             "What {} does on stream when something happens. Try plays it here.",
@@ -305,6 +309,7 @@ pub(super) fn render_reactions(
     Some(section.into_any_element())
 }
 
+/// The config grid's last cell: its hairline is the grid's.
 pub(super) fn render_motion(
     screen: &AvatarScreen,
     window: &mut Window,
@@ -368,6 +373,7 @@ pub(super) fn render_motion(
         .on_change(move |on, _, cx| breathe.update(cx, |screen, cx| screen.set_breathing(on, cx)));
 
     let mut section = PanelSection::new("avatar-motion")
+        .last(true)
         .title("Motion")
         .description(format!(
             "How {} moves on stream and here. Off keeps its poses and drops the bounce.",

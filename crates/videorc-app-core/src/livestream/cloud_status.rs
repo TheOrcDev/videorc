@@ -201,6 +201,23 @@ impl CloudStatus {
     }
 }
 
+/// `guestsVisible` (plan 224 D16): the Guests page shows (sidebar row, ⌘K)
+/// when the account's allowance has talk shows, or while a room isn't
+/// closed: launch flags fail closed, but an open room stays controllable.
+pub fn guests_visible(status: Option<&CloudStatus>) -> bool {
+    let Some(status) = status else {
+        return false;
+    };
+    status
+        .allowance
+        .as_ref()
+        .is_some_and(|allowance| allowance.enabled && allowance.talk_shows)
+        || status
+            .room
+            .as_ref()
+            .is_some_and(|room| room.is_object() && room["phase"].as_str() != Some("closed"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +254,38 @@ mod tests {
             None,
             "a field of the wrong type refuses the whole status"
         );
+    }
+}
+
+#[cfg(test)]
+mod guests_visible_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn status(value: serde_json::Value) -> CloudStatus {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn guests_show_with_talk_shows_or_a_room_that_is_not_closed() {
+        assert!(!guests_visible(None));
+        assert!(!guests_visible(Some(&status(json!({})))));
+        assert!(guests_visible(Some(&status(json!({
+            "allowance": { "enabled": true, "talkShows": true }
+        })))));
+        // Fails closed: an allowance that is off, or without talk shows.
+        assert!(!guests_visible(Some(&status(json!({
+            "allowance": { "enabled": false, "talkShows": true }
+        })))));
+        assert!(!guests_visible(Some(&status(json!({
+            "allowance": { "enabled": true, "talkShows": false }
+        })))));
+        // An open room stays controllable whatever the allowance says.
+        assert!(guests_visible(Some(&status(json!({
+            "room": { "phase": "open" }
+        })))));
+        assert!(!guests_visible(Some(&status(json!({
+            "room": { "phase": "closed" }
+        })))));
     }
 }

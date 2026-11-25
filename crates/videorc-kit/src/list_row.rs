@@ -38,6 +38,8 @@ pub trait GroupedRow: IntoElement {
 pub struct ListRow {
     id: ElementId,
     title: SharedString,
+    /// Normal-weight count after the semibold title ("Moments · 1").
+    title_count: Option<SharedString>,
     leading: Option<AnyElement>,
     icon: Option<AnyElement>,
     context: Option<SharedString>,
@@ -48,6 +50,8 @@ pub struct ListRow {
     selected: bool,
     interactive: Option<bool>,
     compact: bool,
+    /// No horizontal padding (Electron `px-0` flush rows).
+    flush: bool,
     disabled: bool,
     grouped: bool,
     on_click: Option<ClickHandler>,
@@ -59,6 +63,7 @@ impl ListRow {
         ListRow {
             id: id.into(),
             title: title.into(),
+            title_count: None,
             leading: None,
             icon: None,
             context: None,
@@ -69,11 +74,24 @@ impl ListRow {
             selected: false,
             interactive: None,
             compact: false,
+            flush: false,
             disabled: false,
             grouped: false,
             on_click: None,
             appearance: None,
         }
+    }
+
+    /// Count in normal weight beside the semibold title (" · 1").
+    pub fn title_count(mut self, count: impl Into<SharedString>) -> Self {
+        self.title_count = Some(count.into());
+        self
+    }
+
+    /// Drop horizontal padding (`px-0`).
+    pub fn flush(mut self, flush: bool) -> Self {
+        self.flush = flush;
+        self
     }
 
     /// A control before the title (a sound's play button), never clipped
@@ -201,7 +219,12 @@ impl RenderOnce for ListRow {
                     .truncate()
                     .text_color(hsla(t.foreground))
                     .font_weight(FontWeight::MEDIUM)
-                    .child(self.title),
+                    .child(self.title)
+                    .children(self.title_count.map(|count| {
+                        div()
+                            .font_weight(FontWeight::NORMAL)
+                            .child(format!(" · {count}"))
+                    })),
             )
             .children(self.context.map(|context| {
                 div()
@@ -234,13 +257,14 @@ impl RenderOnce for ListRow {
                     .text_color(hsla(t.muted_foreground))
                     .child(meta)
             }));
+        let pad_x = if self.flush { 0.0 } else { 12.0 };
         let content = |row: gpui::Div| {
             row.w_full()
                 .h(px(height))
                 .flex()
                 .items_center()
                 .gap(px(10.0))
-                .px(px(12.0))
+                .px(px(pad_x))
                 .rounded(px(corner))
                 .text_size(px(14.0))
                 .line_height(px(20.0))
@@ -280,7 +304,10 @@ impl RenderOnce for ListRow {
 
 #[derive(IntoElement)]
 pub struct GroupedList {
+    id: Option<ElementId>,
     label: Option<SharedString>,
+    /// Screen-reader name when there is no visible section label.
+    accessibility_label: Option<SharedString>,
     rows: SmallVec<[AnyElement; 4]>,
     appearance: Option<Appearance>,
 }
@@ -288,15 +315,29 @@ pub struct GroupedList {
 impl GroupedList {
     pub fn new() -> Self {
         GroupedList {
+            id: None,
             label: None,
+            accessibility_label: None,
             rows: SmallVec::new(),
             appearance: None,
         }
     }
 
+    /// Stable ID for an unnamed group, or repeated groups with the same label.
+    pub fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
     /// The group's name, as a section label over it.
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// Accessible name only (Electron `aria-label` with no visible label).
+    pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessibility_label = Some(label.into());
         self
     }
 
@@ -329,17 +370,25 @@ impl RenderOnce for GroupedList {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
         let appearance = self.appearance;
+        let a11y = self.accessibility_label.clone().or(self.label.clone());
+        let id = self.id.or_else(|| a11y.clone().map(ElementId::from));
+        // Divider is painted inside each following row so the row stays 32 px
+        // (Electron), not 33 with an external border.
         let rows = self.rows.into_iter().enumerate().map(|(index, row)| {
-            div()
-                .when(index > 0, |row| {
-                    row.border_t_1().border_color(hsla(t.border))
-                })
-                .child(row)
+            div().relative().child(row).when(index > 0, |wrap| {
+                wrap.child(
+                    div()
+                        .absolute()
+                        .top(px(0.0))
+                        .left(px(0.0))
+                        .right(px(0.0))
+                        .h(px(1.0))
+                        .bg(hsla(t.border)),
+                )
+            })
         });
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.0))
+        let root = div().flex().flex_col().gap(px(6.0));
+        let root = root
             .children(self.label.map(|label| {
                 let label = SectionLabel::new(label);
                 div().px(px(4.0)).child(match appearance {
@@ -357,6 +406,16 @@ impl RenderOnce for GroupedList {
                     .border_color(hsla(t.border))
                     .bg(hsla(t.inset))
                     .children(rows),
-            )
+            );
+        // GPUI accessibility needs a stable element ID. Do not give every
+        // anonymous group one shared ID: sibling groups would collide.
+        match id {
+            Some(id) => root
+                .id(id)
+                .role(gpui::Role::List)
+                .when_some(a11y, |root, name| root.aria_label(name))
+                .into_any_element(),
+            None => root.into_any_element(),
+        }
     }
 }

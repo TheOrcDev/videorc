@@ -1,12 +1,21 @@
-//! The shell's Search door. Commands are rebuilt from confirmed core state
-//! at activation as well as while searching; no stale row bypasses a gate.
+//! The shell's Search door (`command-palette.tsx`). Commands are rebuilt
+//! from confirmed core state at activation as well as while searching; no
+//! stale row bypasses a gate. Electron's groups in its order (Session,
+//! Pages, Windows, Scenes, Sounds, Avatar, Sidekick, Settings, Appearance),
+//! each under its heading; a row's value is the footer's words and what
+//! search matches, its context follows the title, its key sits at the end.
 use gpui::{
-    Context, Entity, EntityInputHandler, EventEmitter, Focusable, ScrollHandle, SharedString,
-    Window, div, prelude::*, px,
+    Context, Entity, EntityInputHandler, EventEmitter, Focusable, FontWeight, ScrollHandle,
+    SharedString, Window, div, prelude::*, px,
 };
 use serde_json::json;
 use std::sync::Arc;
+use videorc_app_core::buddy::copy::{AVATAR_TABS, TABS as SIDEKICK_TABS};
+use videorc_app_core::livestream::go_live_copy::GO_LIVE_COMMAND;
 use videorc_app_core::protocol::SoundboardState;
+use videorc_app_core::shortcuts::shortcut_accelerator;
+use videorc_app_core::studio::audio_section::bound_accelerator;
+use videorc_app_core::studio::scene_on_stream::{copy as screen_copy, screen_hide_accelerator};
 use videorc_app_core::studio::{
     StudioBackend, camera_background_view, families, inspector::StartGates,
     transport::TransportView,
@@ -20,8 +29,12 @@ use videorc_kit::{
     ShortcutKeys,
     command::{CommandInput, CommandItem, CommandList, InputEvent, InputState, command_dialog},
     dialog::DialogHandle,
-    theme::{current, hsla},
+    icon::{IconName, icon},
+    theme::{TypeScale, current, hsla},
+    tokens::text,
 };
+
+use crate::app::hotkeys::{ShortcutActions, StudioActions};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -34,6 +47,10 @@ pub enum Command {
     CaptionsReader,
     Notifications,
     Record,
+    /// Go live…: the Go Live dialog, as the transport's button opens it.
+    GoLive,
+    /// Hide screen: the global key's own toggle.
+    HideScreen,
     Stop,
     Microphone,
     Clip(u32),
@@ -48,13 +65,25 @@ pub enum Command {
     PlaySound(String),
     /// Stop every playing sound (P103).
     StopAllSounds,
-    Unavailable,
+    /// One of the Avatar page's tabs, by its index in `AVATAR_TABS`.
+    AvatarTab(usize),
+    /// One of Sidekick's tabs, by its index in `TABS`.
+    SidekickTab(usize),
 }
 #[derive(Clone)]
 struct Row {
     id: String,
     group: &'static str,
+    /// The words on the row.
     label: String,
+    /// cmdk's `value`: the footer's words and what search matches.
+    value: String,
+    /// The secondary context after the title (`Context`).
+    context: Option<&'static str>,
+    /// The key that runs it, as an accelerator (`CommandShortcut`).
+    shortcut: Option<String>,
+    /// The look or the switch in use wears the check.
+    checked: bool,
     keywords: Vec<String>,
     command: Command,
     enabled: bool,
@@ -67,10 +96,15 @@ impl Row {
         command: Command,
         enabled: bool,
     ) -> Self {
+        let label = label.into();
         Self {
             id: id.into(),
             group,
-            label: label.into(),
+            value: label.clone(),
+            label,
+            context: None,
+            shortcut: None,
+            checked: false,
             keywords: Vec::new(),
             command,
             enabled,
@@ -80,6 +114,30 @@ impl Row {
         self.keywords = words.iter().map(|s| s.to_string()).collect();
         self
     }
+    fn value(mut self, value: impl Into<String>) -> Self {
+        self.value = value.into();
+        self
+    }
+    fn context(mut self, context: &'static str) -> Self {
+        self.context = Some(context);
+        self
+    }
+    fn shortcut(mut self, accelerator: Option<String>) -> Self {
+        self.shortcut = accelerator.filter(|accelerator| !accelerator.is_empty());
+        self
+    }
+    fn checked(mut self, checked: bool) -> Self {
+        self.checked = checked;
+        self
+    }
+}
+
+/// Which windows are open when Search opens: their rows say Open or Close.
+#[derive(Clone, Copy, Default)]
+pub struct OpenWindows {
+    pub preview: bool,
+    pub notes: bool,
+    pub stream_manager: bool,
 }
 impl EventEmitter<Command> for CommandPalette {}
 pub struct CommandPalette {
@@ -94,6 +152,7 @@ pub struct CommandPalette {
     dialogs: Option<Entity<crate::screens::dialogs::DialogsHost>>,
     /// Soundboard pads for ⌘K Sounds (P103); refreshed when Search opens.
     board: Option<SoundboardState>,
+    windows: OpenWindows,
 }
 impl CommandPalette {
     pub fn new(
@@ -148,6 +207,7 @@ impl CommandPalette {
             notifications_available: false,
             dialogs: None,
             board: None,
+            windows: OpenWindows::default(),
         }
     }
 
@@ -172,6 +232,10 @@ impl CommandPalette {
     pub fn set_notifications_available(&mut self) {
         self.notifications_available = true;
     }
+    /// The shell says which windows are open before Search opens.
+    pub fn set_open_windows(&mut self, windows: OpenWindows) {
+        self.windows = windows;
+    }
     pub fn bind_dialogs(&mut self, dialogs: Entity<crate::screens::dialogs::DialogsHost>) {
         self.dialogs = Some(dialogs);
     }
@@ -195,6 +259,10 @@ impl CommandPalette {
         let s = self.studio.snapshot();
         let connected = self.studio.is_connected();
         let view = TransportView::from_snapshot(&s, &StartGates::default(), false);
+        let globals = s.settings.studio.global_shortcuts();
+        let record_key = shortcut_accelerator("record-toggle");
+        // Session: the transport's starts or its stop, in its words, then
+        // Hide screen, the mute and the clips.
         let mut rows = vec![if view.active {
             Row::new(
                 "stop",
@@ -203,6 +271,8 @@ impl CommandPalette {
                 Command::Stop,
                 view.record_enabled,
             )
+            .keywords(&["stop", "end", "recording", "livestream"])
+            .shortcut(record_key)
         } else {
             Row::new(
                 "record",
@@ -211,26 +281,35 @@ impl CommandPalette {
                 Command::Record,
                 view.record_enabled,
             )
+            .keywords(&["record"])
+            .shortcut(record_key)
         }];
         if !view.active {
             rows.push(
                 Row::new(
                     "go-live",
                     "Session",
-                    "Go live…",
-                    Command::Unavailable,
-                    false,
+                    GO_LIVE_COMMAND,
+                    Command::GoLive,
+                    connected && view.record_enabled,
                 )
                 .keywords(&["stream", "livestream", "broadcast"]),
             );
         }
-        rows.push(Row::new(
-            "hide-screen",
-            "Session",
-            "Hide screen",
-            Command::Unavailable,
-            false,
-        ));
+        rows.push(
+            Row::new(
+                "hide-screen",
+                "Session",
+                screen_copy::HIDE_SCREEN,
+                Command::HideScreen,
+                connected,
+            )
+            .shortcut(screen_hide_accelerator(
+                globals
+                    .get("screenHideToggle")
+                    .and_then(serde_json::Value::as_str),
+            )),
+        );
         rows.push(
             Row::new(
                 "mic",
@@ -243,10 +322,25 @@ impl CommandPalette {
                 Command::Microphone,
                 connected,
             )
-            .keywords(&["mic", "audio", "silence"]),
+            .keywords(&["mic", "microphone", "audio", "mute", "silence"])
+            .shortcut(bound_accelerator(&globals, "micToggle")),
         );
         if view.active || s.clips.state == videorc_app_core::protocol::ReplayBufferState::On {
-            for (seconds, label) in [(30, "Save a 30-second clip"), (60, "Save a 1-minute clip")] {
+            let clips: [(u32, &str, &str, &[&str]); 2] = [
+                (
+                    30,
+                    "Save a 30-second clip",
+                    "clipMark",
+                    &["clip", "replay", "marker", "moment", "30", "seconds"],
+                ),
+                (
+                    60,
+                    "Save a 1-minute clip",
+                    "clipMarkLong",
+                    &["clip", "replay", "marker", "moment", "60", "minute", "long"],
+                ),
+            ];
+            for (seconds, label, key, words) in clips {
                 rows.push(
                     Row::new(
                         format!("clip-{seconds}"),
@@ -255,20 +349,33 @@ impl CommandPalette {
                         Command::Clip(seconds),
                         connected,
                     )
-                    .keywords(&["clip", "replay", "marker", "moment"]),
+                    .keywords(words)
+                    .shortcut(bound_accelerator(&globals, key)),
                 );
             }
         }
-        for page in nav::PAGES {
+        // Pages: one verb for every page, in sidebar order, Health last.
+        // The shell routes every page, as its sidebar row does.
+        // `command-palette.tsx:444`: Guests only while it is available
+        // (`guestsVisible`), as its sidebar row.
+        let guests = videorc_app_core::livestream::cloud_status::guests_visible(
+            self.studio.cloud_now().status.as_ref(),
+        );
+        for page in nav::SIDEBAR_ORDER.into_iter().chain([PageId::Diagnostics]) {
+            if page == PageId::Guests && !guests {
+                continue;
+            }
             rows.push(
                 Row::new(
                     format!("page-{}", page.id()),
                     "Pages",
                     page.label(),
                     Command::Page(page),
-                    page.ported(),
+                    true,
                 )
-                .keywords(page_keywords(page)),
+                .value(format!("Open {}", page.label()))
+                .keywords(page_keywords(page))
+                .shortcut(shortcut_accelerator(&format!("nav-{}", page.id()))),
             );
             // `command-palette.tsx:471-487`: Background settings under Scene.
             if page == PageId::Layouts {
@@ -281,45 +388,79 @@ impl CommandPalette {
                         "Pages",
                         camera_background_view::SETTINGS_LABEL,
                         Command::SceneBackground,
-                        page.ported(),
+                        true,
                     )
-                    .keywords(&words),
+                    .keywords(&words)
+                    .context("Scene"),
                 );
             }
         }
-        rows.push(Row::new(
-            "notifications",
-            "Pages",
-            "Open notifications",
-            Command::Notifications,
-            self.notifications_available,
-        ));
-        rows.push(Row::new(
-            "preview",
-            "Windows",
-            "Open/Close Preview",
-            Command::Preview,
-            // A Preview window exists on macOS and Linux (none on Windows
-            // yet).
-            cfg!(any(target_os = "macos", target_os = "linux")),
-        ));
-        rows.push(Row::new(
-            "manager",
-            "Windows",
-            "Stream Manager",
-            Command::StreamManager,
-            true,
-        ));
-        rows.push(Row::new("notes", "Windows", "Notes", Command::Notes, true));
-        rows.push(Row::new(
-            "Captions reader",
-            "Windows",
-            "Captions reader",
-            Command::CaptionsReader,
-            true,
-        ));
-        // `command-palette.tsx:618`: with any scene, Studio's Add scene…,
-        // off in a library from a newer Videorc.
+        rows.push(
+            Row::new(
+                "notifications",
+                "Pages",
+                "Open notifications",
+                Command::Notifications,
+                self.notifications_available,
+            )
+            .keywords(&["bell", "alerts", "problems", "warnings", "unread", "inbox"])
+            .shortcut(shortcut_accelerator("notifications")),
+        );
+        // Windows: each by its one name, in the Window menu's order.
+        let open_or_close = |open: bool, name: &str| {
+            if open {
+                format!("Close {name}")
+            } else {
+                format!("Open {name}")
+            }
+        };
+        rows.push(
+            Row::new(
+                "preview",
+                "Windows",
+                open_or_close(self.windows.preview, "Preview"),
+                Command::Preview,
+                // A Preview window exists on macOS and Linux (none on Windows
+                // yet).
+                cfg!(any(target_os = "macos", target_os = "linux")),
+            )
+            .keywords(&["monitor", "stage", "window"])
+            .shortcut(shortcut_accelerator("preview-window")),
+        );
+        rows.push(
+            Row::new(
+                "notes",
+                "Windows",
+                open_or_close(self.windows.notes, "Notes"),
+                Command::Notes,
+                true,
+            )
+            .keywords(&["script", "teleprompter", "window"])
+            .shortcut(shortcut_accelerator("notes-window")),
+        );
+        rows.push(
+            Row::new(
+                "manager",
+                "Windows",
+                open_or_close(self.windows.stream_manager, "Stream Manager"),
+                Command::StreamManager,
+                true,
+            )
+            .keywords(&["chat", "comments", "activity", "viewers", "window", "buddy"])
+            .shortcut(shortcut_accelerator("comments-window")),
+        );
+        rows.push(
+            Row::new(
+                "captions-reader",
+                "Windows",
+                "Open Captions reader",
+                Command::CaptionsReader,
+                true,
+            )
+            .keywords(&["subtitles", "window", "reader"])
+            .shortcut(shortcut_accelerator("captions-window")),
+        );
+        // Scenes: Studio's Add scene… (plan 231 D14), then each scene.
         if !s.scenes.scenes.is_empty() {
             rows.push(
                 Row::new(
@@ -336,69 +477,24 @@ impl CommandPalette {
                     "window",
                     "display",
                     "camera only",
-                ]),
+                ])
+                .context("Studio"),
             );
         }
         for scene in &s.scenes.scenes {
-            rows.push(Row::new(
-                format!("scene-{}", scene.id),
-                "Scenes",
-                format!("Switch to {}", scene.name),
-                Command::Scene(scene.id.clone()),
-                connected,
-            ));
-        }
-        for tab in videorc_app_core::settings_page::TABS {
-            let words: &[&str] = match tab {
-                SettingsTab::General => &["theme", "startup", "preferences"],
-                SettingsTab::Permissions => {
-                    &["camera access", "screen recording", "microphone access"]
-                }
-                SettingsTab::Shortcuts => &["keyboard", "keys", "hotkeys", "bindings"],
-                SettingsTab::Remote => &["phone", "stream deck", "pair", "agents", "mcp"],
-                SettingsTab::About => &["version", "update", "release notes", "support bundle"],
-            };
             rows.push(
                 Row::new(
-                    format!("settings-{}", tab.id()),
-                    "Settings",
-                    tab.label(),
-                    Command::Settings(tab),
-                    true,
+                    format!("scene-{}", scene.id),
+                    "Scenes",
+                    format!("Switch to {}", scene.name),
+                    Command::Scene(scene.id.clone()),
+                    connected,
                 )
-                .keywords(words),
+                .keywords(&["scene", "layout"])
+                .context("Scene"),
             );
         }
-        if !s.session.phase.is_active() {
-            rows.push(Row::new(
-                "setup",
-                "Settings",
-                "Run setup again…",
-                Command::Setup,
-                connected,
-            ));
-        }
-        for (theme, label) in [
-            (ThemeChoice::Light, "Light"),
-            (ThemeChoice::Dark, "Dark"),
-            (ThemeChoice::System, "System"),
-        ] {
-            rows.push(Row::new(
-                format!("theme-{}", theme.as_str()),
-                "Appearance",
-                label,
-                Command::Theme(theme),
-                s.settings.hydrated,
-            ));
-        }
-        rows.push(Row::new(
-            "chat",
-            "Appearance",
-            "Chat in Studio",
-            Command::Chat,
-            s.settings.hydrated,
-        ));
-        // Sounds (P103): each pad, then Stop all while the board is loaded.
+        // Sounds (P103): each pad with its Studio key, then Stop all.
         if let Some(board) = &self.board {
             for sound in &board.sounds {
                 rows.push(
@@ -409,13 +505,8 @@ impl CommandPalette {
                         Command::PlaySound(sound.id.clone()),
                         connected,
                     )
-                    .keywords(&[
-                        "sound",
-                        "soundboard",
-                        "sfx",
-                        "effect",
-                        "play",
-                    ]),
+                    .keywords(&["sound", "soundboard", "sfx", "effect", "play"])
+                    .shortcut(sound.hotkey.clone()),
                 );
             }
             if !board.sounds.is_empty() {
@@ -431,6 +522,124 @@ impl CommandPalette {
                 );
             }
         }
+        // Avatar and Sidekick: every tab one jump away (plans 239, 150).
+        for (index, (id, label)) in AVATAR_TABS.into_iter().enumerate() {
+            rows.push(
+                Row::new(
+                    format!("avatar-{id}"),
+                    "Avatar",
+                    label,
+                    Command::AvatarTab(index),
+                    true,
+                )
+                .value(format!("Open Avatar → {label}"))
+                .keywords(avatar_keywords(id))
+                .context("Avatar"),
+            );
+        }
+        for (index, (id, label)) in SIDEKICK_TABS.into_iter().enumerate() {
+            rows.push(
+                Row::new(
+                    format!("sidekick-{id}"),
+                    "Sidekick",
+                    label,
+                    Command::SidekickTab(index),
+                    true,
+                )
+                .value(format!("Open Sidekick → {label}"))
+                .keywords(sidekick_keywords(id))
+                .context("Sidekick"),
+            );
+        }
+        // Settings: every tab one jump away, then Run setup again….
+        for tab in videorc_app_core::settings_page::TABS {
+            let words: &[&str] = match tab {
+                SettingsTab::General => &["theme", "startup", "animate", "preferences"],
+                SettingsTab::Permissions => &[
+                    "camera access",
+                    "screen recording",
+                    "microphone access",
+                    "system access",
+                ],
+                SettingsTab::Shortcuts => &["keyboard", "keys", "hotkeys", "bindings"],
+                SettingsTab::Remote => &[
+                    "phone",
+                    "stream deck",
+                    "pair",
+                    "control",
+                    "agents",
+                    "ai",
+                    "mcp",
+                ],
+                SettingsTab::About => &["version", "update", "release notes", "support bundle"],
+            };
+            rows.push(
+                Row::new(
+                    format!("settings-{}", tab.id()),
+                    "Settings",
+                    tab.label(),
+                    Command::Settings(tab),
+                    true,
+                )
+                .value(format!("Open Settings → {}", tab.label()))
+                .keywords(words)
+                .context("Settings")
+                .shortcut(if tab == SettingsTab::Shortcuts {
+                    shortcut_accelerator("shortcuts-page")
+                } else {
+                    None
+                }),
+            );
+        }
+        if !s.session.phase.is_active() {
+            rows.push(
+                Row::new(
+                    "setup",
+                    "Settings",
+                    "Run setup again…",
+                    Command::Setup,
+                    connected,
+                )
+                .keywords(&["first-run", "welcome", "onboarding", "permissions", "setup"])
+                .context("Settings"),
+            );
+        }
+        // Appearance: the look in use wears the check (plan 174 A-9).
+        let theme = ThemeChoice::parse(s.settings.theme.as_deref());
+        for (choice, label, value) in [
+            (ThemeChoice::Light, "Light", "Light theme"),
+            (ThemeChoice::Dark, "Dark", "Dark theme"),
+            (ThemeChoice::System, "System", "System theme"),
+        ] {
+            let words: &[&str] = if choice == ThemeChoice::System {
+                &["theme", "appearance", "mode", "automatic"]
+            } else {
+                &["theme", "appearance", "mode"]
+            };
+            rows.push(
+                Row::new(
+                    format!("theme-{}", choice.as_str()),
+                    "Appearance",
+                    label,
+                    Command::Theme(choice),
+                    s.settings.hydrated,
+                )
+                .value(value)
+                .keywords(words)
+                .checked(theme == choice),
+            );
+        }
+        rows.push(
+            Row::new(
+                "chat",
+                "Appearance",
+                "Chat in Studio",
+                Command::Chat,
+                s.settings.hydrated,
+            )
+            .keywords(&["chat", "comments", "messages", "studio"])
+            .checked(studio_chat_on(&s)),
+        );
         rows
     }
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -440,13 +649,30 @@ impl CommandPalette {
         let indices = videorc_app_core::command_score::filter_sorted(
             all.iter().map(|r| {
                 (
-                    r.label.as_str(),
+                    r.value.as_str(),
                     r.keywords.iter().map(String::as_str).collect(),
                 )
             }),
             query.as_ref(),
         );
-        self.rows = indices.into_iter().map(|i| all[i].clone()).collect();
+        // cmdk keeps a group's rows under its one heading: the groups in the
+        // order of their best match, each group's rows in theirs.
+        let mut groups: Vec<&'static str> = Vec::new();
+        for &index in &indices {
+            if !groups.contains(&all[index].group) {
+                groups.push(all[index].group);
+            }
+        }
+        self.rows = groups
+            .iter()
+            .flat_map(|group| {
+                indices
+                    .iter()
+                    .filter(|&&index| all[index].group == *group)
+                    .map(|&index| all[index].clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         self.selected = selected_id
             .and_then(|id| self.rows.iter().position(|r| r.id == id))
             .unwrap_or(0)
@@ -477,7 +703,21 @@ impl CommandPalette {
             | Command::CaptionsReader
             | Command::AddScene
             | Command::SceneBackground
+            | Command::AvatarTab(_)
+            | Command::SidekickTab(_)
             | Command::Notifications => cx.emit(command),
+            Command::GoLive | Command::HideScreen => {
+                let action = if command == Command::GoLive {
+                    "stream-toggle"
+                } else {
+                    "screen-hide-toggle"
+                };
+                StudioActions {
+                    studio,
+                    runtime: self.runtime.clone(),
+                }
+                .run(action);
+            }
             _ => {
                 if command == Command::Stop {
                     cx.emit(Command::Page(PageId::Studio));
@@ -521,14 +761,7 @@ impl CommandPalette {
                                 .await;
                         }
                         Command::Chat => {
-                            let value = studio
-                                .snapshot()
-                                .settings
-                                .studio
-                                .doc()
-                                .get("studioChat")
-                                .and_then(serde_json::Value::as_bool)
-                                .unwrap_or(true);
+                            let value = studio_chat_on(&studio.snapshot());
                             let _ = studio
                                 .update_studio_settings(|settings| {
                                     settings.set("studioChat", serde_json::json!(!value))
@@ -555,35 +788,103 @@ impl CommandPalette {
         cx.notify();
     }
 }
+impl CommandPalette {
+    /// The list child that holds row `row`: each group adds its heading, and
+    /// every group after the first a separator, before its rows.
+    fn child_index(&self, row: usize) -> usize {
+        let mut index = 0;
+        let mut group = None;
+        for (at, entry) in self.rows.iter().enumerate() {
+            if group != Some(entry.group) {
+                index += if group.is_some() { 2 } else { 1 };
+                group = Some(entry.group);
+            }
+            if at == row {
+                return index;
+            }
+            index += 1;
+        }
+        index
+    }
+}
 impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = current(window, cx).theme();
         let mut list = CommandList::new("command-results", &self.scroll);
         if self.rows.is_empty() {
-            list = list.child(div().p(px(24.)).child("No results found."));
-        }
-        for (index, row) in self.rows.iter().enumerate() {
+            // `CommandEmpty`: `py-6 text-center text-sm`, the secondary ink.
             list = list.child(
-                CommandItem::new(SharedString::from(row.id.clone()), row.label.clone())
-                    .selected(index == self.selected)
-                    .disabled(!row.enabled)
-                    .child(div().ml_auto().text_color(hsla(t.muted_foreground)).child(
-                        if row.enabled {
-                            row.group
-                        } else {
-                            "Unavailable in this build."
-                        },
-                    ))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.selected = index;
-                        this.run_selected(window, cx);
-                    })),
+                div()
+                    .flex_none()
+                    .py(px(24.))
+                    .text_center()
+                    .text_size(px(14.))
+                    .line_height(px(20.))
+                    .text_color(hsla(t.muted_foreground))
+                    .child("No results found."),
             );
         }
-        let title = self
+        let mut group = None;
+        for (index, row) in self.rows.iter().enumerate() {
+            if group != Some(row.group) {
+                // `CommandSeparator` between groups: `my-1 h-px`, the hairline,
+                // with each group's own 6 px pad around it.
+                if group.is_some() {
+                    list = list.child(div().flex_none().h(px(1.)).my(px(10.)).bg(hsla(t.border)));
+                }
+                // The group heading: `px-2.5 pt-3 pb-2 text-xs leading-none
+                // font-semibold`, the tertiary ink.
+                list = list.child(
+                    div()
+                        .flex_none()
+                        .px(px(10.))
+                        .pt(px(12.))
+                        .pb(px(8.))
+                        .text_size(px(text::META.size))
+                        .line_height(px(text::META.size))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(hsla(t.subtle))
+                        .child(row.group),
+                );
+                group = Some(row.group);
+            }
+            let selected = index == self.selected;
+            let mut item = CommandItem::new(SharedString::from(row.id.clone()), row.label.clone())
+                .selected(selected)
+                .disabled(!row.enabled);
+            if let Some(context) = row.context {
+                item = item.child(
+                    div()
+                        .min_w(px(0.))
+                        .truncate()
+                        .text_color(hsla(t.muted_foreground))
+                        .child(context),
+                );
+            }
+            if let Some(accelerator) = &row.shortcut {
+                // `CommandShortcut`: at the end, the key's chip.
+                item = item.child(
+                    div()
+                        .ml_auto()
+                        .flex_none()
+                        .child(ShortcutKeys::accelerator(accelerator.clone())),
+                );
+            } else if row.checked {
+                item = item.child(div().ml_auto().flex_none().child(icon(
+                    IconName::Check,
+                    16.,
+                    hsla(t.foreground),
+                )));
+            }
+            list = list.child(item.on_click(cx.listener(move |this, _, window, cx| {
+                this.selected = index;
+                this.run_selected(window, cx);
+            })));
+        }
+        let footer = self
             .rows
             .get(self.selected)
-            .map(|r| r.label.clone())
+            .map(|r| r.value.clone())
             .unwrap_or_default();
         command_dialog("command-palette", &self.handle).child(
             div()
@@ -614,30 +915,97 @@ impl Render for CommandPalette {
                                 break;
                             }
                         }
-                        this.scroll.scroll_to_item(this.selected);
+                        let child = this.child_index(this.selected);
+                        this.scroll.scroll_to_item(child);
                         cx.notify();
                     }
                     cx.stop_propagation();
                 }))
                 .child(CommandInput::new(&self.input))
                 .child(list)
+                // `CommandFooter`: 40 px, `px-4 text-xs`, the secondary ink;
+                // the selected action, then the key that runs it.
                 .child(
                     div()
+                        .flex_none()
+                        .h(px(40.))
                         .flex()
                         .items_center()
-                        .gap(px(8.))
-                        .p(px(12.))
+                        .justify_between()
+                        .gap(px(12.))
+                        .px(px(16.))
                         .border_t_1()
                         .border_color(hsla(t.border))
-                        .child(title)
-                        .child(ShortcutKeys::keystrokes("enter")),
+                        .type_scale(text::META)
+                        .text_color(hsla(t.muted_foreground))
+                        .child(div().min_w(px(0.)).truncate().child(footer))
+                        .child(div().flex_none().child(ShortcutKeys::keystrokes("enter"))),
                 ),
         )
     }
 }
+/// `studioChatOn`: Chat in Studio unless it was turned off.
+fn studio_chat_on(snapshot: &videorc_app_core::studio::StudioSnapshot) -> bool {
+    snapshot
+        .settings
+        .studio
+        .doc()
+        .get("studioChat")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+/// `AVATAR_KEYWORDS`.
+fn avatar_keywords(id: &str) -> &'static [&'static str] {
+    match id {
+        "profile" => &[
+            "persona",
+            "name",
+            "personality",
+            "look",
+            "my avatars",
+            "library",
+            "buddy",
+            "pet",
+        ],
+        "greetings" => &["welcome", "follow", "sub", "raid", "lines"],
+        _ => &[],
+    }
+}
+/// `BUDDY_KEYWORDS`.
+fn sidekick_keywords(id: &str) -> &'static [&'static str] {
+    match id {
+        "live" => &["overview", "sidekick live", "status", "listen", "cloud ai"],
+        "chat" => &["posting", "suggest", "bubble", "moderation"],
+        "community" => &["regulars", "viewers", "people", "link", "forget"],
+        "voice" => &["commands", "speak", "listen"],
+        "reports" => &["summary", "stream report"],
+        "clean-cut" => &["edit", "export", "cut", "recording"],
+        _ => &[],
+    }
+}
+/// `PAGE_KEYWORDS`: what people type for a page that is not its name.
 fn page_keywords(page: PageId) -> &'static [&'static str] {
     match page {
         PageId::Studio => &["record", "go live", "stage", "transport"],
+        PageId::Avatar => &[
+            "character",
+            "mascot",
+            "pet",
+            "alive",
+            "bubble",
+            "greetings",
+            "sidekick",
+        ],
+        PageId::Ai => &[
+            "assistant",
+            "ai",
+            "chat",
+            "moderation",
+            "voice",
+            "reports",
+            "clean cut",
+        ],
+        PageId::Guests => &["guest", "invite", "room", "talk show", "co-host", "link"],
         PageId::Sources => &[
             "camera",
             "microphone",
@@ -649,11 +1017,28 @@ fn page_keywords(page: PageId) -> &'static [&'static str] {
         ],
         PageId::Layouts => &[
             "layout",
+            "layouts",
             "composition",
             "background",
             "takeover",
             "presets",
             "edit scene",
+            "scene editor",
+        ],
+        PageId::Assets => &[
+            "assets",
+            "backgrounds",
+            "overlays",
+            "pictures",
+            "takeovers",
+            "banners",
+        ],
+        PageId::Sounds => &[
+            "assets",
+            "soundboard",
+            "sound effects",
+            "sfx",
+            "import sounds",
         ],
         PageId::Live => &[
             "livestream",
@@ -665,8 +1050,16 @@ fn page_keywords(page: PageId) -> &'static [&'static str] {
             "go live",
             "channels",
         ],
-        PageId::Assets => &["assets", "backgrounds", "overlays", "pictures", "banners"],
-        PageId::Sounds => &["assets", "soundboard", "sfx", "sound effects"],
+        PageId::Captions => &["subtitles", "transcription"],
+        PageId::Recording => &[
+            "recording",
+            "quality",
+            "resolution",
+            "folder",
+            "file",
+            "storage",
+        ],
+        PageId::Library => &["recordings", "clips", "markers", "history"],
         PageId::Settings => &[
             "preferences",
             "keyboard",
@@ -676,26 +1069,13 @@ fn page_keywords(page: PageId) -> &'static [&'static str] {
             "about",
         ],
         PageId::Diagnostics => &[
-            "health",
             "diagnostics",
+            "support bundle",
             "logs",
-            "support",
-            "performance",
-            "problems",
-        ],
-        PageId::Captions => &["subtitles", "transcription"],
-        PageId::Recording => &["quality", "resolution", "folder", "file", "storage"],
-        PageId::Library => &["recordings", "clips", "markers", "history"],
-        PageId::Guests => &["guest", "invite", "room", "talk show", "co-host", "link"],
-        PageId::Avatar => &["character", "mascot", "pet", "greetings", "sidekick"],
-        PageId::Ai => &[
-            "assistant",
-            "ai",
-            "chat",
-            "moderation",
-            "voice",
-            "reports",
-            "clean cut",
+            "problem",
+            "bug",
+            "report",
+            "checks",
         ],
     }
 }

@@ -1,7 +1,6 @@
 //! Sidekick → Voice (`BuddyVoiceCommands`).
 
 use gpui::{AnyElement, Context, Window, div, prelude::*, px};
-use videorc_app_core::buddy::copy as words;
 use videorc_app_core::livestream::PlatformsState;
 use videorc_app_core::livestream::accounts::{
     AccountStatus, KICK_MODERATION_SCOPE, PlatformAccount, TWITCH_MODERATION_SCOPE,
@@ -11,18 +10,21 @@ use videorc_app_core::stream_manager::buddy::{self as sm_buddy, CohostSettingsVi
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::chat_platform::ChatPlatform;
+use videorc_kit::field::FieldGroup;
 use videorc_kit::icon::icon;
-use videorc_kit::list_row::{GroupedList, ListRow};
+use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
-use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
 use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::{size, text};
+use videorc_kit::tokens::text;
 
-use super::live::{LiveView, UnlockAction};
-use super::{SaveSection, SidekickScreen};
+use super::live::LiveView;
+use super::{
+    SaveSection, SidekickScreen, config_grid_pair, field_beside, field_stack, field_text_xs,
+    tab_lead, unlock_alert,
+};
 
 const COMMANDS: &str = "Commands";
 const WHAT_YOU_CAN_SAY: &str = "What you can say";
@@ -182,7 +184,7 @@ pub fn remove_messages_rows(platforms: &PlatformsState) -> Vec<RemoveMessagesRow
         .collect()
 }
 
-fn chat_platform(platform: &str) -> ChatPlatform {
+pub(super) fn chat_platform(platform: &str) -> ChatPlatform {
     match platform {
         "youtube" => ChatPlatform::Youtube,
         "twitch" => ChatPlatform::Twitch,
@@ -211,11 +213,13 @@ pub fn render_voice(
     settings: Option<&CohostSettingsView>,
     paused: &[&'static str],
     rows: &[RemoveMessagesRow],
+    wide: bool,
     window: &mut Window,
     cx: &mut Context<SidekickScreen>,
 ) -> AnyElement {
     let theme = theme::resolve(None, window, cx);
     let muted = hsla(theme.muted_foreground);
+    let border = hsla(theme.border);
     let locked = view.unlock.is_some();
     let enabled = settings.map(|s| s.enabled).unwrap_or(false);
     let off = !locked && !enabled;
@@ -240,28 +244,16 @@ pub fn render_voice(
         LIMITS_CONFIRM
     };
 
-    let mut lead = div().flex().flex_col().gap(px(8.)).p(px(size::GUTTER));
+    // One reason above both columns when voice commands can't run: locked,
+    // Sidekick Live off, or a paused command.
+    let mut lead = tab_lead(border);
     if let Some(unlock) = view.unlock.as_ref() {
-        let mut alert = Alert::new("sidekick-voice-unlock")
-            .variant(AlertVariant::Warning)
-            .title(unlock.reason.clone());
-        if let Some(action) = unlock.action {
-            let label = match action {
-                UnlockAction::SignIn => words::SIGN_IN,
-                UnlockAction::ViewPremium => words::VIEW_PREMIUM,
-            };
-            alert = alert.action(
-                Button::new("voice-unlock-action")
-                    .variant(ButtonVariant::Outline)
-                    .size(ButtonSize::Xs)
-                    .label(label)
-                    .on_click(move |_, _, cx| match action {
-                        UnlockAction::SignIn => crate::app::accounts::sign_in(cx),
-                        UnlockAction::ViewPremium => cx.open_url("https://videorc.com/premium"),
-                    }),
-            );
-        }
-        lead = lead.child(alert);
+        lead = lead.child(unlock_alert(
+            "sidekick-voice-unlock",
+            "voice-unlock-action",
+            unlock,
+            unlock.reason.clone(),
+        ));
     }
     if off {
         let entity = entity.clone();
@@ -292,33 +284,30 @@ pub fn render_voice(
                 .child(*line),
         );
     }
+    let show_lead = view.unlock.is_some() || off || !paused.is_empty();
 
+    // Plan 174 F-28: each command as a compact row (the command and what it
+    // does), then every phrase in plain secondary text under it.
     let mut command_list = GroupedList::new().label(WHAT_YOU_CAN_SAY);
-    for (title, result, _) in VOICE_COMMANDS {
-        command_list = command_list.row(
-            ListRow::new(format!("voice-cmd-{title}"), *title)
-                .compact(true)
-                .context(*result),
-        );
-    }
-    let mut phrases = div().flex().flex_col().gap(px(8.)).pt(px(4.));
-    for (title, _, list) in VOICE_COMMANDS {
-        phrases = phrases.child(
+    for (title, result, phrases) in VOICE_COMMANDS {
+        command_list = command_list.item(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(2.))
+                .min_w_0()
+                .pb(px(8.))
                 .child(
-                    div()
-                        .type_scale(text::META)
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(*title),
+                    ListRow::new(format!("voice-cmd-{title}"), *title)
+                        .compact(true)
+                        .context(*result)
+                        .grouped(),
                 )
                 .child(
                     div()
+                        .px(px(12.))
                         .type_scale(text::META)
                         .text_color(muted)
-                        .child(phrases_label(list)),
+                        .child(phrases_label(phrases)),
                 ),
         );
     }
@@ -326,64 +315,70 @@ pub fn render_voice(
     let commands = PanelSection::new("sidekick-voice-commands")
         .title(COMMANDS)
         .description(commands_description())
+        .last(wide)
         .child(command_list)
-        .child(phrases)
         .child(
-            SettingsGroup::new()
-                .row(
-                    SettingsRow::new("wake-word", WAKE_WORD_LABEL)
-                        .description(WAKE_WORD_DESCRIPTION)
-                        .child(
-                            Switch::new("wake-word")
-                                .accessibility_label(WAKE_WORD_LABEL)
-                                .checked(wake)
-                                .disabled(locked)
-                                .on_change({
-                                    let entity = entity.clone();
-                                    move |value, _, cx| {
-                                        entity.update(cx, |screen, cx| {
-                                            screen.patch_section(
-                                                serde_json::json!({ "wakeWordRequired": value }),
-                                                SaveSection::Voice,
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                }),
-                        ),
-                )
-                .row(
-                    SettingsRow::new("remove-confirm", BEFORE_REMOVE)
-                        .description(remove_desc)
-                        .child(
-                            SegmentedControl::new("remove-confirm")
-                                .small(true)
-                                .accessibility_label(BEFORE_REMOVE)
-                                .value(Some(remove_confirm))
-                                .disabled(locked)
-                                .option(Segment::new("confirm", CONFIRM_FIRST))
-                                .option(Segment::new("countdown", COUNTDOWN))
-                                .on_change({
-                                    let entity = entity.clone();
-                                    move |value, _, cx| {
-                                        let mode = value.to_string();
-                                        entity.update(cx, |screen, cx| {
-                                            screen.patch_section(
-                                                serde_json::json!({ "removeConfirm": mode }),
-                                                SaveSection::Voice,
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                }),
-                        ),
-                ),
+            FieldGroup::new()
+                .grouped()
+                .child(field_beside(
+                    field_text_xs(WAKE_WORD_LABEL, WAKE_WORD_DESCRIPTION, theme),
+                    Switch::new("wake-word")
+                        .accessibility_label(WAKE_WORD_LABEL)
+                        .checked(wake)
+                        .disabled(locked)
+                        .on_change({
+                            let entity = entity.clone();
+                            move |value, _, cx| {
+                                entity.update(cx, |screen, cx| {
+                                    screen.patch_section(
+                                        serde_json::json!({ "wakeWordRequired": value }),
+                                        SaveSection::Voice,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                ))
+                .child(field_stack(
+                    BEFORE_REMOVE,
+                    remove_desc,
+                    vec![
+                        SegmentedControl::new("remove-confirm")
+                            .small(true)
+                            .accessibility_label(BEFORE_REMOVE)
+                            .value(Some(remove_confirm))
+                            .disabled(locked)
+                            .option(Segment::new("confirm", CONFIRM_FIRST))
+                            .option(Segment::new("countdown", COUNTDOWN))
+                            .on_change({
+                                let entity = entity.clone();
+                                move |value, _, cx| {
+                                    let mode = value.to_string();
+                                    entity.update(cx, |screen, cx| {
+                                        screen.patch_section(
+                                            serde_json::json!({ "removeConfirm": mode }),
+                                            SaveSection::Voice,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            })
+                            .into_any_element(),
+                    ],
+                    theme,
+                )),
         );
 
-    let mut platform_rows = GroupedList::new().label(REMOVE_MESSAGES);
+    // Remove messages: each connected platform, ready or with its one fix.
+    let mut platform_rows = GroupedList::new();
     if rows.is_empty() {
-        platform_rows = platform_rows.row(
-            ListRow::new("remove-messages-empty", BUDDY_REMOVE_MESSAGES_NO_ACCOUNT).compact(true),
+        platform_rows = platform_rows.item(
+            div()
+                .px(px(12.))
+                .py(px(8.))
+                .type_scale(text::META)
+                .text_color(muted)
+                .child(BUDDY_REMOVE_MESSAGES_NO_ACCOUNT),
         );
     }
     for row in rows {
@@ -439,27 +434,25 @@ pub fn render_voice(
         platform_rows = platform_rows.row(list_row);
     }
 
+    // Its limits and the Premium rule as two lines of the description.
     let remove = PanelSection::new("sidekick-remove-messages")
         .title(REMOVE_MESSAGES)
-        .description(format!(
-            "{limits} {BUDDY_REMOVAL_FALLBACK} {BUDDY_VOICE_PREMIUM}"
-        ))
+        .description(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(format!("{limits} {BUDDY_REMOVAL_FALLBACK}"))
+                .child(BUDDY_VOICE_PREMIUM),
+        )
+        .last(true)
         .child(platform_rows);
-
-    let show_lead = view.unlock.is_some() || off || !paused.is_empty();
 
     div()
         .flex()
         .flex_col()
-        .child(if show_lead { lead } else { div() })
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(size::GUTTER))
-                .p(px(size::GUTTER))
-                .child(commands)
-                .child(remove),
-        )
+        .flex_1()
+        .when(show_lead, |page| page.child(lead))
+        .child(config_grid_pair(commands, remove, wide, border))
         .into_any_element()
 }

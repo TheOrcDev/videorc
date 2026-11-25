@@ -27,6 +27,7 @@ use videorc_kit::dialog::{Dialog, DialogHandle};
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::InputState;
 use videorc_kit::input_group::{InputGroup, InputGroupAddon};
+use videorc_kit::label::Label;
 use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
@@ -53,6 +54,9 @@ const REVIEW: &str = "Review";
 const CANCEL: &str = "Cancel";
 const RETRY: &str = "Retry";
 const OPEN_IN_LIBRARY: &str = "Open in Library";
+/// `ConfigGrid`: the two sections side by side from this page width
+/// (`@min-[940px]/page`), one under the other below it.
+const CONFIG_GRID_MIN_WIDTH: f32 = 940.;
 
 /// "Open in Library" on a cut: the shell opens Library on this session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +91,8 @@ pub struct CleanCutState {
     pub review: Option<ReviewState>,
     pub drafts_path: PathBuf,
     pub loaded: bool,
+    /// The page's measured width, for the config grid's two columns.
+    pub width: f32,
 }
 
 impl CleanCutState {
@@ -110,6 +116,7 @@ impl CleanCutState {
             review: None,
             drafts_path: local_dir.join(format!("{STORAGE_KEY}.json")),
             loaded: false,
+            width: 0.,
         }
     }
 
@@ -164,6 +171,19 @@ impl SidekickScreen {
             active: self.studio.session_owns_transport(),
             // The watch borrows the snapshot; `snapshot()` would clone it.
             streaming: session_is_live(&self.studio.watch().borrow().session.status),
+        }
+    }
+
+    /// The page's measured width; draws again only when the grid's columns
+    /// flip.
+    fn measure_clean_cut(&mut self, width: f32, cx: &mut Context<Self>) {
+        let Some(clean) = self.clean_cut.as_mut() else {
+            return;
+        };
+        let flips = (width >= CONFIG_GRID_MIN_WIDTH) != (clean.width >= CONFIG_GRID_MIN_WIDTH);
+        clean.width = width;
+        if flips {
+            cx.notify();
         }
     }
 
@@ -336,29 +356,79 @@ impl SidekickScreen {
             account_locked: !self.signed_in || !gate.allowed(),
         };
 
-        let mut page = div().flex().flex_col();
+        // The page's width decides the grid's columns (`@container/page`).
+        let measured = cx.entity().downgrade();
+        let measure = gpui::canvas(
+            move |bounds, _, cx| {
+                let width = f32::from(bounds.size.width);
+                measured
+                    .update(cx, |screen, cx| screen.measure_clean_cut(width, cx))
+                    .ok();
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        let mut page = div()
+            .relative()
+            .flex()
+            .flex_1()
+            .flex_col()
+            .w_full()
+            .child(measure);
         // Locked means disabled with one reason, in the strip every Sidekick
         // tab leads with (plan 174 E-31): the switch and Make are off under it.
         if let Some(unlock) = card.unlock.as_ref() {
             page = page.child(
                 div()
+                    .flex_none()
                     .p(px(size::GUTTER))
                     .border_b_1()
                     .border_color(hsla(t.border))
                     .child(lock_alert(unlock)),
             );
         }
-        page.child(
+        // `ConfigGrid` + `CONFIG_GRID_PAIR`: flush sections. From 940 px they
+        // sit side by side and fill the height, a hairline between the
+        // columns and none under them; below it they stack at their own
+        // height, a hairline between them.
+        let wide = state.width >= CONFIG_GRID_MIN_WIDTH;
+        let switch = auto_section(&card, auto, t, cx).last(wide);
+        let recordings = recordings_section(&card, t, cx).last(true);
+        let grid = if wide {
+            div()
+                .flex()
+                .flex_1()
+                .w_full()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .border_r_1()
+                        .border_color(hsla(t.border))
+                        .child(switch),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(recordings),
+                )
+        } else {
             div()
                 .flex()
                 .flex_col()
-                .gap(px(size::GUTTER))
-                .p(px(size::GUTTER))
-                .child(auto_section(&card, auto, t, cx))
-                .child(recordings_section(&card, t, cx)),
-        )
-        .child(consent_dialog(state, t, cx))
-        .into_any_element()
+                .w_full()
+                .child(switch)
+                .child(recordings)
+        };
+        page.child(grid)
+            .child(consent_dialog(state, t, cx))
+            .into_any_element()
     }
 }
 
@@ -437,9 +507,11 @@ fn auto_section(
                 }),
         );
     }
+    // A horizontal `Field` with a `FieldContent`: the label (14 px / 500)
+    // over the status line, the switch at the top of the row.
     let field = div()
         .flex()
-        .items_center()
+        .items_start()
         .gap(px(12.))
         .child(
             div()
@@ -447,13 +519,8 @@ fn auto_section(
                 .flex_1()
                 .min_w(px(0.))
                 .flex_col()
-                .gap(px(2.))
-                .child(
-                    div()
-                        .type_scale(text::LABEL)
-                        .text_color(hsla(t.foreground))
-                        .child(CLEAN_CUT_AUTO_LABEL),
-                )
+                .gap(px(4.))
+                .child(Label::new(CLEAN_CUT_AUTO_LABEL))
                 .child(line),
         )
         .child(
@@ -558,7 +625,6 @@ fn recording_list(
             let pick = (newest.as_deref() != Some(session.id.as_str())).then(|| session.id.clone());
             let mut row = ListRow::new(format!("clean-cut-rec-{}", session.id), title)
                 .context(view::recording_facts(session))
-                .selected(is_chosen)
                 .on_click({
                     let entity = entity.clone();
                     move |_, _, cx| {
@@ -752,6 +818,7 @@ fn selected_recording(
             Button::new("clean-cut-retry")
                 .variant(ButtonVariant::Outline)
                 .size(ButtonSize::Xs)
+                .icon(IconName::ArrowCounterClockwise)
                 .label(RETRY)
                 .disabled(cannot_retry)
                 .on_click(move |_, window, cx| {
@@ -809,7 +876,10 @@ fn status_row(
     let unsaved = job
         .map(|job| clean_cut_drafts::read(&card.state.load_drafts(), &job.id).change_count())
         .unwrap_or(0);
-    let mut row = ListRow::new("clean-cut-status", status.label.clone()).icon(glyph);
+    // `px-0`: the row sits flush in the chosen recording's block.
+    let mut row = ListRow::new("clean-cut-status", status.label.clone())
+        .icon(glyph)
+        .flush(true);
     if unsaved > 0 {
         row = row.context(view::unsaved_label(unsaved));
     } else if let Some(detail) = status.detail.clone() {
@@ -858,9 +928,8 @@ fn status_row(
                         .child(
                             Button::new("clean-cut-reveal")
                                 .variant(ButtonVariant::Ghost)
-                                .accessibility_label(label)
-                                .child(icon(IconName::FolderOpen, 16., hsla(t.foreground)))
-                                .child(label)
+                                .icon(IconName::FolderOpen)
+                                .label(label)
                                 .on_click(move |_, _, cx| {
                                     reveal.update(cx, |screen, cx| {
                                         screen.reveal_clean_cut_output(&reveal_id, cx)
@@ -870,6 +939,7 @@ fn status_row(
                         .child(
                             Button::new("clean-cut-open-library")
                                 .variant(ButtonVariant::Ghost)
+                                .icon(IconName::FilmReel)
                                 .label(OPEN_IN_LIBRARY)
                                 .on_click(move |_, _, cx| {
                                     entity.update(cx, |_, cx| {
@@ -881,10 +951,12 @@ fn status_row(
             }
         }
         _ => {
+            let make = view::make_label(card.state.mode);
             row = row.child(
                 Button::new("clean-cut-make")
                     .variant(ButtonVariant::Default)
-                    .label(view::make_label(card.state.mode))
+                    .icon(IconName::Scissors)
+                    .label(make)
                     .disabled(cannot_start)
                     .on_click(move |_, window, cx| {
                         entity.update(cx, |screen, cx| screen.make_clean_cut(window, cx));

@@ -20,7 +20,7 @@ mod youtube_consent;
 
 use std::sync::Arc;
 
-use gpui::{Context, Entity, SharedString, Window, div, prelude::*, px};
+use gpui::{Context, Entity, SharedString, Window, div, prelude::*, px, relative};
 use serde_json::json;
 use videorc_app_core::livestream::DetailsState;
 use videorc_app_core::livestream::cloud_view::{self, SectionView as CloudSectionView};
@@ -43,16 +43,21 @@ use videorc_kit::dialog::DialogHandle;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::list_row::{GroupedList, ListRow};
+use videorc_kit::page_tabs::PageTabs;
 use videorc_kit::panel_section::PanelSection;
-use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
 use videorc_kit::switch::Switch;
-use videorc_kit::tabs::Tabs;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
 
 pub type AppStudio = Studio<BackendClient>;
+
+/// `LIVESTREAM_SETUP_GRID`'s one breakpoint: two columns from 940 px of page.
+const SETUP_SPLIT_MIN: f32 = 940.;
+/// The shell's sidebar (`app/shell.rs`, L7's `w-52`): a page is the window
+/// less it.
+const SIDEBAR_WIDTH: f32 = 208.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DestinationsTab {
@@ -521,7 +526,12 @@ impl DestinationsPanel {
         if let Some(tag) = &dest.quality_tag {
             trailing = trailing.child(Badge::new(tag.clone()).variant(BadgeVariant::Outline));
         }
-        trailing = trailing
+        // `destination-controls`: the switch and the chevron, 12 px apart.
+        let controls = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(12.))
             .child(
                 Switch::new(format!("dest-enable-{}", dest.id))
                     .accessibility_label(dest.switch_label.clone())
@@ -535,18 +545,21 @@ impl DestinationsPanel {
                         }
                     }),
             )
+            // `ChevronDownIcon` (14 px), turned over while open.
             .child(icon(
                 if dest.expanded {
-                    IconName::CaretDown
+                    IconName::CaretUp
                 } else {
-                    IconName::CaretRight
+                    IconName::CaretDown
                 },
-                12.0,
+                14.0,
                 hsla(t.muted_foreground),
             ));
+        trailing = trailing.child(controls);
 
         let mut card = div().child(
             ListRow::new(format!("dest-{}", dest.id), dest.label.clone())
+                .icon(crate::screens::platform_glyph(&dest.platform))
                 .context(dest.context.clone())
                 .interactive(true)
                 .child(trailing)
@@ -1017,7 +1030,7 @@ impl Render for DestinationsPanel {
 
         let t = theme::current(window, cx).theme();
         let entity = cx.entity();
-        let tabs = Tabs::new("destinations-views")
+        let tabs = PageTabs::new("destinations-views", page_copy::VIEWS_LABEL)
             .tab(page_copy::VIEW_SETUP)
             .tab(page_copy::VIEW_UPCOMING)
             .tab(page_copy::VIEW_DISCORD)
@@ -1031,6 +1044,12 @@ impl Render for DestinationsPanel {
         let body = match self.tab {
             DestinationsTab::Setup => {
                 let setup = self.setup.clone();
+                let has_notices = self.keyring_issue.is_some()
+                    || setup.notices.entitlement.is_some()
+                    || setup.notices.session_lock.is_some()
+                    || setup.notices.failure.is_some()
+                    || !setup.notices.scheduled.is_empty()
+                    || setup.cap_notice.is_some();
                 let mut notices = div().flex().flex_col().gap(px(8.));
                 if let Some(issue) = &self.keyring_issue {
                     notices = notices.child(crate::screens::linux_setup::linux_setup_alert(issue));
@@ -1119,11 +1138,22 @@ impl Render for DestinationsPanel {
                     list = list.item(self.destination_card(dest, t, window, cx));
                 }
 
-                let mut column = div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child(notices)
+                // `LIVESTREAM_SETUP_GRID`: the lead column (notices,
+                // destinations, stream details, chat commands) and the trail
+                // (`GoLivePanel`: output quality, cloud, watchdog, after the
+                // stream, ready), side by side from 940 px of page with a
+                // hairline between, stacked under a hairline below that.
+                // Sections are flush: each carries its own gutter.
+                let mut lead = div().flex().flex_col().min_w(px(0.));
+                if has_notices {
+                    lead = lead.child(
+                        notices
+                            .p(px(size::GUTTER))
+                            .border_b_1()
+                            .border_color(hsla(t.border)),
+                    );
+                }
+                let lead = lead
                     .child(
                         PanelSection::new("destinations-list")
                             .title(page_copy::DESTINATIONS)
@@ -1131,22 +1161,51 @@ impl Render for DestinationsPanel {
                             .child(list),
                     )
                     .child(self.details_section(&details, setup.controls_disabled, window, cx))
-                    .child(self.chat_commands_section(&self.chat_commands.clone(), window, cx))
+                    .child(self.chat_commands_section(&self.chat_commands.clone(), window, cx));
+                let mut trail = div()
+                    .flex()
+                    .flex_col()
+                    .min_w(px(0.))
                     .child(self.quality_section(window, cx));
                 if let Some(cloud) = self.cloud.clone() {
-                    column = column.child(self.cloud_section(&cloud, window, cx));
+                    trail = trail.child(self.cloud_section(&cloud, window, cx));
                 }
                 let premium = Self::watchdog_premium(&self.studio);
                 if let Some(watchdog) = Self::watchdog_view(&self.watchdog, premium) {
-                    column = column.child(self.watchdog_section(&watchdog, window, cx));
+                    trail = trail.child(self.watchdog_section(&watchdog, window, cx));
                 }
                 let report = Self::stream_report_view(&self.stream_report);
-                column
+                let trail = trail
                     .child(self.stream_report_section(&report, window, cx))
-                    .child(self.ready_section(&self.ready.clone(), window, cx))
-                    .into_any_element()
+                    .child(self.ready_section(&self.ready.clone(), window, cx));
+                let page_width = window.viewport_size().width - px(SIDEBAR_WIDTH);
+                if page_width >= px(SETUP_SPLIT_MIN) {
+                    div()
+                        .flex()
+                        .w_full()
+                        .child(
+                            lead.w(relative(0.6))
+                                .border_r_1()
+                                .border_color(hsla(t.border)),
+                        )
+                        .child(trail.w(relative(0.4)))
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .child(lead)
+                        .child(trail.border_t_1().border_color(hsla(t.border)))
+                        .into_any_element()
+                }
             }
-            DestinationsTab::Upcoming => self.upcoming_body(&self.scheduled.clone(), window, cx),
+            // Upcoming and Discord keep the gutter they had (not in this
+            // design pass).
+            DestinationsTab::Upcoming => div()
+                .p(px(size::GUTTER))
+                .child(self.upcoming_body(&self.scheduled.clone(), window, cx))
+                .into_any_element(),
             DestinationsTab::Discord => {
                 let details = self.studio.details_now();
                 let now_ms = chrono::Utc::now().timestamp_millis();
@@ -1157,7 +1216,10 @@ impl Render for DestinationsPanel {
                     &self.discord_memory,
                     now_ms,
                 );
-                self.discord_body(&view, window, cx)
+                div()
+                    .p(px(size::GUTTER))
+                    .child(self.discord_body(&view, window, cx))
+                    .into_any_element()
             }
         };
 
@@ -1176,30 +1238,9 @@ impl Render for DestinationsPanel {
             .bg(hsla(t.glass_solid))
             .text_color(hsla(t.foreground))
             .type_scale(text::META)
-            .child(
-                ScrollArea::new("destinations-scroll").child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .px(px(size::GUTTER))
-                        .py(px(8.))
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .child(
-                                    div()
-                                        .type_scale(text::LABEL)
-                                        .text_color(hsla(t.muted_foreground))
-                                        .child(page_copy::VIEWS_LABEL),
-                                )
-                                .child(tabs),
-                        )
-                        .child(body),
-                ),
-            )
+            // `PageTabs`: the strip under the toolbar, and only the view
+            // under it scrolls.
+            .child(tabs.child(body))
             .child(command_dialog)
             .child(youtube_consent)
             .child(disconnect)

@@ -1,5 +1,5 @@
-//! Field (`components/ui/field.tsx`): a named control — label, optional
-//! description / error, and the control itself. Vertical stacks the name
+//! Field (`components/ui/field.tsx`): a named control — label, the control,
+//! then description / error (shadcn source order). Vertical stacks the name
 //! above the control (Room sounds, room audio routing); horizontal is the
 //! SettingsRow shape. [`FieldGroup`] stacks fields, optionally as one
 //! inset grouped list.
@@ -35,6 +35,8 @@ pub struct Field {
     id: ElementId,
     orientation: FieldOrientation,
     label: Option<SharedString>,
+    /// Trailing chip on the label row (title "0/100" counter).
+    label_end: Option<AnyElement>,
     description: Option<SharedString>,
     error: Option<SharedString>,
     invalid: bool,
@@ -48,6 +50,7 @@ impl Field {
             id: id.into(),
             orientation: FieldOrientation::Vertical,
             label: None,
+            label_end: None,
             description: None,
             error: None,
             invalid: false,
@@ -71,13 +74,19 @@ impl Field {
         self
     }
 
-    /// 12 px muted line under the label.
+    /// Trailing element on the label row (character count, etc.).
+    pub fn label_end(mut self, end: impl IntoElement) -> Self {
+        self.label_end = Some(end.into_any_element());
+        self
+    }
+
+    /// 12 px muted line after the control (shadcn FieldDescription order).
     pub fn description(mut self, description: impl Into<SharedString>) -> Self {
         self.description = Some(description.into());
         self
     }
 
-    /// Destructive refusal under the description.
+    /// Destructive refusal after the control (shadcn FieldError order).
     pub fn error(mut self, error: impl Into<SharedString>) -> Self {
         self.error = Some(error.into());
         self.invalid = true;
@@ -105,72 +114,86 @@ impl ParentElement for Field {
 impl RenderOnce for Field {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
-        let content = div()
-            .flex()
-            .min_w(px(0.0))
-            .flex_col()
-            .gap(px(4.0))
-            .when(self.orientation == FieldOrientation::Horizontal, |c| {
-                c.flex_1()
-            })
-            .when_some(self.label, |content, label| {
-                content.child(
+        let _invalid = self.invalid;
+        let label_row = self.label.map(|label| {
+            let mut row = div().flex().w_full().items_center().gap(px(8.0)).child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_size(px(14.0))
+                    .line_height(px(20.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    // Electron keeps the label in the foreground; the error
+                    // line below carries the refusal.
+                    .text_color(hsla(t.foreground))
+                    .child(label),
+            );
+            if let Some(end) = self.label_end {
+                row = row.child(
                     div()
-                        .text_size(px(14.0))
-                        .line_height(px(20.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(hsla(if self.invalid {
-                            t.destructive
-                        } else {
-                            t.foreground
-                        }))
-                        .child(label),
-                )
-            })
-            .when_some(self.description, |content, description| {
-                content.child(
-                    div()
+                        .flex_none()
                         .type_scale(text::META)
                         .text_color(hsla(t.muted_foreground))
-                        .child(description),
-                )
-            })
-            .when_some(self.error, |content, error| {
-                content.child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap(px(6.0))
-                        .text_size(px(12.0))
-                        .line_height(px(16.0))
-                        .text_color(hsla(t.foreground))
-                        .child(icon(IconName::XCircleFill, 14.0, hsla(t.destructive)))
-                        .child(div().min_w(px(0.0)).child(error)),
-                )
-            });
+                        .child(end),
+                );
+            }
+            row
+        });
 
-        let body = match self.orientation {
+        let description = self.description.map(|description| {
+            div()
+                .type_scale(text::META)
+                .line_height(px(18.0))
+                .text_color(hsla(t.muted_foreground))
+                .child(description)
+        });
+        let error = self.error.map(|error| {
+            div()
+                .flex()
+                .items_start()
+                .gap(px(6.0))
+                .text_size(px(12.0))
+                .line_height(px(16.0))
+                .text_color(hsla(t.foreground))
+                .child(icon(IconName::XCircleFill, 14.0, hsla(t.destructive)))
+                .child(div().min_w(px(0.0)).child(error))
+        });
+
+        match self.orientation {
+            // shadcn: label → control → description → error
             FieldOrientation::Vertical => div()
                 .id(self.id)
                 .role(gpui::Role::Group)
                 .flex()
                 .w_full()
                 .flex_col()
-                .gap(px(8.0))
-                .child(content)
-                .children(self.children),
-            FieldOrientation::Horizontal => div()
-                .id(self.id)
-                .role(gpui::Role::Group)
-                .flex()
-                .w_full()
-                .flex_row()
-                .items_center()
                 .gap(px(12.0))
-                .child(content)
-                .children(self.children),
-        };
-        body
+                .children(label_row)
+                .children(self.children)
+                .children(description)
+                .children(error),
+            FieldOrientation::Horizontal => {
+                let side = div()
+                    .flex()
+                    .min_w(px(0.0))
+                    .flex_1()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .children(label_row)
+                    .children(description)
+                    .children(error);
+                div()
+                    .id(self.id)
+                    .role(gpui::Role::Group)
+                    .flex()
+                    .w_full()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(12.0))
+                    .child(side)
+                    .children(self.children)
+            }
+        }
     }
 }
 

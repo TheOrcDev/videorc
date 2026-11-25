@@ -120,6 +120,7 @@ impl SidekickScreen {
         let avatar = if persona.is_some() {
             div()
                 .size(px(PREVIEW_PX))
+                .flex_none()
                 .overflow_hidden()
                 .rounded(px(radius::ROW))
                 .child(preview)
@@ -133,9 +134,11 @@ impl SidekickScreen {
                 .into_any_element()
         };
 
+        // The trail column's last section: no hairline under it.
         PanelSection::new("sidekick-community-preview")
             .title(TITLE)
             .description(DESCRIPTION)
+            .last(true)
             .child(
                 div()
                     .flex()

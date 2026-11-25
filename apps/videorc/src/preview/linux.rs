@@ -306,6 +306,9 @@ impl Preview {
         let visible = !self.closed && (self.mode == WindowMode::Floating || docked_visible);
         if let Some(native) = self.native.as_mut() {
             native.element.set_visible(visible);
+            // A closed Preview presents nothing and the backend renders no
+            // preview frames (Electron destroys its host on close).
+            native.element.park(self.closed);
         }
     }
 

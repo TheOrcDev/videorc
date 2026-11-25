@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui::{
-    App, ClipboardItem, Context, Entity, Focusable, Keystroke, PathPromptOptions, SharedString,
-    Subscription, WeakEntity, Window, div, prelude::*, px,
+    AnyElement, App, ClipboardItem, Context, Entity, Focusable, FontWeight, Keystroke,
+    PathPromptOptions, SharedString, Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use serde_json::{Value, json};
 use videorc_app_core::account::entitlements::{
@@ -26,6 +26,7 @@ use videorc_app_core::studio::clips as clips_copy;
 use videorc_app_core::studio::cloud_clips::{
     self as cloud_clips, CloudClipJob, CloudClipsStatus, JobAction, Orientation,
 };
+use videorc_app_core::studio::health_page::format_bitrate;
 use videorc_app_core::studio::inspector::format_video_quality;
 use videorc_app_core::studio::output_quality::{self as quality, Compatibility};
 use videorc_app_core::studio::performance_check::{self as perf, LineTone, PerformanceLine};
@@ -37,16 +38,19 @@ use videorc_app_core::{BackendClient, Studio, StudioSnapshot};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonVariant};
-use videorc_kit::list_row::{GroupedList, ListRow};
+use videorc_kit::field::{Field, FieldGroup};
+use videorc_kit::icon::{IconName, icon};
+use videorc_kit::list_row::GroupedList;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::scroll_area::ScrollArea;
-use videorc_kit::select::Select;
+use videorc_kit::segmented_control::{Segment, SegmentedControl};
+use videorc_kit::select::{Select, SelectOption};
+use videorc_kit::settings_row::SettingsRow;
 use videorc_kit::status_dot::{StatusDot, StatusTone};
 use videorc_kit::switch::Switch;
-use videorc_kit::tabs::Tabs;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
 use videorc_kit::toggle_group::{ToggleGroup, ToggleItem};
-use videorc_kit::tokens::{size, text};
+use videorc_kit::tokens::{Theme, text};
 
 use gpui_base::input::InputEvent;
 use videorc_kit::input::{Input, InputState};
@@ -98,13 +102,14 @@ fn parse_encoder_preference(value: &str) -> Option<WindowsH264EncoderPreference>
     }
 }
 
+/// `recordingVideoPresetOptions` (`lib/capture.ts`), in its order.
 const RECORDING_PRESETS: &[&str] = &[
-    "tutorial-540p30",
-    "tutorial-720p30",
-    "tutorial-1080p30",
-    "tutorial-1440p30",
     "record-4k30",
     "record-4k60-experimental",
+    "tutorial-1440p30",
+    "tutorial-1080p30",
+    "tutorial-720p30",
+    "tutorial-540p30",
     "vertical-1080x1920",
 ];
 
@@ -129,13 +134,29 @@ fn preset_id(preset: &videorc_app_core::protocol::VideoPreset) -> String {
         .unwrap_or_else(|| "custom".into())
 }
 
+/// The preset's words as Electron's preset options say them:
+/// `formatVideoQuality(preset, { bitrate: true })` ("1080p · 30 fps ·
+/// 6 Mbps"), with the experimental and YouTube names theirs.
 fn preset_label(name: &str) -> String {
     match capture_config::video_preset(name) {
         Some(value) => {
             let width = value["width"].as_u64().unwrap_or(0) as u32;
             let height = value["height"].as_u64().unwrap_or(0) as u32;
             let fps = value["fps"].as_u64().unwrap_or(0) as u32;
-            format_video_quality(width, height, fps)
+            let mut words = format_video_quality(width, height, fps);
+            if let Some(rate) = value["bitrateKbps"]
+                .as_f64()
+                .and_then(|kbps| format_bitrate(Some(kbps)))
+            {
+                words = format!("{words} · {rate}");
+            }
+            if name.ends_with("-experimental") {
+                format!("{words} · experimental")
+            } else if name.starts_with("stream-youtube-") {
+                format!("YouTube · {words}")
+            } else {
+                words
+            }
         }
         None => name.to_string(),
     }
@@ -1251,8 +1272,6 @@ impl OutputPanel {
             .flex_wrap()
             .items_center()
             .gap(px(8.))
-            .px(px(12.))
-            .pb(px(8.))
             .type_scale(text::META)
             .text_color(hsla(match line.tone {
                 LineTone::Warning => t.foreground,
@@ -1262,7 +1281,8 @@ impl OutputPanel {
             row = row
                 .child(videorc_kit::spinner::Spinner::new("output-performance-spinner").size(14.));
         } else if line.tone == LineTone::Warning {
-            row = row.child(StatusDot::new("output-performance-warning").tone(StatusTone::Warn));
+            // The tone rides on the icon; the words stay monochrome.
+            row = row.child(icon(IconName::WarningFill, 14., hsla(t.warning)));
         }
         row = row.child(line.text.clone());
         if let Some((preset, label)) = line.apply.clone() {
@@ -1292,16 +1312,9 @@ impl OutputPanel {
             }
             row = row.child(button);
         }
-        let mut column = div().flex().flex_col().child(row);
+        let mut column = div().flex().flex_col().gap(px(8.)).child(row);
         if let Some(error) = &self.check_error {
-            column = column.child(
-                div()
-                    .px(px(12.))
-                    .pb(px(8.))
-                    .type_scale(text::META)
-                    .text_color(hsla(t.destructive))
-                    .child(error.clone()),
-            );
+            column = column.child(field_error(error.clone(), t));
         }
         Some(column.into_any_element())
     }
@@ -1328,22 +1341,17 @@ impl OutputPanel {
                         .on_click(move |_, _, cx| cx.open_url(url)),
                 );
             }
-            alerts.push(div().px(px(12.)).pb(px(8.)).child(alert).into_any_element());
+            alerts.push(alert.into_any_element());
         }
         if let Some((message, blocking)) = model.compatibility.message() {
             alerts.push(
-                div()
-                    .px(px(12.))
-                    .pb(px(8.))
-                    .child(
-                        Alert::new("output-compatibility")
-                            .variant(if blocking {
-                                AlertVariant::Destructive
-                            } else {
-                                AlertVariant::Warning
-                            })
-                            .title(message.to_string()),
-                    )
+                Alert::new("output-compatibility")
+                    .variant(if blocking {
+                        AlertVariant::Destructive
+                    } else {
+                        AlertVariant::Warning
+                    })
+                    .title(message.to_string())
                     .into_any_element(),
             );
         }
@@ -1352,18 +1360,9 @@ impl OutputPanel {
 
     /// P659: Width, Height, FPS and Bitrate kbps. Enter or leaving commits,
     /// Escape puts the setting back, a refused size says the rule.
-    fn field_grid(
-        &self,
-        model: &OutputModel,
-        t: &videorc_kit::tokens::Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let mut grid = div()
-            .grid()
-            .grid_cols(2)
-            .gap(px(12.))
-            .px(px(12.))
-            .py(px(8.));
+    fn field_grid(&self, model: &OutputModel, cx: &mut Context<Self>) -> gpui::AnyElement {
+        // `grid grid-cols-2 gap-4`, each value a vertical Field.
+        let mut grid = div().grid().grid_cols(2).gap(px(16.));
         let refusal = self
             .field_refusal
             .filter(|(.., canvas)| *canvas == (model.width, model.height));
@@ -1374,9 +1373,6 @@ impl OutputPanel {
             let refused = refusal.filter(|(refused, ..)| *refused == field);
             grid = grid.child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
                     .on_key_down(cx.listener(
                         move |this, event: &gpui::KeyDownEvent, window, cx| {
                             if event.keystroke.key == "escape" {
@@ -1385,26 +1381,24 @@ impl OutputPanel {
                         },
                     ))
                     .child(
-                        div()
-                            .type_scale(text::LABEL)
-                            .text_color(hsla(t.foreground))
-                            .child(label),
-                    )
-                    .child(
-                        Input::new(
-                            SharedString::from(format!("output-field-{}", field.key())),
-                            &state,
+                        Field::new(SharedString::from(format!(
+                            "output-field-{}-field",
+                            field.key()
+                        )))
+                        .label(label)
+                        .child(
+                            Input::new(
+                                SharedString::from(format!("output-field-{}", field.key())),
+                                &state,
+                            )
+                            .accessibility_label(label)
+                            .disabled(model.quality_locked)
+                            .invalid(refused.is_some()),
                         )
-                        .accessibility_label(label)
-                        .disabled(model.quality_locked)
-                        .invalid(refused.is_some()),
-                    )
-                    .children(refused.map(|(_, rule, _)| {
-                        div()
-                            .type_scale(text::META)
-                            .text_color(hsla(t.destructive))
-                            .child(rule)
-                    })),
+                        // `FieldError` under the input, the label staying
+                        // foreground, as `OutputNumberInput` puts it.
+                        .when_some(refused, |row, (_, rule, _)| row.error(rule)),
+                    ),
             );
         }
         grid.into_any_element()
@@ -1421,39 +1415,39 @@ impl OutputPanel {
         let entity = cx.entity();
         let mut rows = GroupedList::new()
             .item(
-                self.settings_row(
-                    "output-clips-switch",
-                    clips_copy::copy::KEEP_LAST_SECONDS,
-                    model.clips_description.clone(),
-                    Switch::new("output-clips-enabled")
-                        .accessibility_label(clips_copy::copy::KEEP_LAST_SECONDS)
-                        .checked(model.clips_on)
-                        .on_change(move |value, _, cx| {
-                            entity.update(cx, |this, cx| this.set_clips_enabled(value, cx))
-                        }),
-                    t,
-                ),
+                SettingsRow::new("output-clips-switch", clips_copy::copy::KEEP_LAST_SECONDS)
+                    .description(model.clips_description.clone())
+                    .child(
+                        Switch::new("output-clips-enabled")
+                            .accessibility_label(clips_copy::copy::KEEP_LAST_SECONDS)
+                            .checked(model.clips_on)
+                            .on_change(move |value, _, cx| {
+                                entity.update(cx, |this, cx| this.set_clips_enabled(value, cx))
+                            }),
+                    ),
             )
             .item(
-                self.settings_row(
-                    "output-clips-disk",
-                    clips_copy::copy::DISK_USE,
-                    model.disk_detail.clone(),
-                    div()
-                        .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
-                        .child(model.disk_estimate.clone()),
-                    t,
-                ),
+                SettingsRow::new("output-clips-disk", clips_copy::copy::DISK_USE)
+                    .description(model.disk_detail.clone())
+                    // `text-sm tabular-nums text-muted-foreground`.
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(14.))
+                            .line_height(px(20.))
+                            .text_color(hsla(t.muted_foreground))
+                            .child(model.disk_estimate.clone()),
+                    ),
             );
-        for row in self.clip_key_rows(t, cx) {
+        for row in self.clip_key_rows(cx) {
             rows = rows.item(row);
         }
         rows = rows.item(
-            ListRow::new("output-clips-folder", clips_copy::copy::WHERE_CLIPS_GO)
-                .meta(clips_copy::copy::WHERE_CLIPS_GO_DESCRIPTION),
+            SettingsRow::new("output-clips-folder", clips_copy::copy::WHERE_CLIPS_GO)
+                .description(clips_copy::copy::WHERE_CLIPS_GO_DESCRIPTION),
         );
         PanelSection::new("output-clips")
+            .icon(icon(IconName::Scissors, 16., hsla(t.muted_foreground)))
             .title(clips_copy::copy::CLIPS)
             .description(clips_copy::copy::SECTION_DESCRIPTION)
             .child(rows)
@@ -1461,11 +1455,7 @@ impl OutputPanel {
 
     /// The two clip keys as Settings → Shortcuts records them: press the
     /// button, then the keys; Escape cancels, Backspace clears.
-    fn clip_key_rows(
-        &self,
-        t: &videorc_kit::tokens::Theme,
-        cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
+    fn clip_key_rows(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let platform = Some(hotkeys::node_platform());
         let registration = self.hotkeys.registration();
         let config = self.shortcut_config();
@@ -1507,33 +1497,27 @@ impl OutputPanel {
                     .map(|(_, message)| message.clone())
                     .or(row.conflict.clone());
                 let action = row.action.clone();
-                div()
-                    .child(
-                        ListRow::new(
-                            SharedString::from(format!("output-key-{action}")),
-                            row.label,
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!("output-record-{action}")))
-                                .accessibility_label(name)
-                                .label(label)
-                                .variant(ButtonVariant::Outline)
-                                .disabled(!hotkeys::supported(&action))
-                                .tooltip("Click to change")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.arm_recorder(action.clone(), cx)
-                                })),
+                // `ShortcutRecorderField`: a SettingsRow, its refusal as the
+                // row's error.
+                SettingsRow::new(
+                    SharedString::from(format!("output-key-{action}")),
+                    row.label,
+                )
+                .when_some(message, |field, message| field.error(message))
+                .child(
+                    Button::new(SharedString::from(format!("output-record-{action}")))
+                        .accessibility_label(name)
+                        .label(label)
+                        .variant(ButtonVariant::Outline)
+                        .disabled(!hotkeys::supported(&action))
+                        .tooltip("Click to change")
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.arm_recorder(action.clone(), cx)
+                            }),
                         ),
-                    )
-                    .children(message.map(|message| {
-                        div()
-                            .px(px(12.))
-                            .pb(px(8.))
-                            .type_scale(text::META)
-                            .text_color(hsla(t.destructive))
-                            .child(message)
-                    }))
-                    .into_any_element()
+                )
+                .into_any_element()
             })
             .collect()
     }
@@ -1549,11 +1533,13 @@ impl OutputPanel {
         let state = &self.cloud;
         let status = state.status.as_ref();
         let connected = self.model.connected;
-        let muted = |words: &str| {
+        // `text-sm` (14 / 20) body copy; the costs line is `text-xs`.
+        let body_text = |words: String, color: videorc_kit::tokens::Color| {
             div()
-                .type_scale(text::META)
-                .text_color(hsla(t.muted_foreground))
-                .child(words.to_string())
+                .text_size(px(14.))
+                .line_height(px(20.))
+                .text_color(hsla(color))
+                .child(words)
         };
         let entity = cx.entity();
         let orientation = ToggleGroup::new("output-cloud-clips-orientation")
@@ -1595,22 +1581,28 @@ impl OutputPanel {
                     .on_click(cx.listener(|this, _, _, cx| this.disable_cloud_clips(cx))),
             );
         }
-        let mut body = div()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .child(
-                div()
-                    .type_scale(text::LABEL)
-                    .text_color(hsla(t.muted_foreground))
-                    .child(cloud_clips::status_line(status).to_string()),
+        // The section's own children, 12 px apart (`PanelSection`'s content).
+        let mut body: Vec<AnyElement> = vec![
+            body_text(
+                cloud_clips::status_line(status).to_string(),
+                t.muted_foreground,
             )
-            .child(muted(copy::COSTS))
-            .child(orientation)
-            .child(buttons)
-            .child(muted(copy::HOW_TO_SAVE));
+            .into_any_element(),
+            div()
+                .type_scale(text::META)
+                .text_color(hsla(t.muted_foreground))
+                .child(copy::COSTS)
+                .into_any_element(),
+            orientation.into_any_element(),
+            buttons.into_any_element(),
+            body_text(copy::HOW_TO_SAVE.to_string(), t.muted_foreground).into_any_element(),
+        ];
         if let Some(error) = &state.error {
-            body = body.child(Alert::new("output-cloud-clips-error").title(error.clone()));
+            body.push(
+                Alert::new("output-cloud-clips-error")
+                    .title(error.clone())
+                    .into_any_element(),
+            );
         }
         let show_id = state.show_id.clone().unwrap_or_default();
         let has_generation = status
@@ -1635,43 +1627,38 @@ impl OutputPanel {
                     })),
                 );
             }
-            body = body.child(
+            body.push(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .type_scale(text::LABEL)
-                            .text_color(hsla(t.foreground))
-                            .child(row.text),
-                    )
-                    .child(actions),
+                    .gap(px(8.))
+                    .child(body_text(row.text, t.foreground))
+                    .child(actions)
+                    .into_any_element(),
             );
         }
         PanelSection::new("output-cloud-clips")
             .title(copy::TITLE)
             .description(copy::DESCRIPTION)
-            .child(body)
+            .children(body)
     }
+}
 
-    fn settings_row(
-        &self,
-        id: &'static str,
-        title: impl Into<SharedString>,
-        description: impl Into<SharedString>,
-        control: impl IntoElement,
-        t: &videorc_kit::tokens::Theme,
-    ) -> impl IntoElement {
-        div().child(ListRow::new(id, title).child(control)).child(
-            div()
-                .px(px(12.))
-                .pb(px(8.))
-                .type_scale(text::META)
-                .text_color(hsla(t.muted_foreground))
-                .child(description.into()),
-        )
-    }
+/// `FieldError`: monochrome 12 px words with the destructive error glyph.
+fn field_error(error: impl Into<SharedString>, t: &Theme) -> gpui::Div {
+    let error: SharedString = error.into();
+    div()
+        .flex()
+        .items_start()
+        .gap(px(6.))
+        .type_scale(text::META)
+        .text_color(hsla(t.foreground))
+        .child(div().flex_none().mt(px(1.)).child(icon(
+            IconName::XCircleFill,
+            14.,
+            hsla(t.destructive),
+        )))
+        .child(div().min_w(px(0.)).child(error))
 }
 
 impl Render for OutputPanel {
@@ -1687,10 +1674,11 @@ impl Render for OutputPanel {
         };
         let selected_resolution = resolutions
             .iter()
-            .position(|&(w, h, _)| same_size(w, h, model.width, model.height))
-            .unwrap_or(resolutions.len());
+            .find(|&&(w, h, _)| same_size(w, h, model.width, model.height))
+            .map(|&(_, _, label)| label);
 
         let mut local = PanelSection::new("output-local")
+            .icon(icon(IconName::FileVideo, 16., hsla(t.muted_foreground)))
             .title("Local recording")
             .description(LOCAL_DESCRIPTION);
         if model.session_locked {
@@ -1707,29 +1695,29 @@ impl Render for OutputPanel {
         };
         let entity = cx.entity();
         let mut local_rows = GroupedList::new().item(
-            self.settings_row(
-                "output-save-recording",
-                "Save a local recording",
-                save_desc,
-                Switch::new("output-save")
-                    .accessibility_label("Save a local recording")
-                    .checked(model.record_enabled)
-                    .disabled(model.session_locked)
-                    .on_change({
-                        let entity = entity.clone();
-                        move |value, _, cx| {
-                            entity.update(cx, |this, cx| this.set_record_enabled(value, cx))
-                        }
-                    }),
-                t,
-            ),
+            SettingsRow::new("output-save-recording", "Save a local recording")
+                .description(save_desc)
+                .child(
+                    Switch::new("output-save")
+                        .accessibility_label("Save a local recording")
+                        .checked(model.record_enabled)
+                        .disabled(model.session_locked)
+                        .on_change({
+                            let entity = entity.clone();
+                            move |value, _, cx| {
+                                entity.update(cx, |this, cx| this.set_record_enabled(value, cx))
+                            }
+                        }),
+                ),
         );
         if model.separate_supported {
             local_rows = local_rows.item(
-                self.settings_row(
+                SettingsRow::new(
                     "output-separate-source-recordings",
                     "Separate source recordings",
-                    SEPARATE_DESCRIPTION,
+                )
+                .description(SEPARATE_DESCRIPTION)
+                .child(
                     Switch::new("output-separate")
                         .accessibility_label("Separate source recordings")
                         .checked(model.separate_enabled)
@@ -1740,31 +1728,40 @@ impl Render for OutputPanel {
                                 entity.update(cx, |this, cx| this.set_separate_enabled(value, cx))
                             }
                         }),
-                    t,
                 ),
             );
         }
+        local = local.child(local_rows);
+
+        // The quality: a plain FieldGroup under the grouped rows, as
+        // `LocalRecordingSection` lays it out (preset, Resolution, the four
+        // values, the Windows encoder).
         let mut preset = Select::new("video-preset")
+            .accessibility_label("Recording preset")
             .placeholder("Recording preset")
             .disabled(model.quality_locked)
-            .width(280.0)
             .value(Some(SharedString::from(model.preset.clone())));
         for (value, label) in &model.preset_options {
             preset = preset.option(value.clone(), label.clone());
+        }
+        // `SelectSeparator` before Custom when there are presets.
+        if !model.preset_options.is_empty() {
+            preset = preset.option_item(SelectOption::separator());
         }
         preset = preset.option("custom", "Custom");
         let entity = cx.entity();
         preset = preset.on_change(move |value, _, cx| {
             entity.update(cx, |this, cx| this.set_preset(value, cx));
         });
-        local_rows = local_rows.item(
-            div()
-                .child(ListRow::new("output-preset", "Recording preset").child(preset))
+        let mut quality_fields = FieldGroup::new().child(
+            Field::new("output-preset")
+                .label("Recording preset")
+                .child(preset)
+                // `FieldDescription` after the trigger.
                 .child(
                     div()
-                        .px(px(12.))
-                        .pb(px(8.))
                         .type_scale(text::META)
+                        .line_height(px(18.))
                         .text_color(hsla(t.muted_foreground))
                         .child("Editing a value below switches the preset to Custom."),
                 )
@@ -1772,37 +1769,28 @@ impl Render for OutputPanel {
                 .children(self.quality_alerts(&model, cx)),
         );
         let entity = cx.entity();
-        let mut resolution = Tabs::new("output-resolution").selected(selected_resolution);
+        let mut resolution = SegmentedControl::new("output-resolution")
+            .accessibility_label("Resolution")
+            .disabled(model.quality_locked)
+            .value(selected_resolution);
         for &(_, _, label) in resolutions {
-            resolution = if model.quality_locked {
-                resolution.disabled_tab(label)
-            } else {
-                resolution.tab(label)
-            };
+            resolution = resolution.option(Segment::new(label, label));
         }
-        let resolution_sizes: Vec<(u32, u32)> =
-            resolutions.iter().map(|&(w, h, _)| (w, h)).collect();
-        resolution = resolution.on_select(move |index, _, cx| {
-            if let Some(&(width, height)) = resolution_sizes.get(index) {
+        resolution = resolution.on_change(move |value, _, cx| {
+            if let Some(&(width, height, _)) = resolutions
+                .iter()
+                .find(|&&(_, _, label)| label == value.as_str())
+            {
                 entity.update(cx, |this, cx| this.set_resolution(width, height, cx));
             }
         });
-        local_rows = local_rows.item(
-            div()
-                .child(ListRow::new("output-resolution-row", "Resolution").child(resolution))
-                .child(
-                    div()
-                        .px(px(12.))
-                        .pb(px(8.))
-                        .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
-                        .child(format!(
-                            "{} × {} · {} fps · {} kbps",
-                            model.width, model.height, model.fps, model.bitrate_kbps
-                        )),
-                ),
-        );
-        local_rows = local_rows.item(self.field_grid(&model, t, cx));
+        quality_fields = quality_fields
+            .child(
+                Field::new("output-resolution-row")
+                    .label("Resolution")
+                    .child(resolution),
+            )
+            .child(self.field_grid(&model, cx));
         if let Some(encoder) = self
             .encoder
             .as_ref()
@@ -1813,7 +1801,8 @@ impl Render for OutputPanel {
             let mut select = Select::new("encoder-preference")
                 .accessibility_label(ENCODER_LABEL)
                 .disabled(env_override || !model.connected)
-                .width(180.0)
+                // `w-44`.
+                .width(176.0)
                 .value(Some(encoder_preference_value(encoder.preference)));
             for &(preference, label) in &[
                 (WindowsH264EncoderPreference::Auto, "Automatic"),
@@ -1827,33 +1816,53 @@ impl Render for OutputPanel {
                     entity.update(cx, |this, cx| this.set_encoder_preference(preference, cx));
                 }
             });
-            local_rows = local_rows.item(
+            // `EncoderPreferenceField`: the label with its Beta badge and the
+            // line under it on the left, the select on the right.
+            quality_fields = quality_fields.child(
                 div()
-                    .child(
-                        ListRow::new("output-encoder-preference", ENCODER_LABEL).child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .child(Badge::new("Beta").variant(BadgeVariant::Outline))
-                                .child(select),
-                        ),
-                    )
+                    .id("output-encoder-preference")
+                    .role(gpui::Role::Group)
+                    .aria_label(ENCODER_LABEL)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
                     .child(
                         div()
-                            .px(px(12.))
-                            .pb(px(8.))
-                            .type_scale(text::META)
-                            .text_color(hsla(t.muted_foreground))
-                            .child(if env_override {
-                                ENCODER_ENV_DESCRIPTION
-                            } else {
-                                ENCODER_DESCRIPTION
-                            }),
-                    ),
+                            .flex()
+                            .min_w(px(0.))
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(
+                                        div()
+                                            .text_size(px(14.))
+                                            .line_height(px(20.))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(hsla(t.foreground))
+                                            .child(ENCODER_LABEL),
+                                    )
+                                    .child(Badge::new("Beta").variant(BadgeVariant::Outline)),
+                            )
+                            .child(
+                                div()
+                                    .type_scale(text::META)
+                                    .text_color(hsla(t.muted_foreground))
+                                    .child(if env_override {
+                                        ENCODER_ENV_DESCRIPTION
+                                    } else {
+                                        ENCODER_DESCRIPTION
+                                    }),
+                            ),
+                    )
+                    .child(div().flex_none().child(select)),
             );
         }
-        local = local.child(local_rows);
+        local = local.child(quality_fields);
 
         let clips = if self.cloud.show_id.is_some() {
             self.cloud_clips_section(t, cx).into_any_element()
@@ -1864,7 +1873,7 @@ impl Render for OutputPanel {
         let mut camera_section = None;
         if !model.camera.hidden {
             let entity = cx.entity();
-            let mut trailing = div().flex().items_center().gap(px(8.));
+            let mut trailing = div().flex().flex_none().items_center().gap(px(8.));
             // Windows' Set up waits for its platform pass (see `run_camera_action`).
             if let Some(action) = model.camera.action.filter(|a| *a != CameraAction::SetUp) {
                 let label = if self.camera_action == Some(action) {
@@ -1893,29 +1902,64 @@ impl Render for OutputPanel {
                         entity.update(cx, |this, cx| this.set_camera_on(value, cx))
                     }),
             );
-            let mut description = div().flex().flex_col().gap(px(4.)).child(
-                div()
-                    .type_scale(text::META)
-                    .text_color(hsla(t.muted_foreground))
-                    .child(CAMERA_DESCRIPTION),
-            );
+            let mut description = div().flex().flex_col().child(CAMERA_DESCRIPTION);
             if let Some(line) = &model.camera.line {
-                let tone = match line.tone {
-                    _ if line.busy => StatusTone::Neutral,
-                    CameraTone::Neutral => StatusTone::Neutral,
-                    CameraTone::Good => StatusTone::Good,
-                    CameraTone::Warn => StatusTone::Warn,
+                // `StatusLine`: the tone rides on the icon; the words stay
+                // monochrome (foreground when it warns, else secondary).
+                let mark = if line.busy {
+                    Some(
+                        div()
+                            .flex_none()
+                            .mt(px(2.))
+                            .child(
+                                videorc_kit::spinner::Spinner::new("output-videorc-camera-spinner")
+                                    .size(14.),
+                            )
+                            .into_any_element(),
+                    )
+                } else {
+                    match line.tone {
+                        CameraTone::Warn => Some(
+                            div()
+                                .flex_none()
+                                .mt(px(2.))
+                                .child(icon(IconName::WarningFill, 14., hsla(t.warning)))
+                                .into_any_element(),
+                        ),
+                        CameraTone::Good => Some(
+                            div()
+                                .flex_none()
+                                .mt(px(6.))
+                                .child(
+                                    StatusDot::new("output-videorc-camera-dot")
+                                        .tone(StatusTone::Good),
+                                )
+                                .into_any_element(),
+                        ),
+                        CameraTone::Neutral => None,
+                    }
                 };
                 description = description.child(
-                    StatusDot::new("output-videorc-camera-status")
-                        .tone(tone)
-                        .label(line.text.clone()),
+                    div()
+                        .id("output-videorc-camera-status")
+                        .mt(px(4.))
+                        .flex()
+                        .items_start()
+                        .gap(px(6.))
+                        .text_color(hsla(if line.tone == CameraTone::Warn {
+                            t.foreground
+                        } else {
+                            t.muted_foreground
+                        }))
+                        .children(mark)
+                        .child(line.text.clone()),
                 );
             }
             if let Some(command) = model.camera.command.clone() {
                 let copy_command = command.clone();
                 description = description.child(
                     div()
+                        .mt(px(6.))
                         .flex()
                         .min_w(px(0.))
                         .items_center()
@@ -1934,53 +1978,59 @@ impl Render for OutputPanel {
                                 .text_color(hsla(t.foreground))
                                 .child(command),
                         )
-                        .child(
+                        .child({
+                            let copy_label = if self.command_copied {
+                                "Copied"
+                            } else {
+                                "Copy"
+                            };
+                            // `<CopyIcon data-icon="inline-start" />`, 12 px
+                            // in an xs button.
                             Button::new("output-videorc-camera-copy")
-                                .label(if self.command_copied {
-                                    "Copied"
-                                } else {
-                                    "Copy"
-                                })
+                                .accessibility_label(copy_label)
                                 .variant(ButtonVariant::Ghost)
                                 .size(videorc_kit::button::ButtonSize::Xs)
+                                .icon(IconName::Copy)
+                                .label(copy_label)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.copy_camera_command(copy_command.clone(), cx)
-                                })),
-                        ),
-                );
-            }
-            if let Some(error) = &self.camera_error {
-                description = description.child(
-                    div()
-                        .type_scale(text::META)
-                        .text_color(hsla(t.destructive))
-                        .child(error.clone()),
+                                }))
+                        }),
                 );
             }
             camera_section = Some(
                 PanelSection::new("output-videorc-camera")
+                    .icon(icon(IconName::VideoCamera, 16., hsla(t.muted_foreground)))
                     .title(CAMERA_SECTION_TITLE)
                     .description(CAMERA_SECTION_DESCRIPTION)
                     .child(
                         GroupedList::new().item(
-                            div()
-                                .child(
-                                    ListRow::new("output-videorc-camera-row", VIDEORC_CAMERA)
-                                        .child(trailing),
-                                )
-                                .child(div().px(px(12.)).pb(px(8.)).child(description)),
+                            SettingsRow::new("output-videorc-camera-row", VIDEORC_CAMERA)
+                                .description(description)
+                                .when_some(self.camera_error.clone(), |row, error| row.error(error))
+                                .child(trailing),
                         ),
                     ),
             );
         }
 
         let entity = cx.entity();
-        let mut folder_actions = div().flex().flex_wrap().justify_end().gap(px(8.)).child(
-            Button::new("recordings-choose")
-                .label(folder_copy::CHOOSE)
-                .variant(ButtonVariant::Outline)
-                .on_click(cx.listener(|this, _, _, cx| this.choose_folder(cx))),
-        );
+        // `flex shrink-0 flex-wrap justify-end gap-2`; Choose… leads with
+        // its folder icon.
+        let mut folder_actions = div()
+            .flex()
+            .flex_none()
+            .flex_wrap()
+            .justify_end()
+            .gap(px(8.))
+            .child(
+                Button::new("recordings-choose")
+                    .accessibility_label(folder_copy::CHOOSE)
+                    .variant(ButtonVariant::Outline)
+                    .icon(IconName::FolderOpen)
+                    .label(folder_copy::CHOOSE)
+                    .on_click(cx.listener(|this, _, _, cx| this.choose_folder(cx))),
+            );
         if model.folder.can_reveal {
             folder_actions = folder_actions.child(
                 Button::new("recordings-reveal")
@@ -1997,28 +2047,19 @@ impl Render for OutputPanel {
                     .on_click(cx.listener(|this, _, _, cx| this.use_default_folder(cx))),
             );
         }
-        let mut folder_detail = div().flex().flex_col().gap(px(2.)).child(
-            div()
-                .type_scale(text::META)
-                .text_color(hsla(t.foreground))
-                .child(model.folder.path.clone()),
-        );
-        if let Some(detail) = &model.folder.detail {
-            folder_detail = folder_detail.child(
+        // The path and its free space are the row's description; a problem
+        // is its error.
+        let folder_detail = div()
+            .flex()
+            .flex_col()
+            .min_w(px(0.))
+            .child(
                 div()
-                    .type_scale(text::META)
-                    .text_color(hsla(t.muted_foreground))
-                    .child(detail.clone()),
-            );
-        }
-        if let Some(problem) = model.folder.problem {
-            folder_detail = folder_detail.child(
-                div()
-                    .type_scale(text::META)
-                    .text_color(hsla(t.destructive))
-                    .child(problem),
-            );
-        }
+                    .min_w(px(0.))
+                    .truncate()
+                    .child(model.folder.path.clone()),
+            )
+            .children(model.folder.detail.clone());
         let folder = PanelSection::new("output-recordings")
             .title("Where recordings go")
             .description(FOLDER_SECTION_DESCRIPTION)
@@ -2026,26 +2067,24 @@ impl Render for OutputPanel {
             .child(
                 GroupedList::new()
                     .item(
-                        div()
-                            .child(
-                                ListRow::new("recordings-folder", folder_copy::RECORDINGS_FOLDER)
-                                    .child(folder_actions),
-                            )
-                            .child(div().px(px(12.)).pb(px(8.)).child(folder_detail)),
+                        SettingsRow::new("recordings-folder", folder_copy::RECORDINGS_FOLDER)
+                            .description(folder_detail)
+                            .when_some(model.folder.problem, |row, problem| row.error(problem))
+                            .child(folder_actions),
                     )
                     .item(
-                        self.settings_row(
-                            "keep-original",
-                            "Keep original recording",
-                            KEEP_ORIGINAL_DESCRIPTION,
-                            Switch::new("keep-original-recording")
-                                .accessibility_label("Keep original recording")
-                                .checked(model.keep_original)
-                                .on_change(move |value, _, cx| {
-                                    entity.update(cx, |this, cx| this.set_keep_original(value, cx))
-                                }),
-                            t,
-                        ),
+                        SettingsRow::new("keep-original", "Keep original recording")
+                            .description(KEEP_ORIGINAL_DESCRIPTION)
+                            .child(
+                                Switch::new("keep-original-recording")
+                                    .accessibility_label("Keep original recording")
+                                    .checked(model.keep_original)
+                                    .on_change(move |value, _, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.set_keep_original(value, cx)
+                                        })
+                                    }),
+                            ),
                     ),
             );
 
@@ -2060,13 +2099,12 @@ impl Render for OutputPanel {
             .text_color(hsla(t.foreground))
             .type_scale(text::META)
             .child(
+                // `RecordingTab`: flush sections, each with its own 16 px
+                // padding and the hairline under it.
                 ScrollArea::new("output-scroll").child(
                     div()
                         .flex()
                         .flex_col()
-                        .px(px(size::GUTTER))
-                        .py(px(8.))
-                        .gap(px(8.))
                         .child(local)
                         .child(clips)
                         .children(camera_section)

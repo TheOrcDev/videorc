@@ -11,11 +11,11 @@ use gpui::{
 };
 use serde_json::Value;
 use videorc_app_core::client::methods::ScenePicturesGet;
-use videorc_app_core::desktop::accelerator::{
-    accelerator_display_keys, accelerator_label, global_shortcut_conflict_reason,
-};
+use videorc_app_core::desktop::accelerator::{accelerator_label, global_shortcut_conflict_reason};
 use videorc_app_core::nav::PageId;
-use videorc_app_core::scenes::list::{duplicated_scene, scene_with_audio, scene_with_follow};
+use videorc_app_core::scenes::list::{
+    SceneGlyph, duplicated_scene, scene_with_audio, scene_with_follow,
+};
 use videorc_app_core::scenes::model::scene_audio;
 use videorc_app_core::scenes::pictures::{
     PictureInputs, PicturesAnswer, picture_key, pictures_answer, pictures_eligible,
@@ -30,7 +30,7 @@ use videorc_app_core::studio::transport::transport_active;
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::icon::{IconName, icon};
-use videorc_kit::kbd::{Kbd, kbd_group};
+use videorc_kit::kbd::Kbd;
 use videorc_kit::kebab_menu::{KEBAB_HOST, KebabMenu, KebabMenuItem, KebabReveal};
 use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::panel_section::PanelSection;
@@ -132,7 +132,9 @@ impl ScenePage {
             );
         }
 
-        let mut rows = GroupedList::new().label(copy::SCENES_TITLE);
+        // No visible label: Electron names the group for assistive tech
+        // only (`aria-label`), under the section's own "Scenes" title.
+        let mut rows = GroupedList::new().accessibility_label(copy::SCENES_TITLE);
         for row in &list.rows {
             rows = rows.item(self.scene_row(row, list.read_only, window, cx));
         }
@@ -145,7 +147,8 @@ impl ScenePage {
                     .flex()
                     .flex_wrap()
                     .items_center()
-                    .gap(px(4.))
+                    .gap_x(px(8.))
+                    .gap_y(px(4.))
                     .type_scale(text::META)
                     .text_color(muted)
                     .child(reason)
@@ -176,8 +179,17 @@ impl ScenePage {
         let platform = self.model.platform;
         let id = row.id.clone();
 
+        // The picture leads the row, then the icon of what it shows
+        // (`leading` and `icon` in `SceneRow`), both at half strength while
+        // the scene can't be chosen.
         let mut line = ListRow::new(SharedString::from(format!("scene-{id}")), row.name.clone())
-            .icon(self.row_thumb(&row.thumb, row.disabled, &t))
+            .leading(self.row_thumb(&row.thumb, row.disabled, &t))
+            .icon(
+                div()
+                    .flex()
+                    .when(row.disabled, |glyph| glyph.opacity(0.5))
+                    .child(icon(glyph_icon(&row.glyph), 16., muted)),
+            )
             .selected(row.on_stream)
             .disabled(row.disabled)
             .grouped();
@@ -202,7 +214,9 @@ impl ScenePage {
         if row.follows == Some(true) {
             line = line.child(Badge::new(copy::FOLLOWS).variant(BadgeVariant::Outline));
         }
-        // P461: each key, or why the OS refused it (Settings' words).
+        // P461: each key, or why the OS refused it (Settings' words). A key
+        // is one keycap printed the platform's way (`acceleratorLabel`, as
+        // `ShortcutKeys` does), never a chip per modifier.
         let registered = self.hotkeys.registration().registered;
         for (index, (action, accelerator)) in row.keys.iter().enumerate() {
             let chip = div().id(SharedString::from(format!("scene-key-{id}-{index}")));
@@ -213,12 +227,21 @@ impl ScenePage {
             );
             line = line.child(match conflict {
                 Some(reason) => chip.type_scale(text::META).text_color(muted).child(reason),
-                None => chip.child(kbd_group(
-                    accelerator_display_keys(Some(accelerator.as_str()), platform)
-                        .into_iter()
-                        .map(Kbd::new),
-                )),
+                None => chip.child(Kbd::new(accelerator_label(
+                    Some(accelerator.as_str()),
+                    platform,
+                ))),
             });
+        }
+        // The check sits right after the keys, before ⋯ (Electron's order).
+        if row.on_stream {
+            line = line.child(
+                div()
+                    .id(SharedString::from(format!("scene-on-stream-{id}")))
+                    .flex()
+                    .tooltip(tooltip(copy::ON_STREAM))
+                    .child(icon(IconName::CheckBold, 16., ink)),
+            );
         }
         line = line.child(
             KebabMenu::new(
@@ -228,14 +251,6 @@ impl ScenePage {
             .label(copy::actions_for(&row.name))
             .reveal(KebabReveal::Hover),
         );
-        if row.on_stream {
-            line = line.status_icon(
-                div()
-                    .id(SharedString::from(format!("scene-on-stream-{id}")))
-                    .tooltip(tooltip(copy::ON_STREAM))
-                    .child(icon(IconName::Check, 16., ink)),
-            );
-        }
         if !row.disabled {
             let apply = id.clone();
             let needs_sources = row.meta == RowMeta::Text(copy::RESOLVE_SOURCES.to_string());
@@ -625,6 +640,17 @@ impl Render for RowDrag {
             .type_scale(text::META)
             .text_color(hsla(t.popover_foreground))
             .child(self.name.clone())
+    }
+}
+
+/// `SceneGlyphIcon` without the apps' own icons (Studio's `glyph_icon`):
+/// the GPUI app has no `getAppIcons` yet, so an app (and a window) shows
+/// the generic scene glyph, as `AppIconImage` does while main has none.
+fn glyph_icon(glyph: &SceneGlyph) -> IconName {
+    match glyph {
+        SceneGlyph::Display => IconName::Monitor,
+        SceneGlyph::Camera => IconName::VideoCamera,
+        SceneGlyph::App { .. } | SceneGlyph::Window => IconName::SquaresFour,
     }
 }
 

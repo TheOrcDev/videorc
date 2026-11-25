@@ -10,12 +10,15 @@
 //! [`Input::revert_on_escape`] snapshots the value on focus and restores it
 //! (then blurs) when Escape is pressed — Scene transform fields (P549).
 
-use gpui::{App, ElementId, Entity, Focusable, IntoElement, SharedString, Window, prelude::*, px};
+use gpui::{
+    App, ElementId, Entity, Focusable, IntoElement, SharedString, Window, div, prelude::*, px,
+};
 pub use gpui_base::input::InputState;
 use gpui_base::input::{Escape, InputEditorStyle};
 
 use crate::{
     chrome::box_shadow,
+    icon::{IconName, icon},
     theme::{Appearance, FONT, faded_over, hsla, resolve, with_alpha},
     tokens::{Color, Shadow, radius, size},
 };
@@ -30,6 +33,8 @@ pub struct Input {
     plain: bool,
     /// Escape restores the value from when the field gained focus (P549).
     revert_on_escape: bool,
+    /// Show Electron-style number steppers; `None` hides them.
+    step: Option<f64>,
     ground: Option<Color>,
     accessibility_label: Option<SharedString>,
     appearance: Option<Appearance>,
@@ -44,10 +49,17 @@ impl Input {
             invalid: false,
             plain: false,
             revert_on_escape: false,
+            step: None,
             ground: None,
             accessibility_label: None,
             appearance: None,
         }
+    }
+
+    /// Number steppers (Output Width/Height/FPS/Bitrate). Step defaults to 1.
+    pub fn stepper(mut self, step: f64) -> Self {
+        self.step = Some(step.max(0.000_001));
+        self
     }
 
     /// Escape restores the text from when the field gained focus, then blurs
@@ -208,6 +220,85 @@ impl RenderOnce for Input {
                 cx.stop_propagation();
             });
         }
-        frame.child(self.state.clone())
+        let editor = frame.child(self.state.clone());
+        let Some(step) = self.step.filter(|_| !self.plain) else {
+            return editor.into_any_element();
+        };
+        let state_up = self.state.clone();
+        let state_down = self.state.clone();
+        let disabled = self.disabled;
+        div()
+            .relative()
+            .w_full()
+            .min_w(px(0.0))
+            .child(editor)
+            .child(
+                div()
+                    .absolute()
+                    .right(px(2.0))
+                    .top(px(2.0))
+                    .bottom(px(2.0))
+                    .flex()
+                    .flex_col()
+                    .w(px(16.0))
+                    .justify_between()
+                    .child(stepper_btn(
+                        "input-step-up",
+                        IconName::CaretUp,
+                        disabled,
+                        t.muted_foreground,
+                        move |window, cx| nudge_number(&state_up, step, window, cx),
+                    ))
+                    .child(stepper_btn(
+                        "input-step-down",
+                        IconName::CaretDown,
+                        disabled,
+                        t.muted_foreground,
+                        move |window, cx| nudge_number(&state_down, -step, window, cx),
+                    )),
+            )
+            .into_any_element()
     }
+}
+
+fn stepper_btn(
+    id: &'static str,
+    name: IconName,
+    disabled: bool,
+    ink: Color,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    gpui_base::Button::new(id)
+        .disabled(disabled)
+        .flex_none()
+        .h(px(11.0))
+        .w(px(16.0))
+        .items_center()
+        .justify_center()
+        .child(icon(name, 10.0, hsla(ink)))
+        .on_click(move |_, window, cx| on_click(window, cx))
+}
+
+fn nudge_number(state: &Entity<InputState>, delta: f64, window: &mut Window, cx: &mut App) {
+    let raw = state.read(cx).value().to_string();
+    let next = match raw.trim().parse::<f64>() {
+        Ok(n) => {
+            let n = n + delta;
+            if delta.fract().abs() < f64::EPSILON && n.fract().abs() < f64::EPSILON {
+                format!("{}", n as i64)
+            } else {
+                format!("{n}")
+            }
+        }
+        Err(_) => {
+            if delta > 0.0 {
+                "1".into()
+            } else {
+                "0".into()
+            }
+        }
+    };
+    state.update(cx, |state, cx| {
+        state.set_value(SharedString::from(next), window, cx);
+    });
 }

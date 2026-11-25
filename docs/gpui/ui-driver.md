@@ -168,11 +168,13 @@ window's content view, while AccessKit's `SubclassingAdapter::for_window` subcla
 `activate.rs` asked a plain view. It now asks the content view (L6). The preview probes press ⌘P as the
 `TogglePreview` action (`preview-toggle-open`) either way.
 
-`VIDEORC_APP=gpui pnpm probe:preview-window` runs `scripts/gpui-preview-window-probe.mjs`: the Preview on screen
-(`preview-surface-sample`) against the frame the backend presents (`preview.debug.sample`), cell by cell over a 4 × 4
-grid (each channel within `VIDEORC_PREVIEW_WINDOW_TOLERANCE`, 48; at least 13 of 16 cells). It checks it docked,
-after main-window resizes, in the Preview window (opened, moved and sized off 16:9 with `preview-window-set-bounds`),
-after its close button and ⌘P, docked back, and on the Scene page. It needs Screen Recording and the debug backend.
+`VIDEORC_APP=gpui pnpm probe:preview-window` runs `scripts/gpui-preview-window-probe.mjs` with a geometry oracle:
+after each move and resize, the rect Core Animation displays for the video layer (`displayedFrame`) must be the rect
+the app set (`layerFrame`), and that must fill the slot (`slot`), within 1 point (`native-preview-surface-status`).
+It checks docked, after main-window resizes, in the Preview window (opened, moved and sized off 16:9 with
+`preview-window-set-bounds`), after its close button and ⌘P, docked back, and on the Scene page. A colour
+comparison of the screen with the backend's frame can't serve here: the test pattern animates its whole background,
+and a window capture takes about a second.
 
 `VIDEORC_APP=gpui pnpm smoke:preview-interaction-stress` runs `scripts/gpui-preview-interaction-stress.mjs`: a
 sampler reads `presentedFrameId` and the phase every 100 ms while rapid layout intents (a burst, then
@@ -180,6 +182,13 @@ sampler reads `presentedFrameId` and the phase every 100 ms while rapid layout i
 alignment read) and a main-window storm (`main-window-set-bounds`, now on GPUI) run with no settle. A phase fails when
 the preview stood still longer than `VIDEORC_PREVIEW_STRESS_MAX_STILL_MS` (1000), left presenting, or presented
 nothing; a layout the backend refuses without a real device makes the scene phase a named SKIP.
+
+`session-player-geometry` reads every live session player (the Library's, and any a page hosts) the same way:
+`{ players: [{ mode, active, open, layerFrame, displayedFrame, slot }] }`. On macOS `displayedFrame` must equal
+`layerFrame` and fill `slot`, as the live preview's do; it uses the same `VideoLayer` (`tune_video_layer`).
+`node scripts/gpui-library-player-probe.mjs` (with `VIDEORC_GPUI_APP_BINARY`) records a short take, opens it in the Library
+player through the UI driver (the row's Session actions, then Markers), and holds the player's layer to its slot, then
+again after main-window resizes.
 
 Wait for a GPUI product path or new commands first:
 

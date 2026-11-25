@@ -2,41 +2,67 @@
 //! `videorc_app_core::first_run` (#1766), drawn with `videorc-kit`. Words
 //! match Electron's `components/first-run/*` and `lib/first-run.ts`.
 
+mod pictures;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use gpui::{Context, Entity, EventEmitter, SharedString, Window, div, prelude::*, px, relative};
+use gpui::{
+    AnyElement, ColorSpace, Context, Entity, EventEmitter, FontWeight, Image, ImageFormat,
+    ObjectFit, Role, SharedString, Window, WindowControlArea, div, img, linear_color_stop,
+    linear_gradient, prelude::*, px, relative,
+};
 use videorc_app_core::assets;
-use videorc_app_core::desktop::permissions::{PermissionPlatform, SystemPermissionPane};
+use videorc_app_core::desktop::permissions::{
+    MediaAccessStatus, PermissionPlatform, SystemPermissionPane,
+};
 use videorc_app_core::desktop::system_access::{
     SystemAccessAction, SystemAccessContext, SystemAccessInput, SystemAccessRowId,
-    SystemAccessState, is_media_access_snapshot_ready, row_action, system_access_rows,
+    SystemAccessState, is_media_access_snapshot_ready, row_action, system_access_action_label,
+    system_access_rows, system_access_status, system_access_visible_detail,
 };
 use videorc_app_core::first_run::{self as fr, Goal, Leave, SetupMode, Step};
 use videorc_app_core::format::device_noun;
-use videorc_app_core::livestream::accounts::{AccountStatus, platform_label};
+use videorc_app_core::livestream::accounts::{
+    AccountStatus, oauth_unavailable_reason, platform_label,
+};
 use videorc_app_core::nav::PageId;
+use videorc_app_core::protocol::DeviceKind;
+use videorc_app_core::scenes::thumb::{ThumbCorner, ThumbPart, ThumbSize, card_frame, thumb_areas};
 use videorc_app_core::scenes::v2::LAYOUT_PRESET_LABELS;
-use videorc_app_core::studio::audio_mixer::{MICROPHONE_GAIN_RANGE, MeterBallistics, MeterView};
+use videorc_app_core::studio::audio_mixer::{
+    MICROPHONE_GAIN_RANGE, MeterBallistics, MeterView, format_db,
+};
 use videorc_app_core::studio::settings::SettingWrite;
 use videorc_app_core::studio::source_selection::SourceKind;
 use videorc_app_core::{BackendClient, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
-use videorc_kit::button::{Button, ButtonVariant};
+use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::chat_platform::ChatPlatform;
+use videorc_kit::chrome::{box_shadow, focus_ring};
 use videorc_kit::empty::Empty;
-use videorc_kit::list_row::{GroupedList, ListRow};
+use videorc_kit::icon::{IconName, icon};
+use videorc_kit::list_row::GroupedList;
+use videorc_kit::motion::{Glass, floating};
+use videorc_kit::platform_glyph::PlatformGlyph;
 use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::section_label::SectionLabel;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::select::Select;
+use videorc_kit::skeleton::Skeleton;
 use videorc_kit::slider::{Slider, SliderEvent, SliderState};
+use videorc_kit::spinner::Spinner;
+use videorc_kit::status_badge::StatusBadge;
+use videorc_kit::status_dot::StatusTone;
 use videorc_kit::switch::Switch;
-use videorc_kit::theme::{self, FONT, TypeScale, hsla};
-use videorc_kit::tokens::{radius, size, text};
+use videorc_kit::theme::{self, FONT, TypeScale, faded_over, hsla, with_alpha};
+use videorc_kit::tokens::{Shadow, Theme, radius, size, text};
+use videorc_kit::tooltip::tooltip;
 
 use crate::app::permissions::Permissions;
+use crate::screens::studio::audio::meter::segmented_meter;
 
 pub type AppStudio = Studio<BackendClient>;
 
@@ -179,34 +205,6 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn segmented_meter(meter: MeterView, theme: &videorc_kit::tokens::Theme) -> impl IntoElement {
-    let track = hsla(theme.border);
-    let ok = hsla(theme.success);
-    let warn = hsla(theme.warning);
-    let clip = hsla(theme.destructive);
-    let hold = hsla(theme.muted_foreground);
-    let mut row = div().w_full().h(px(8.)).flex().items_center().gap(px(1.));
-    for index in 0u8..24 {
-        let lit = index < meter.lit;
-        let is_hold = meter.hold > 0 && index + 1 == meter.hold;
-        let color = if is_hold && !lit {
-            hold
-        } else if lit {
-            if index >= 20 {
-                clip
-            } else if index >= 16 {
-                warn
-            } else {
-                ok
-            }
-        } else {
-            track
-        };
-        row = row.child(div().flex_1().h_full().rounded_none().bg(color));
-    }
-    row
-}
-
 /// Shell opens Destinations or another page after setup.
 #[derive(Debug, Clone, Copy)]
 pub struct OpenPage(pub PageId);
@@ -232,6 +230,10 @@ pub struct FirstRunScreen {
     mic_view: MeterView,
     mic_gain: Entity<SliderState>,
     settling: bool,
+    /// The Liquid Chrome poster turned around for light, made once off the
+    /// main thread the first time setup opens.
+    inverted_poster: Option<Arc<Image>>,
+    poster_started: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +315,8 @@ impl FirstRunScreen {
             mic_view: MeterView::default(),
             mic_gain,
             settling: false,
+            inverted_poster: None,
+            poster_started: false,
         };
         screen.try_auto_show(cx);
         screen
@@ -398,6 +402,7 @@ impl FirstRunScreen {
         self.opened_at = Some(Instant::now());
         self.samples.clear();
         self.studio.set_clips_first_run_setup_open(true);
+        self.prepare_poster(cx);
         cx.notify();
     }
 
@@ -419,7 +424,29 @@ impl FirstRunScreen {
             self.startup = Some(fr::FirstRunStartup::new(&store));
         }
         self.persist_step();
+        self.prepare_poster(cx);
         cx.notify();
+    }
+
+    /// Turns the backdrop's poster around for light, once, off the main
+    /// thread (`welcomeBackdropPictureFilter`'s `invert(1)`).
+    fn prepare_poster(&mut self, cx: &mut Context<Self>) {
+        if self.poster_started {
+            return;
+        }
+        self.poster_started = true;
+        cx.spawn(async move |this, cx| {
+            let png = cx
+                .background_executor()
+                .spawn(async move { pictures::inverted_poster_png() })
+                .await;
+            let _ = this.update(cx, |screen, cx| {
+                screen.inverted_poster =
+                    png.map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Png, bytes)));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn platform(&self) -> &'static str {
@@ -670,12 +697,240 @@ impl FirstRunScreen {
     }
 }
 
+/// `DIALOG_SIZE_CLASS`: `lg` (576 px) for every step, `xl` (768 px) for the
+/// one media step, Your look (plan 207 D6).
+fn card_width(step: Step) -> f32 {
+    if step == Step::Look { 768. } else { 576. }
+}
+
+/// The card's `p-5` (`DIALOG_SURFACE_CLASS`).
+const CARD_PADDING: f32 = 20.;
+
+/// Your look's content width (the `xl` card less its padding) and one of its
+/// two columns (`grid gap-5 sm:grid-cols-2`).
+const LOOK_WIDTH: f32 = 728.;
+const LOOK_COLUMN: f32 = 354.;
+
+/// The Skeleton rows Permissions shows until its rows are real.
+const SKELETON_ROWS: usize = 4;
+
+/// `WELCOME_BACKDROP.dimDark`, and what Increase Contrast adds to it.
+const BACKDROP_DIM_DARK: f32 = 0.3;
+const BACKDROP_DIM_MORE_CONTRAST: f32 = 0.2;
+/// `moreContrastBrightnessLight`: the inverted picture at 85% under Increase
+/// Contrast in light.
+const BACKDROP_DIM_LIGHT_MORE_CONTRAST: f32 = 0.15;
+
+/// 14 px body text (`text-sm`) at weight 500: a row's or a choice's name.
+fn row_title(words: impl Into<SharedString>, t: &Theme) -> gpui::Div {
+    div()
+        .text_size(px(14.))
+        .line_height(px(20.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(hsla(t.foreground))
+        .child(words.into())
+}
+
+/// 12 px secondary words (`text-meta text-muted-foreground`).
+fn meta_line(words: impl Into<SharedString>, t: &Theme) -> gpui::Div {
+    div()
+        .type_scale(text::META)
+        .text_color(hsla(t.muted_foreground))
+        .child(words.into())
+}
+
+/// `systemAccessStatus`'s tone as `StatusBadge`'s: the colour lives in the
+/// dot.
+fn status_tone(tone: &str) -> StatusTone {
+    match tone {
+        "good" => StatusTone::Good,
+        "warn" => StatusTone::Warn,
+        "bad" | "error" => StatusTone::Error,
+        _ => StatusTone::Neutral,
+    }
+}
+
+/// `grantMissing`: a refusal, or a grant never asked for.
+fn grant_missing(status: &MediaAccessStatus) -> bool {
+    matches!(
+        status,
+        MediaAccessStatus::NotDetermined
+            | MediaAccessStatus::Denied
+            | MediaAccessStatus::Restricted
+    )
+}
+
+/// `shapeApplies`: only the picture-in-picture layouts draw the camera's
+/// shape in Preset mode.
+fn shape_applies(preset: &str) -> bool {
+    preset == "screen-camera" || preset == "vertical-screen-camera"
+}
+
+fn needs_camera(preset: &str) -> bool {
+    !preset.ends_with("screen-only")
+}
+
+fn needs_screen(preset: &str) -> bool {
+    !preset.ends_with("camera-only")
+}
+
+/// `MediaCard`: the row radius, a 4% fill and a hairline; selected, the
+/// chrome plate with a brighter rim, never a colour.
+fn media_card(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    selected: bool,
+    disabled: bool,
+    t: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let accent = hsla(t.accent);
+    let plate = vec![
+        box_shadow(&Shadow {
+            inset: true,
+            x: 0.,
+            y: 1.,
+            blur: 0.,
+            spread: 0.,
+            color: t.chrome_plate_hi,
+        }),
+        box_shadow(&Shadow {
+            inset: true,
+            x: 0.,
+            y: 0.,
+            blur: 0.,
+            spread: 1.,
+            color: t.chrome_plate_rim,
+        }),
+    ];
+    div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(label)
+        .relative()
+        .min_w(px(0.))
+        .flex()
+        .flex_col()
+        .rounded(px(radius::ROW))
+        .border_1()
+        .map(|card| {
+            if selected {
+                card.border_color(hsla(with_alpha(t.foreground, 0.25)))
+                    .bg(linear_gradient(
+                        180.,
+                        linear_color_stop(hsla(t.chrome_plate_top), 0.),
+                        linear_color_stop(hsla(t.chrome_plate_bottom), 1.),
+                    )
+                    .color_space(ColorSpace::Oklab))
+                    .shadow(plate)
+            } else {
+                card.border_color(hsla(t.border))
+                    .bg(hsla(with_alpha(t.foreground, 0.04)))
+            }
+        })
+        .when(!selected && !disabled, |card| {
+            card.cursor_pointer().hover(move |style| style.bg(accent))
+        })
+        .when(disabled, |card| card.opacity(0.5))
+}
+
+/// A diagram corner on the radius tiers, as the scene cards draw it.
+fn corner_px(corner: ThumbCorner) -> f32 {
+    match corner {
+        ThumbCorner::Chip => radius::CHIP,
+        ThumbCorner::Area => radius::CHIP / 2.0,
+        ThumbCorner::Tight => radius::CHIP / 3.0,
+        ThumbCorner::Hair => radius::CHIP / 6.0,
+    }
+}
+
+/// `LayoutThumb` at card size: the frame and where the layout puts the
+/// screen and the camera; a 9:16 one upright in a 4:3 well.
+fn layout_thumb(preset: &str, vertical: bool, inner: f32, t: &Theme) -> AnyElement {
+    let frame_box = card_frame(vertical, inner);
+    let (frame_w, frame_h) = (frame_box.width, frame_box.height);
+    let camera = faded_over(t.foreground, t.glass_solid, 0.25);
+    let camera_glyph = hsla(faded_over(t.foreground, camera, 0.45));
+    let areas = thumb_areas(preset, false, ThumbSize::Card, frame_w - 2., frame_h - 2.);
+    let frame = div()
+        .relative()
+        .flex_none()
+        .w(px(frame_w))
+        .h(px(frame_h))
+        .overflow_hidden()
+        .rounded(px(corner_px(frame_box.corner)))
+        .border_1()
+        .border_color(hsla(t.border))
+        .bg(linear_gradient(
+            135.,
+            linear_color_stop(hsla(with_alpha(t.muted, 0.4)), 0.),
+            linear_color_stop(hsla(with_alpha(t.muted, 0.7)), 1.),
+        ))
+        .children(areas.into_iter().map(|area| {
+            let glyph = (area.part == ThumbPart::Camera && area.glyph).then(|| {
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon(
+                        IconName::VideoCamera,
+                        (area.height * 0.6).min(14.),
+                        camera_glyph,
+                    ))
+            });
+            div()
+                .absolute()
+                .left(px(area.left))
+                .top(px(area.top))
+                .w(px(area.width))
+                .h(px(area.height))
+                .overflow_hidden()
+                .rounded(px(corner_px(area.corner)))
+                .bg(match area.part {
+                    ThumbPart::Camera => hsla(camera),
+                    ThumbPart::Screen => hsla(with_alpha(t.foreground, 0.1)),
+                })
+                .when(area.rim, |plate| {
+                    plate
+                        .border_1()
+                        .border_color(hsla(with_alpha(t.background, 0.6)))
+                })
+                .children(glyph)
+        }));
+    if !vertical {
+        return frame.into_any_element();
+    }
+    div()
+        .w(px(inner))
+        .h(px(inner * 3. / 4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(radius::CHIP))
+        .bg(hsla(with_alpha(t.foreground, 0.03)))
+        .child(frame)
+        .into_any_element()
+}
+
+/// `PlatformGlyph`: the platform's brand tile in its 30 x 24 slot, the
+/// kit's twin of `components/platform-glyph.tsx`.
+fn platform_glyph(id: &str) -> PlatformGlyph {
+    let platform = match id {
+        "youtube" => ChatPlatform::Youtube,
+        "x" => ChatPlatform::X,
+        "kick" => ChatPlatform::Kick,
+        _ => ChatPlatform::Twitch,
+    };
+    PlatformGlyph::new(platform).id(SharedString::from(format!("first-run-glyph-{id}")))
+}
+
 impl Render for FirstRunScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.open {
             return div().id("first-run-closed");
         }
-        let t = theme::current(window, cx).theme();
+        let appearance = theme::current(window, cx);
+        let t = appearance.theme();
         let platform = self.platform();
         let (position, count) = fr::step_position(self.step, self.goal, Some(platform));
         let title = step_title(self.step);
@@ -689,17 +944,13 @@ impl Render for FirstRunScreen {
         let offline = !self.studio.is_connected();
         let grants_ready = self.grants_ready();
 
-        let header = div()
+        // The top line: where setup is, and the way out of it.
+        let top = div()
             .flex()
             .items_center()
             .justify_between()
             .gap(px(12.))
-            .child(
-                div()
-                    .type_scale(text::META)
-                    .text_color(hsla(t.muted_foreground))
-                    .child(format!("Step {position} of {count}")),
-            )
+            .child(meta_line(format!("Step {position} of {count}"), t))
             .child(
                 Button::new("first-run-skip")
                     .label("Skip setup")
@@ -710,133 +961,219 @@ impl Render for FirstRunScreen {
                     }),
             );
 
-        let title_block = div()
+        // The title (`text-base leading-none font-medium`) over the
+        // description (`text-sm`), with the app icon as Permissions' lead.
+        let lead = (self.step == Step::Permissions).then(|| {
+            img(pictures::logo())
+                .flex_none()
+                .size(px(64.))
+                .object_fit(ObjectFit::Contain)
+        });
+        let heading = div()
+            .flex()
+            .items_center()
+            .gap(px(16.))
+            .children(lead)
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(16.))
+                            .line_height(px(16.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(hsla(t.foreground))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .line_height(px(20.))
+                            .text_color(hsla(t.muted_foreground))
+                            .child(description),
+                    ),
+            );
+        let head = div()
+            .flex_none()
             .flex()
             .flex_col()
-            .gap(px(6.))
-            .child(
-                div()
-                    .type_scale(text::SECTION)
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(title),
-            )
-            .child(
-                div()
-                    .type_scale(text::META)
-                    .text_color(hsla(t.muted_foreground))
-                    .child(description),
-            );
+            .gap(px(12.))
+            .child(top)
+            .child(heading);
 
         let body = match self.step {
-            Step::Permissions => permissions_body(self, &entity, locked, &t, window, cx),
-            Step::Goal => goal_body(noun, &entity, locked),
-            Step::Look => look_body(self, &entity, locked, &t),
-            Step::Sound => sound_body(
-                self, &snapshot, &entity, locked, offline, noun, &t, window, cx,
-            ),
-            Step::Destinations => destinations_body(self, &entity, locked, offline),
+            Step::Permissions => permissions_body(self, &entity, locked, t),
+            Step::Goal => goal_body(noun, self.goal, &entity, locked, t),
+            Step::Look => look_body(self, &snapshot, &entity, locked, t),
+            Step::Sound => sound_body(self, &snapshot, &entity, locked, offline, noun, t),
+            Step::Destinations => destinations_body(self, &entity, locked, offline, t),
         };
 
-        let mut footer = div().flex().items_center().gap(px(8.));
+        // Back at the left, the step's one primary at the right; Your goal
+        // has none (its rows are the action).
+        let mut actions = div().flex().items_center().gap(px(8.));
         if previous.is_some() {
-            footer = footer.child(
+            actions = actions.child(
                 Button::new("first-run-back")
-                    .label("Back")
                     .variant(ButtonVariant::Ghost)
                     .disabled(locked)
+                    .child(icon(IconName::ArrowLeft, 16., hsla(t.foreground)))
+                    .child("Back")
                     .on_click({
                         let entity = entity.clone();
                         move |_, _, cx| entity.update(cx, |this, cx| this.go_back(cx))
                     }),
             );
         }
-        if self.step != Step::Goal {
-            let (label, variant) = if self.step == Step::Permissions {
-                if grants_ready {
-                    ("Continue", ButtonVariant::Default)
-                } else {
-                    ("Skip for now", ButtonVariant::Outline)
-                }
-            } else {
-                (next_label(self.mode, last), ButtonVariant::Default)
-            };
-            footer = footer.child(
-                div().flex_1().justify_end().child(
-                    Button::new("first-run-next")
-                        .label(label)
-                        .variant(variant)
-                        .disabled(locked)
-                        .on_click({
-                            let entity = entity.clone();
-                            move |_, _, cx| entity.update(cx, |this, cx| this.go_next(cx))
-                        }),
-                ),
-            );
-        }
+        let primary = if self.step == Step::Goal {
+            None
+        } else if self.step == Step::Permissions && !grants_ready {
+            Some(
+                Button::new("first-run-next")
+                    .label("Skip for now")
+                    .variant(ButtonVariant::Outline)
+                    .disabled(locked)
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_, _, cx| entity.update(cx, |this, cx| this.go_next(cx))
+                    }),
+            )
+        } else {
+            Some(
+                Button::new("first-run-next")
+                    .variant(ButtonVariant::Default)
+                    .disabled(locked)
+                    .child(next_label(self.mode, last))
+                    .child(icon(IconName::ArrowRight, 16., hsla(t.chrome_fill_ink)))
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_, _, cx| entity.update(cx, |this, cx| this.go_next(cx))
+                    }),
+            )
+        };
+        actions = actions.child(
+            div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap(px(8.))
+                .children(primary),
+        );
+        let footnote = (self.step == Step::Permissions).then(|| {
+            meta_line(
+                format!("Recordings stay on this {noun}. Cloud AI only runs after you opt in."),
+                t,
+            )
+        });
+        let foot = div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .children(footnote)
+            .child(actions);
 
+        // The one card on the dialog tier (plan 203 D1); its step is said
+        // once, with where it sits.
         let live = format!("Step {position} of {count}, {title}");
+        let glass = Glass {
+            fill: t.glass_float_dialog,
+            rim: t.glass_float_rim,
+            drop: t.glass_float_dialog_drop,
+            radius: radius::PANEL,
+        };
+        let card = floating(
+            glass,
+            1.0,
+            div()
+                .flex_1()
+                .min_h(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(20.))
+                .child(head)
+                .child(ScrollArea::new("first-run-body").child(body))
+                .child(foot),
+        )
+        .id("first-run-card")
+        .aria_label(live)
+        .w(relative(1.))
+        .max_w(px(card_width(self.step)))
+        .max_h(relative(1.))
+        .flex()
+        .flex_col()
+        .p(px(CARD_PADDING))
+        .text_size(px(14.))
+        .text_color(hsla(t.popover_foreground));
+
+        // Liquid Chrome's poster edge to edge (the backdrop's still): dimmed
+        // under dark, turned around under light. Decoration only.
+        let picture = if appearance.dark {
+            Some(pictures::poster())
+        } else {
+            self.inverted_poster.clone()
+        };
+        let dim = match (appearance.dark, appearance.increase_contrast) {
+            (true, false) => BACKDROP_DIM_DARK,
+            (true, true) => BACKDROP_DIM_DARK + BACKDROP_DIM_MORE_CONTRAST,
+            (false, true) => BACKDROP_DIM_LIGHT_MORE_CONTRAST,
+            (false, false) => 0.,
+        };
+        let backdrop = div()
+            .absolute()
+            .inset_0()
+            .overflow_hidden()
+            .bg(hsla(t.glass_solid))
+            .children(picture.map(|picture| {
+                img(picture)
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .object_fit(ObjectFit::Cover)
+            }))
+            .when(dim > 0., |backdrop| {
+                backdrop.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(hsla(with_alpha(videorc_kit::tokens::DARK.glass_solid, dim))),
+                )
+            });
 
         div()
             .id("first-run-setup")
-            .size_full()
+            .absolute()
+            .inset_0()
+            .occlude()
             .flex()
             .flex_col()
             .font_family(FONT)
-            .bg(hsla(t.background))
             .text_color(hsla(t.foreground))
-            .child(
-                // Soft chrome backdrop (P1456): solid fill until liquid-chrome
-                // lands; reduced-motion / no-GPU still get a still plane.
-                div()
-                    .absolute()
-                    .inset_0()
-                    .bg(hsla(t.glass_solid))
-                    .opacity(0.55),
-            )
+            .child(backdrop)
+            // The window family's title band: the traffic lights' line and
+            // the drag region, with nothing on it.
             .child(
                 div()
-                    .id("first-run-title-band")
-                    .h(px(40.))
+                    .relative()
+                    .flex_none()
                     .w_full()
-                    .flex_none(),
+                    .h(px(size::TOOLBAR))
+                    .window_control_area(WindowControlArea::Drag),
             )
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_h(px(0.))
                     .flex()
                     .items_center()
                     .justify_center()
                     .p(px(16.))
-                    .child(
-                        div()
-                            .id("first-run-card")
-                            .w(relative(1.))
-                            .max_w(px(if self.step == Step::Look { 720. } else { 560. }))
-                            .max_h(relative(1.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(20.))
-                            .rounded(px(radius::PANEL))
-                            .border_1()
-                            .border_color(hsla(t.border))
-                            .bg(hsla(t.glass_solid))
-                            .px(px(size::GUTTER))
-                            .py(px(20.))
-                            .child(
-                                div()
-                                    .type_scale(text::META)
-                                    .text_color(hsla(t.muted_foreground))
-                                    .child(live),
-                            )
-                            .child(header)
-                            .child(title_block)
-                            .child(
-                                ScrollArea::new("first-run-body")
-                                    .child(div().flex().flex_col().gap(px(12.)).child(body)),
-                            )
-                            .child(footer),
-                    ),
+                    .child(card),
             )
     }
 }
@@ -845,138 +1182,227 @@ fn permissions_body(
     screen: &FirstRunScreen,
     entity: &Entity<FirstRunScreen>,
     locked: bool,
-    t: &videorc_kit::tokens::Theme,
-    _window: &mut Window,
-    _cx: &mut Context<FirstRunScreen>,
-) -> gpui::AnyElement {
-    let platform = screen.platform();
-    let noun = device_noun(platform);
-    let linux = platform == "linux";
-    let mut column = div().flex().flex_col().gap(px(12.));
-    if linux {
-        column = column.child(
-            Empty::new()
-                .title("Nothing to grant here")
-                .description(
-                    "Linux keeps no capture permissions for apps. Your desktop may ask when Videorc starts capturing the screen.",
-                ),
-        );
-    } else if !screen.rows_ready() {
-        column = column.child(
-            div()
-                .type_scale(text::META)
-                .text_color(hsla(t.muted_foreground))
-                .child("Checking system access…"),
-        );
-    } else {
-        let snapshot = screen.studio.snapshot();
-        let media = screen.permissions.snapshot();
-        let perm_platform = PermissionPlatform::current();
-        let rows = system_access_rows(&SystemAccessInput {
-            devices: &snapshot.sources.devices.devices,
-            audio_meter: None,
-            platform: perm_platform,
-            os_release: None,
-            permission_target_name: "Videorc",
-            media_access: Some(&media),
-            context: SystemAccessContext {
-                pending_pane: screen.pending_permission,
-                ..Default::default()
-            },
-        });
-        let mut list = GroupedList::new().label("System access");
-        for (index, row) in rows.iter().enumerate() {
-            let action = row_action(row, perm_platform, Some(&media));
-            let mut trailing = div().flex().items_center().gap(px(8.)).child(
-                Badge::new(match row.state {
-                    SystemAccessState::Granted => "Granted",
-                    SystemAccessState::NotGranted => "Not granted",
-                    SystemAccessState::FirstUse => "Not asked yet",
-                    SystemAccessState::DeviceIssue => "Device issue",
-                    SystemAccessState::Waiting => "Waiting…",
-                    SystemAccessState::NeedsRelaunch => "Needs relaunch",
-                    SystemAccessState::NotRequired => "Not required",
-                    SystemAccessState::Unavailable => "Unavailable",
-                })
-                .variant(if row.state == SystemAccessState::Granted {
-                    BadgeVariant::Success
-                } else {
-                    BadgeVariant::Outline
-                }),
+    t: &Theme,
+) -> AnyElement {
+    if screen.platform() == "linux" {
+        return Empty::new()
+            .title("Nothing to grant here")
+            .description(
+                "Linux keeps no capture permissions for apps. Your desktop may ask when Videorc starts capturing the screen.",
+            )
+            .into_any_element();
+    }
+    if !screen.rows_ready() {
+        // Never "Not asked yet" guesses before the rows are real.
+        let mut list = GroupedList::new();
+        for index in 0..SKELETON_ROWS {
+            list = list.item(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .px(px(12.))
+                    .py(px(12.))
+                    .child(
+                        Skeleton::new(("first-run-skeleton-title", index))
+                            .w(px(160.))
+                            .h(px(16.)),
+                    )
+                    .child(
+                        Skeleton::new(("first-run-skeleton-line", index))
+                            .w(px(288.))
+                            .max_w(relative(1.))
+                            .h(px(12.)),
+                    ),
             );
-            if let Some(action) = action {
-                if row.id != SystemAccessRowId::SystemAudio {
-                    let pane = row.id.pane();
-                    let label = match action {
-                        SystemAccessAction::RequestMediaAccess => "Allow…",
-                        SystemAccessAction::OpenSettings => "Open Settings…",
-                        SystemAccessAction::Relaunch => "Reopen Videorc",
-                    };
-                    trailing = trailing.child(
-                        Button::new(("first-run-grant", index))
-                            .label(label)
-                            .variant(ButtonVariant::Outline)
-                            .disabled(locked || screen.pending_permission.is_some())
-                            .on_click({
-                                let entity = entity.clone();
-                                move |_, _, cx| {
-                                    entity.update(cx, |this, cx| {
-                                        this.permission_action(pane, action, cx)
-                                    })
-                                }
-                            }),
+        }
+        return list.into_any_element();
+    }
+    let snapshot = screen.studio.snapshot();
+    let media = screen.permissions.snapshot();
+    let perm_platform = PermissionPlatform::current();
+    let rows = system_access_rows(&SystemAccessInput {
+        devices: &snapshot.sources.devices.devices,
+        audio_meter: None,
+        platform: perm_platform,
+        os_release: None,
+        permission_target_name: "Videorc",
+        media_access: Some(&media),
+        context: SystemAccessContext {
+            pending_pane: screen.pending_permission,
+            ..Default::default()
+        },
+    });
+    let mut list = GroupedList::new();
+    for (index, row) in rows.iter().enumerate() {
+        let (status, tone) = system_access_status(row.state);
+        // The setup variant's tag: what Videorc can't record without.
+        let tag = if row.required {
+            Some("Needed to record")
+        } else if row.id == SystemAccessRowId::Camera {
+            Some("Optional")
+        } else {
+            None
+        };
+        let checking = row.checking || row.state == SystemAccessState::Waiting;
+        let detail = system_access_visible_detail(row).map(str::to_string);
+        let proof = row.id == SystemAccessRowId::Microphone
+            && row.state == SystemAccessState::Granted
+            && !row.checking;
+        let action = row_action(row, perm_platform, Some(&media));
+        let action_label = system_access_action_label(action, perm_platform);
+
+        let words = div()
+            .flex_1()
+            .min_w(px(0.))
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(row_title(row.label, t))
+                    .child(StatusBadge::new(status).tone(status_tone(tone)))
+                    .children(checking.then(|| {
+                        Spinner::new(("first-run-checking", index))
+                            .accessibility_label("Checking permission…")
+                    }))
+                    .children(tag.map(|tag| Badge::new(tag).variant(BadgeVariant::Outline))),
+            )
+            .child(meta_line(row.purpose, t))
+            .children(detail.map(|detail| meta_line(detail, t)))
+            .children(proof.then(|| {
+                // The Microphone row's proof (plan 203 D6): the live level.
+                div()
+                    .pt(px(6.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(segmented_meter(screen.mic_view, false, t))
+                    .child(meta_line(
+                        "Say something. The bar moves when Videorc hears you.",
+                        t,
+                    ))
+            }));
+
+        let button = match (action, action_label) {
+            (Some(action), Some(label)) if row.id != SystemAccessRowId::SystemAudio => {
+                let pane = row.id.pane();
+                let busy = screen.pending_permission == Some(pane);
+                let mut button = Button::new(("first-run-grant", index))
+                    .variant(ButtonVariant::Outline)
+                    .accessibility_label(format!("{}: {label}", row.label))
+                    .disabled(locked || screen.pending_permission.is_some());
+                if busy {
+                    button = button.child(
+                        Spinner::new(("first-run-grant-busy", index))
+                            .size(14.)
+                            .hidden(true),
                     );
                 }
+                Some(button.child(SharedString::from(label)).on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.permission_action(pane, action, cx))
+                    }
+                }))
             }
-            list = list.item(ListRow::new(("first-run-row", index), row.label).child(trailing));
-        }
-        column = column.child(list).child(
+            _ => None,
+        };
+
+        list = list.item(
             div()
                 .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(segmented_meter(screen.mic_view, t))
-                .child(
-                    div()
-                        .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
-                        .child("Say something. The bar moves when Videorc hears you."),
-                ),
+                .items_start()
+                .gap(px(12.))
+                .px(px(12.))
+                .py(px(10.))
+                .child(words)
+                .children(button),
         );
     }
-    column = column.child(div().type_scale(text::META).child(format!(
-        "Recordings stay on this {noun}. Cloud AI only runs after you opt in."
-    )));
-    column.into_any_element()
+    list.into_any_element()
 }
 
-fn goal_body(noun: &str, entity: &Entity<FirstRunScreen>, locked: bool) -> gpui::AnyElement {
+fn goal_body(
+    noun: &str,
+    goal: Option<Goal>,
+    entity: &Entity<FirstRunScreen>,
+    locked: bool,
+    t: &Theme,
+) -> AnyElement {
     let choices = [
         (
             Goal::Record,
             "Recordings",
             format!("Tutorials, demos and videos, saved on this {noun}."),
+            IconName::Record,
         ),
         (
             Goal::Stream,
             "Livestreams",
-            "Go live on YouTube, Twitch, Kick or X.".into(),
+            "Go live on YouTube, Twitch, Kick or X.".to_string(),
+            IconName::Broadcast,
         ),
-        (Goal::Both, "Both", "Record and go live.".into()),
+        (
+            Goal::Both,
+            "Both",
+            "Record and go live.".to_string(),
+            IconName::VideoCamera,
+        ),
     ];
-    let mut list = GroupedList::new().label("What are you making?");
-    for (goal, title, line) in choices {
+    let accent = hsla(t.accent);
+    let muted = hsla(t.muted_foreground);
+    let mut list = GroupedList::new();
+    for (index, (value, title, line, glyph)) in choices.into_iter().enumerate() {
+        let chosen = goal == Some(value);
+        let ring = focus_ring(t);
+        // One click (or Enter) picks the choice and moves on.
         list = list.item(
-            ListRow::new(title, title).context(line).child(
-                Button::new(format!("first-run-goal-{title}"))
-                    .label(title)
-                    .variant(ButtonVariant::Ghost)
-                    .disabled(locked)
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_, _, cx| entity.update(cx, |this, cx| this.pick_goal(goal, cx))
-                    }),
-            ),
+            gpui_base::Button::new(("first-run-goal", index))
+                .disabled(locked)
+                .w_full()
+                .accessibility_label(title)
+                .when(chosen, |row| row.bg(accent))
+                .when(!locked, |row| row.hover(move |style| style.bg(accent)))
+                .when(locked, |row| row.opacity(0.5))
+                .focus_visible(move |style| style.shadow(vec![ring]))
+                .on_click({
+                    let entity = entity.clone();
+                    move |_, _, cx| entity.update(cx, |this, cx| this.pick_goal(value, cx))
+                })
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .px(px(12.))
+                        .py(px(10.))
+                        .child(icon(glyph, 16., muted))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(row_title(title, t))
+                                .child(meta_line(line, t)),
+                        )
+                        .child(icon(
+                            if chosen {
+                                IconName::Check
+                            } else {
+                                IconName::CaretRight
+                            },
+                            16.,
+                            muted,
+                        )),
+                ),
         );
     }
     list.into_any_element()
@@ -984,11 +1410,137 @@ fn goal_body(noun: &str, entity: &Entity<FirstRunScreen>, locked: bool) -> gpui:
 
 fn look_body(
     screen: &FirstRunScreen,
+    snapshot: &videorc_app_core::studio::StudioSnapshot,
     entity: &Entity<FirstRunScreen>,
     locked: bool,
-    t: &videorc_kit::tokens::Theme,
-) -> gpui::AnyElement {
+    t: &Theme,
+) -> AnyElement {
+    let vertical = screen.orientation == Orientation::Vertical;
+    // The layout the step shows: the one picked here, else the Studio's own.
+    let preset: Option<String> = screen.layout_preset.clone().or_else(|| {
+        serde_json::to_value(&snapshot.settings.capture.layout.layout_preset)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+    });
+    let preset = preset.filter(|preset| preset.starts_with("vertical-") == vertical);
+
+    // What each missing source says (`FIRST_RUN_LOOK_REASONS`).
+    let media = screen.permissions.snapshot();
+    let sources = &snapshot.settings.capture.sources;
+    let devices = &snapshot.sources.devices.devices;
+    let chosen = |id: &Option<String>| id.as_deref().is_some_and(|id| !id.is_empty());
+    let camera_gap = if chosen(&sources.camera_id) {
+        None
+    } else if grant_missing(&media.camera) {
+        Some("Allow the camera first.")
+    } else if devices
+        .iter()
+        .any(|device| device.kind == DeviceKind::Camera)
+    {
+        Some("Camera is off.")
+    } else {
+        Some("No camera found.")
+    };
+    let screen_gap = if chosen(&sources.screen_id) || chosen(&sources.window_id) {
+        None
+    } else if grant_missing(&media.screen) {
+        Some("Allow Screen Recording first.")
+    } else if devices
+        .iter()
+        .any(|device| matches!(device.kind, DeviceKind::Screen | DeviceKind::Window))
+    {
+        Some("No screen is chosen.")
+    } else {
+        Some("No screen found.")
+    };
+    let reasons: Vec<&str> = camera_gap.into_iter().chain(screen_gap).collect();
+    let grant_reason = reasons.iter().any(|reason| reason.starts_with("Allow "));
+    let has_sources = camera_gap.is_none() || screen_gap.is_none();
+
+    // The picture: the layout's boxes with the camera in its shape, the
+    // chosen live background behind them.
+    let (picture_w, picture_h) = if vertical {
+        (126., 224.)
+    } else {
+        (LOOK_COLUMN, LOOK_COLUMN * 9. / 16.)
+    };
+    let mut picture = div()
+        .id("first-run-look-picture")
+        .relative()
+        .flex_none()
+        .w(px(picture_w))
+        .h(px(picture_h))
+        .overflow_hidden()
+        .rounded(px(radius::ROW))
+        .border_1()
+        .border_color(hsla(t.border))
+        .bg(hsla(t.inset));
+    if let Some(image) = screen.live_background.and_then(pictures::live_thumb) {
+        picture = picture.child(
+            img(image)
+                .absolute()
+                .inset_0()
+                .size_full()
+                .object_fit(ObjectFit::Cover),
+        );
+    }
+    if !has_sources {
+        picture = picture.child(
+            div()
+                .absolute()
+                .left(px(12.))
+                .right(px(12.))
+                .bottom(px(8.))
+                .text_center()
+                .type_scale(text::META)
+                .text_color(hsla(t.muted_foreground))
+                .child("Your camera and screen show here once Videorc can use them."),
+        );
+    } else if let Some(preset) = preset.as_deref() {
+        let stroke = hsla(with_alpha(t.foreground, 0.4));
+        for area in thumb_areas(
+            preset,
+            false,
+            ThumbSize::Card,
+            picture_w - 2.,
+            picture_h - 2.,
+        ) {
+            let camera = area.part == ThumbPart::Camera;
+            let fill = hsla(with_alpha(t.foreground, if camera { 0.15 } else { 0.05 }));
+            let shape = if camera && shape_applies(preset) {
+                screen.camera_shape
+            } else {
+                CameraShape::Rectangle
+            };
+            let side = area.width.min(area.height);
+            let source = match shape {
+                CameraShape::Circle => div()
+                    .absolute()
+                    .left(px(area.left + (area.width - side) / 2.))
+                    .top(px(area.top + (area.height - side) / 2.))
+                    .size(px(side))
+                    .rounded_full(),
+                CameraShape::Rounded => div()
+                    .absolute()
+                    .left(px(area.left))
+                    .top(px(area.top))
+                    .w(px(area.width))
+                    .h(px(area.height))
+                    .rounded(px(side * 0.15)),
+                CameraShape::Rectangle => div()
+                    .absolute()
+                    .left(px(area.left))
+                    .top(px(area.top))
+                    .w(px(area.width))
+                    .h(px(area.height)),
+            };
+            picture = picture.child(source.bg(fill).border_1().border_color(stroke));
+        }
+    }
+    let picture = div().flex().justify_center().child(picture);
+
     let mut orientation = SegmentedControl::new("first-run-orientation")
+        .accessibility_label("Orientation")
         .option(Segment::new("horizontal", "Horizontal 16:9"))
         .option(Segment::new("vertical", "Vertical 9:16"))
         .value(Some(SharedString::from(match screen.orientation {
@@ -1011,6 +1563,7 @@ fn look_body(
     });
 
     let mut shape = SegmentedControl::new("first-run-shape")
+        .accessibility_label("Camera shape")
         .option(Segment::new("rectangle", "Rectangle"))
         .option(Segment::new("rounded", "Rounded"))
         .option(Segment::new("circle", "Circle"))
@@ -1034,192 +1587,194 @@ fn look_body(
         }
     });
 
-    let mut backgrounds = div().flex().flex_wrap().gap(px(6.));
-    let none_selected = screen.live_background.is_none();
-    backgrounds = backgrounds.child(
-        Button::new("first-run-bg-none")
-            .label("None")
-            .variant(if none_selected {
-                ButtonVariant::Default
-            } else {
-                ButtonVariant::Outline
-            })
-            .disabled(locked)
-            .on_click({
+    // The backgrounds: None, then each live background's thumbnail, four
+    // to a row on media cards; the name is the tile's tooltip.
+    let mut backgrounds = div().grid().grid_cols(4).gap(px(6.));
+    let mut tiles: Vec<(Option<&'static str>, &'static str)> = vec![(None, "None")];
+    for id in assets::live_backgrounds_offered() {
+        tiles.push((Some(*id), assets::live_background_name(id)));
+    }
+    for (index, (id, label)) in tiles.into_iter().enumerate() {
+        let selected = screen.live_background == id;
+        let well = div()
+            .relative()
+            .w_full()
+            .aspect_ratio(16. / 9.)
+            .rounded(px(radius::CHIP));
+        let well = match id.and_then(pictures::live_thumb) {
+            Some(image) => well.child(
+                img(image)
+                    .absolute()
+                    .inset_0()
+                    .size_full()
+                    .rounded(px(radius::CHIP))
+                    .object_fit(ObjectFit::Cover),
+            ),
+            None => well
+                .flex()
+                .items_center()
+                .justify_center()
+                .border_1()
+                .border_color(hsla(t.border))
+                .bg(hsla(t.inset))
+                .type_scale(text::META)
+                .text_color(hsla(t.muted_foreground))
+                .child(label),
+        };
+        let mut tile = media_card(("first-run-bg", index), label, selected, locked, t)
+            .p(px(4.))
+            .tooltip(tooltip(label))
+            .child(well);
+        if !locked {
+            tile = tile.on_click({
                 let entity = entity.clone();
                 move |_, _, cx| {
                     entity.update(cx, |this, cx| {
-                        this.live_background = None;
+                        this.live_background = id;
                         cx.notify();
                     })
                 }
-            }),
-    );
-    for id in assets::live_backgrounds_offered() {
-        let selected = screen.live_background == Some(*id);
-        backgrounds = backgrounds.child(
-            Button::new(format!("first-run-bg-{id}"))
-                .label(assets::live_background_name(id))
-                .variant(if selected {
-                    ButtonVariant::Default
-                } else {
-                    ButtonVariant::Outline
-                })
-                .disabled(locked)
-                .on_click({
-                    let entity = entity.clone();
-                    let id = *id;
-                    move |_, _, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.live_background = Some(id);
-                            cx.notify();
-                        })
-                    }
-                }),
-        );
+            });
+        }
+        backgrounds = backgrounds.child(tile);
     }
-
     let bg_line = match screen.live_background {
         Some(id) => format!("{}, moving behind you.", assets::live_background_name(id)),
         None => "No background: your screen and camera fill the picture.".into(),
     };
 
-    let picture_w = if screen.orientation == Orientation::Vertical {
-        120.
-    } else {
-        220.
-    };
-    let picture_h = if screen.orientation == Orientation::Vertical {
-        214.
-    } else {
-        124.
-    };
-    let camera_radius = match screen.camera_shape {
-        CameraShape::Rectangle => 0.,
-        CameraShape::Rounded => 10.,
-        CameraShape::Circle => 999.,
-    };
-
-    let vertical = screen.orientation == Orientation::Vertical;
-    let mut layouts = div().flex().flex_wrap().gap(px(6.));
-    for (preset, label) in LAYOUT_PRESET_LABELS {
-        let is_vertical = preset.starts_with("vertical-");
-        if is_vertical != vertical {
+    // The layouts of the orientation as small scene cards, the chosen one
+    // ringed and checked.
+    let columns: u16 = if vertical { 6 } else { 4 };
+    let card_w = (LOOK_WIDTH - 8. * f32::from(columns - 1)) / f32::from(columns);
+    let inner = card_w - 18.;
+    let mut layouts = div().grid().grid_cols(columns).gap(px(8.));
+    for (index, (layout, label)) in LAYOUT_PRESET_LABELS.iter().enumerate() {
+        if layout.starts_with("vertical-") != vertical {
             continue;
         }
-        let selected = screen.layout_preset.as_deref() == Some(preset);
-        layouts = layouts.child(
-            Button::new(format!("first-run-layout-{preset}"))
-                .label(label)
-                .variant(if selected {
-                    ButtonVariant::Default
-                } else {
-                    ButtonVariant::Outline
-                })
-                .disabled(locked)
-                .on_click({
-                    let entity = entity.clone();
-                    let preset = preset.to_string();
-                    move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.set_layout(preset.clone(), cx))
-                    }
-                }),
-        );
+        let selected = preset.as_deref() == Some(*layout);
+        let disabled = locked
+            || (needs_camera(layout) && camera_gap.is_some())
+            || (needs_screen(layout) && screen_gap.is_some());
+        let well = div()
+            .relative()
+            .rounded(px(radius::CHIP))
+            .child(layout_thumb(layout, vertical, inner, t))
+            .when(selected, |well| {
+                well.child(
+                    div()
+                        .absolute()
+                        .top(px(-4.))
+                        .left(px(-4.))
+                        .right(px(-4.))
+                        .bottom(px(-4.))
+                        .rounded(px(radius::CHIP + 4.0))
+                        .border_2()
+                        .border_color(hsla(t.foreground)),
+                )
+            });
+        let mut card = media_card(("first-run-layout", index), *label, selected, disabled, t)
+            .gap(px(6.))
+            .p(px(8.))
+            .child(well)
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(hsla(t.foreground))
+                    .line_clamp(2)
+                    .child(*label),
+            )
+            .when(selected, |card| {
+                card.child(
+                    div()
+                        .absolute()
+                        .top(px(4.))
+                        .left(px(4.))
+                        .child(Badge::new("").icon(icon(IconName::Check, 12., hsla(t.foreground)))),
+                )
+            });
+        if !disabled {
+            card = card.on_click({
+                let entity = entity.clone();
+                let layout = layout.to_string();
+                move |_, _, cx| entity.update(cx, |this, cx| this.set_layout(layout.clone(), cx))
+            });
+        }
+        layouts = layouts.child(card);
     }
+    let reason_line = (!reasons.is_empty()).then(|| {
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.))
+            .child(meta_line(reasons.join(" "), t))
+            .children(grant_reason.then(|| {
+                Button::new("first-run-back-permissions")
+                    .label("Back to permissions")
+                    .variant(ButtonVariant::Ghost)
+                    .size(ButtonSize::Xs)
+                    .disabled(locked)
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.go_to(Step::Permissions, cx))
+                        }
+                    })
+            }))
+    });
+
+    let group = |label: &'static str| {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(SectionLabel::new(label))
+    };
+    let left = div()
+        .flex_1()
+        .min_w(px(0.))
+        .flex()
+        .flex_col()
+        .gap(px(16.))
+        .child(picture)
+        .child(
+            group("Orientation")
+                .child(div().flex().child(orientation))
+                .child(meta_line("Vertical is for Shorts, Reels and TikTok.", t)),
+        );
+    let right = div()
+        .flex_1()
+        .min_w(px(0.))
+        .flex()
+        .flex_col()
+        .gap(px(16.))
+        .children(
+            preset
+                .as_deref()
+                .is_some_and(shape_applies)
+                .then(|| group("Camera shape").child(div().flex().child(shape))),
+        )
+        .child(
+            group("Background")
+                .child(backgrounds)
+                .child(meta_line(bg_line, t)),
+        );
 
     div()
         .flex()
         .flex_col()
-        .gap(px(16.))
-        .child(
-            // Scene picture stand-in (P1470): composition frame until the
-            // live preview surface mounts inside setup.
-            div()
-                .id("first-run-look-picture")
-                .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .w(px(picture_w))
-                        .h(px(picture_h))
-                        .rounded(px(radius::ROW))
-                        .border_1()
-                        .border_color(hsla(t.border))
-                        .bg(hsla(t.muted))
-                        .flex()
-                        .items_end()
-                        .justify_end()
-                        .p(px(8.))
-                        .child(
-                            div()
-                                .w(px(44.))
-                                .h(px(44.))
-                                .rounded(px(camera_radius))
-                                .bg(hsla(t.accent))
-                                .border_1()
-                                .border_color(hsla(t.border)),
-                        ),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(SectionLabel::new("Orientation"))
-                .child(orientation)
-                .child(
-                    div()
-                        .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
-                        .child("Vertical is for Shorts, Reels and TikTok."),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(SectionLabel::new("Camera shape"))
-                .child(shape),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(SectionLabel::new("Background"))
-                .child(backgrounds)
-                .child(
-                    div()
-                        .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
-                        .child(bg_line),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(SectionLabel::new("Layout"))
-                .child(layouts)
-                .child(
-                    Button::new("first-run-back-permissions")
-                        .label("Back to permissions")
-                        .variant(ButtonVariant::Ghost)
-                        .disabled(locked)
-                        .on_click({
-                            let entity = entity.clone();
-                            move |_, _, cx| {
-                                entity.update(cx, |this, cx| this.go_to(Step::Permissions, cx))
-                            }
-                        }),
-                ),
-        )
+        .gap(px(20.))
+        .child(div().flex().gap(px(20.)).child(left).child(right))
+        .child(group("Layout").child(layouts).children(reason_line))
         .into_any_element()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sound_body(
     screen: &FirstRunScreen,
     snapshot: &videorc_app_core::studio::StudioSnapshot,
@@ -1227,18 +1782,26 @@ fn sound_body(
     locked: bool,
     offline: bool,
     noun: &str,
-    t: &videorc_kit::tokens::Theme,
-    window: &mut Window,
-    cx: &mut Context<FirstRunScreen>,
-) -> gpui::AnyElement {
-    let _ = (window, cx);
-    let mic_id = snapshot.settings.capture.sources.microphone_id.clone();
+    t: &Theme,
+) -> AnyElement {
+    let muted = hsla(t.muted_foreground);
+    let mic_id = snapshot
+        .settings
+        .capture
+        .sources
+        .microphone_id
+        .clone()
+        .unwrap_or_default();
+    // The picker fills the row: the `lg` card's content less the list's
+    // rim and the row's `px-3`.
     let mut picker = Select::new("first-run-microphone")
+        .accessibility_label("Microphone")
         .option("", "Off")
+        .width(card_width(Step::Sound) - 2. * CARD_PADDING - 2. - 24.)
         .disabled(locked || offline)
-        .value(mic_id.clone().map(SharedString::from));
+        .value(Some(SharedString::from(mic_id)));
     for device in &snapshot.sources.devices.devices {
-        if device.kind == videorc_app_core::protocol::DeviceKind::Microphone {
+        if device.kind == DeviceKind::Microphone {
             picker = picker.option(device.id.clone(), device.name.clone());
         }
     }
@@ -1247,102 +1810,161 @@ fn sound_body(
         move |id, _, cx| entity.update(cx, |this, cx| this.pick_microphone(id.to_string(), cx))
     });
 
-    let system_checked = snapshot.settings.capture.audio.system_audio_enabled;
-    let system = Switch::new("first-run-system-audio")
-        .accessibility_label("System audio")
-        .checked(system_checked)
-        .disabled(locked)
-        .on_change({
-            let entity = entity.clone();
-            move |enabled, _, cx| entity.update(cx, |this, cx| this.set_system_audio(enabled, cx))
-        });
-
-    let mic_blocked = !offline
-        && snapshot
-            .settings
-            .capture
-            .sources
-            .microphone_id
-            .as_ref()
-            .is_none_or(|id| id.is_empty());
-
+    // Only a refusal or a never-asked grant blocks the level; an unknown
+    // snapshot keeps the meter.
+    let mic_blocked = grant_missing(&screen.permissions.snapshot().microphone);
     let reading = fr::sound::reading(&screen.samples, now_ms());
     let level_ready = reading.speech_peak_db.is_some();
+    let gain = snapshot.settings.capture.audio.microphone_gain_db;
 
-    let mut column = div().flex().flex_col().gap(px(12.)).child(
-        GroupedList::new()
-            .label("Sound check")
-            .item(ListRow::new("first-run-mic", "Microphone").child(picker)),
-    );
-
+    let mut microphone = div()
+        .flex()
+        .flex_col()
+        .gap(px(10.))
+        .px(px(12.))
+        .py(px(10.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(icon(IconName::Microphone, 16., muted))
+                .child(row_title("Microphone", t)),
+        )
+        .child(picker);
     if mic_blocked {
-        column = column.child(
+        microphone = microphone.child(
             Alert::new("first-run-mic-blocked")
                 .variant(AlertVariant::Warning)
                 .title("Videorc can't hear your microphone yet.")
-                .action(
-                    Button::new("first-run-sound-back-permissions")
-                        .label("Back to permissions")
-                        .variant(ButtonVariant::Ghost)
-                        .on_click({
-                            let entity = entity.clone();
-                            move |_, _, cx| {
-                                entity.update(cx, |this, cx| this.go_to(Step::Permissions, cx))
-                            }
-                        }),
+                .description(
+                    div().pt(px(4.)).child(
+                        Button::new("first-run-sound-back-permissions")
+                            .label("Back to permissions")
+                            .variant(ButtonVariant::Ghost)
+                            .size(ButtonSize::Xs)
+                            .on_click({
+                                let entity = entity.clone();
+                                move |_, _, cx| {
+                                    entity.update(cx, |this, cx| this.go_to(Step::Permissions, cx))
+                                }
+                            }),
+                    ),
                 ),
         );
     } else {
-        column = column.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(segmented_meter(screen.mic_view, t))
-                .child(SectionLabel::new("Microphone gain"))
-                .child(Slider::new(&screen.mic_gain).disabled(locked))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(12.))
-                        .child(
-                            div()
-                                .flex_1()
-                                .type_scale(text::META)
-                                .text_color(hsla(t.muted_foreground))
-                                .child(reading.verdict.copy()),
-                        )
-                        .child(
-                            Button::new("first-run-set-level")
-                                .label("Set level for me")
-                                .variant(ButtonVariant::Outline)
-                                .disabled(locked || !level_ready)
-                                .tooltip(if level_ready {
-                                    "Set level for me"
-                                } else {
-                                    "Talk for a few seconds first."
-                                })
-                                .on_click({
-                                    let entity = entity.clone();
-                                    move |_, _, cx| {
-                                        entity.update(cx, |this, cx| this.set_level_for_me(cx))
-                                    }
-                                }),
-                        ),
+        // `MicrophoneGainFader` in its `SourceControlRow`: Gain, the fader,
+        // the value.
+        let gain_row = div()
+            .min_w(px(0.))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(36.))
+                    .type_scale(text::META)
+                    .text_color(muted)
+                    .child("Gain"),
+            )
+            .child(
+                div().flex_1().min_w(px(0.)).flex().items_center().child(
+                    Slider::new(&screen.mic_gain)
+                        .accessibility_label("Microphone gain")
+                        .disabled(locked),
                 ),
-        );
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .min_w(px(56.))
+                    .flex()
+                    .justify_end()
+                    .font_family(crate::lcd::SCREEN_FONT)
+                    .type_scale(text::META)
+                    .text_color(muted)
+                    .child(format_db(gain)),
+            );
+        microphone = microphone
+            .child(segmented_meter(screen.mic_view, false, t))
+            .child(gain_row)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .type_scale(text::META)
+                            .text_color(muted)
+                            .child(reading.verdict.copy()),
+                    )
+                    .child(
+                        Button::new("first-run-set-level")
+                            .label("Set level for me")
+                            .variant(ButtonVariant::Outline)
+                            .disabled(locked || !level_ready)
+                            .when(!level_ready, |button| {
+                                button.tooltip("Talk for a few seconds first.")
+                            })
+                            .on_click({
+                                let entity = entity.clone();
+                                move |_, _, cx| {
+                                    entity.update(cx, |this, cx| this.set_level_for_me(cx))
+                                }
+                            }),
+                    ),
+            );
     }
 
-    column = column.child(
-        ListRow::new("first-run-system", "System audio")
-            .context(format!(
-                "The sound your {noun} plays: games, music and calls. Its level shows once you record or go live."
-            ))
-            .child(system),
-    );
+    let system_checked = snapshot.settings.capture.audio.system_audio_enabled;
+    let system = div()
+        .flex()
+        .items_start()
+        .gap(px(12.))
+        .px(px(12.))
+        .py(px(10.))
+        .child(
+            div()
+                .flex_none()
+                .mt(px(2.))
+                .child(icon(IconName::Desktop, 16., muted)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(row_title("System audio", t))
+                .child(meta_line(
+                    format!(
+                        "The sound your {noun} plays: games, music and calls. Its level shows once you record or go live."
+                    ),
+                    t,
+                )),
+        )
+        .child(
+            Switch::new("first-run-system-audio")
+                .accessibility_label("System audio")
+                .checked(system_checked)
+                .disabled(locked)
+                .on_change({
+                    let entity = entity.clone();
+                    move |enabled, _, cx| {
+                        entity.update(cx, |this, cx| this.set_system_audio(enabled, cx))
+                    }
+                }),
+        );
 
-    column.into_any_element()
+    GroupedList::new()
+        .item(microphone)
+        .item(system)
+        .into_any_element()
 }
 
 fn destinations_body(
@@ -1350,43 +1972,77 @@ fn destinations_body(
     entity: &Entity<FirstRunScreen>,
     locked: bool,
     offline: bool,
-) -> gpui::AnyElement {
+    t: &Theme,
+) -> AnyElement {
     let platforms = screen.studio.platforms_now();
-    let mut list = GroupedList::new().label("Where you stream");
+    let mut list = GroupedList::new();
     for id in SETUP_PLATFORMS {
         let name = platform_label(id);
-        let account = platforms
-            .accounts
-            .iter()
-            .find(|account| account.platform == id);
+        let account = platforms.account(id);
         let connected = account.is_some_and(|a| a.status == AccountStatus::Connected);
-        let mut row = ListRow::new(name, name).child(
-            Badge::new(if connected {
-                "Connected"
-            } else {
-                "Not connected"
-            })
-            .variant(if connected {
-                BadgeVariant::Success
-            } else {
-                BadgeVariant::Outline
-            }),
+        let unavailable = oauth_unavailable_reason(id).is_some()
+            || platforms.credentials(id).is_some_and(|c| !c.ready);
+        let account_label = account
+            .filter(|_| connected)
+            .map(|a| a.account_label.clone())
+            .filter(|label| !label.is_empty());
+        let words = div()
+            .flex_1()
+            .min_w(px(0.))
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(row_title(name, t))
+                    .child(
+                        StatusBadge::new(if connected {
+                            "Connected"
+                        } else {
+                            "Not connected"
+                        })
+                        .tone(if connected {
+                            StatusTone::Good
+                        } else {
+                            StatusTone::Neutral
+                        }),
+                    )
+                    .children(account_label.map(|label| meta_line(label, t).truncate())),
+            )
+            .children(unavailable.then(|| {
+                meta_line(
+                    format!("Signing in to {name} isn't available in this build."),
+                    t,
+                )
+            }));
+        let sign_in = (!connected && !unavailable).then(|| {
+            Button::new(format!("first-run-signin-{id}"))
+                .label("Sign in…")
+                .variant(ButtonVariant::Outline)
+                .accessibility_label(format!("{name}: Sign in…"))
+                .disabled(locked || offline)
+                .tooltip("Finish sign-in in Destinations.")
+        });
+        list = list.item(
+            div()
+                .flex()
+                .items_start()
+                .gap(px(12.))
+                .px(px(12.))
+                .py(px(10.))
+                .child(platform_glyph(id))
+                .child(words)
+                .children(sign_in),
         );
-        if !connected {
-            row = row.child(
-                Button::new(format!("first-run-signin-{name}"))
-                    .label("Sign in…")
-                    .variant(ButtonVariant::Outline)
-                    .disabled(locked || offline)
-                    .tooltip("Finish sign-in in Destinations."),
-            );
-        }
-        list = list.item(row);
     }
     div()
         .flex()
         .flex_col()
-        .gap(px(12.))
+        .gap(px(16.))
         .children(offline.then(|| {
             Alert::new("first-run-dest-offline")
                 .variant(AlertVariant::Locked)
@@ -1399,9 +2055,12 @@ fn destinations_body(
                 .items_center()
                 .gap(px(12.))
                 .child(
-                    div().flex_1().type_scale(text::META).child(
+                    meta_line(
                         "Using a stream key, TikTok or Instagram? Set it up in Destinations.",
-                    ),
+                        t,
+                    )
+                    .flex_1()
+                    .min_w(px(0.)),
                 )
                 .child(
                     Button::new("first-run-open-destinations")

@@ -81,7 +81,10 @@ impl DestinationsPanel {
     ) -> AnyElement {
         let t = theme::current(window, cx).theme();
         let entity = cx.entity();
-        let mut section = PanelSection::new("destinations-chat-commands").title(SECTION_TITLE);
+        // The lead column's last section: no hairline under it (`last:border-b-0`).
+        let mut section = PanelSection::new("destinations-chat-commands")
+            .title(SECTION_TITLE)
+            .last(true);
 
         if store.load_failed {
             section = section.child(

@@ -22,6 +22,7 @@ use videorc_app_core::studio::camera_background_view::{
 use videorc_kit::command::InputEvent;
 use videorc_kit::dialog::DialogHandle;
 use videorc_kit::input::{Input, InputState};
+use videorc_kit::label::Label;
 use videorc_kit::slider::{Slider, SliderEvent, SliderState};
 use videorc_kit::theme::{TypeScale, hsla};
 use videorc_kit::tokens::{Theme, text};
@@ -741,12 +742,7 @@ impl ScenePage {
                     .items_center()
                     .justify_between()
                     .gap(px(8.))
-                    .child(
-                        div()
-                            .type_scale(text::LABEL)
-                            .text_color(hsla(t.foreground))
-                            .child(label),
-                    )
+                    .child(Label::new(label))
                     .child(
                         div()
                             .type_scale(text::META)
@@ -791,12 +787,7 @@ impl ScenePage {
             .gap(px(4.))
             .min_w_0()
             .flex_1()
-            .child(
-                div()
-                    .type_scale(text::LABEL)
-                    .text_color(hsla(t.foreground))
-                    .child(label),
-            )
+            .child(Label::new(label))
             .child(
                 div()
                     .flex()

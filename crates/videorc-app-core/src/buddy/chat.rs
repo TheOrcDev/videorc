@@ -40,20 +40,41 @@ pub const ACTIVITY_KINDS: [Kind; 14] = [
     Kind::Redemption,
 ];
 
-/// A greeting kind: an Activity kind or one of the two welcomes.
+/// A greeting kind: an Activity kind or one of the five welcomes
+/// (`CohostWelcomeKind`: first-time, returning, and plan 225 D9's regular,
+/// comeback and milestone arrivals).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GreetingKind {
     FirstTime,
     Returning,
+    Regular,
+    Comeback,
+    Milestone,
     Activity(Kind),
 }
 
 impl GreetingKind {
+    /// A welcome (a chat row's arrival), not an Activity kind.
+    pub fn is_welcome(self) -> bool {
+        !matches!(self, GreetingKind::Activity(_))
+    }
+
+    /// `isArrivalWelcomeKind`: the welcomes that carry the arrival fields.
+    pub fn is_arrival(self) -> bool {
+        matches!(
+            self,
+            GreetingKind::Regular | GreetingKind::Comeback | GreetingKind::Milestone
+        )
+    }
+
     /// The wire id (`first-time`, `returning`, `sub-gift`, …).
     pub fn id(self) -> String {
         match self {
             GreetingKind::FirstTime => "first-time".into(),
             GreetingKind::Returning => "returning".into(),
+            GreetingKind::Regular => "regular".into(),
+            GreetingKind::Comeback => "comeback".into(),
+            GreetingKind::Milestone => "milestone".into(),
             GreetingKind::Activity(kind) => serde_json::to_value(kind)
                 .ok()
                 .and_then(|value| value.as_str().map(str::to_string))
@@ -65,6 +86,9 @@ impl GreetingKind {
         match id {
             "first-time" => Some(GreetingKind::FirstTime),
             "returning" => Some(GreetingKind::Returning),
+            "regular" => Some(GreetingKind::Regular),
+            "comeback" => Some(GreetingKind::Comeback),
+            "milestone" => Some(GreetingKind::Milestone),
             other => serde_json::from_value::<Kind>(Value::String(other.into()))
                 .ok()
                 .map(GreetingKind::Activity),
@@ -97,6 +121,9 @@ pub fn title(kind: GreetingKind) -> &'static str {
     match kind {
         GreetingKind::FirstTime => "First-time chatters",
         GreetingKind::Returning => "Returning chatters",
+        GreetingKind::Regular => "Regulars",
+        GreetingKind::Comeback => "Back after a while",
+        GreetingKind::Milestone => "Milestones",
         GreetingKind::Activity(kind) => kind_title(kind),
     }
 }
@@ -105,13 +132,13 @@ pub fn title(kind: GreetingKind) -> &'static str {
 pub fn kind_platforms(kind: GreetingKind) -> &'static [Platform] {
     use Platform::*;
     match kind {
-        GreetingKind::FirstTime | GreetingKind::Returning => &[Twitch, Youtube, Kick, X],
         GreetingKind::Activity(kind) => match kind {
             Kind::Follow => &[Twitch, Kick, X],
             Kind::Membership | Kind::SuperChat | Kind::SuperSticker => &[Youtube],
             Kind::Kicks => &[Kick],
             _ => &[Twitch],
         },
+        _ => &[Twitch, Youtube, Kick, X],
     }
 }
 
@@ -140,6 +167,9 @@ pub fn builtin(kind: GreetingKind) -> (&'static str, CohostUtteranceState) {
     match kind {
         GreetingKind::FirstTime => ("Hi {name}, welcome to the stream!", Talk),
         GreetingKind::Returning => ("Welcome back, {name}!", Talk),
+        GreetingKind::Regular => ("Welcome back, {name}!", Talk),
+        GreetingKind::Comeback => ("Look who's back! Good to see you, {name}.", Talk),
+        GreetingKind::Milestone => ("{name}'s {nth} stream with us! Thank you!", Laugh),
         GreetingKind::Activity(kind) => match kind {
             Kind::Follow => ("Welcome, {name}! Thanks for the follow.", Talk),
             Kind::Sub => ("{name} joined the ranks. Thank you!", Laugh),
@@ -159,8 +189,9 @@ pub fn builtin(kind: GreetingKind) -> (&'static str, CohostUtteranceState) {
     }
 }
 
-/// `BUDDY_TEMPLATE_FIELDS`: (field, hint).
-pub const TEMPLATE_FIELDS: [(&str, &str); 10] = [
+/// `BUDDY_TEMPLATE_FIELDS`: (field, hint), in the order the Fields popover
+/// lists them.
+pub const TEMPLATE_FIELDS: [(&str, &str); 15] = [
     ("name", "Display name"),
     ("handle", "@login where the platform has one"),
     ("platform", "Twitch, YouTube, Kick or X"),
@@ -171,22 +202,37 @@ pub const TEMPLATE_FIELDS: [(&str, &str); 10] = [
     ("reward", "Reward or Power-up title"),
     ("names", "Everyone in a burst"),
     ("others", "How many more in a burst"),
+    // Plan 225 D9: what an arrival knows about the person.
+    ("nth", "Their stream count, as \"10th\""),
+    ("streams", "Streams chatted in"),
+    ("row", "Streams in a row"),
+    ("away", "How long they were away, as \"3 weeks\""),
+    ("since", "Their first chat, as \"March 2026\""),
 ];
 
-/// `BUDDY_WELCOME_FIELDS`: the welcomes take the chatter's own three.
+/// `BUDDY_WELCOME_FIELDS` and `BUDDY_ARRIVAL_FIELDS`: a first-time or
+/// returning welcome takes the chatter's own three, an arrival adds what the
+/// community store knows about the person, and an Activity line takes them
+/// all.
 pub fn fields_for(kind: GreetingKind) -> Vec<(&'static str, &'static str)> {
-    match kind {
-        GreetingKind::FirstTime | GreetingKind::Returning => TEMPLATE_FIELDS
+    let only = |fields: &[&str]| -> Vec<(&'static str, &'static str)> {
+        TEMPLATE_FIELDS
             .iter()
             .copied()
-            .filter(|(field, _)| ["name", "handle", "platform"].contains(field))
-            .collect(),
+            .filter(|(field, _)| fields.contains(field))
+            .collect()
+    };
+    match kind {
         GreetingKind::Activity(_) => TEMPLATE_FIELDS.to_vec(),
+        kind if kind.is_arrival() => only(&[
+            "name", "handle", "platform", "nth", "streams", "row", "away", "since",
+        ]),
+        _ => only(&["name", "handle", "platform"]),
     }
 }
 
 /// `BUDDY_SAMPLE_FIELDS`: name, handle, platform, months, streak, count,
-/// amount, reward.
+/// amount, reward, and an arrival's facts.
 struct Sample {
     name: &'static str,
     handle: &'static str,
@@ -196,6 +242,11 @@ struct Sample {
     count: Option<u32>,
     amount: Option<&'static str>,
     reward: Option<&'static str>,
+    nth: Option<&'static str>,
+    streams: Option<u32>,
+    row: Option<u32>,
+    away: Option<&'static str>,
+    since: Option<&'static str>,
 }
 
 fn sample(kind: GreetingKind) -> Sample {
@@ -208,10 +259,37 @@ fn sample(kind: GreetingKind) -> Sample {
         count: None,
         amount: None,
         reward: None,
+        nth: None,
+        streams: None,
+        row: None,
+        away: None,
+        since: None,
     };
     match kind {
         GreetingKind::FirstTime => base("first_timer", "@first_timer", "Twitch"),
         GreetingKind::Returning => base("regular", "@regular", "YouTube"),
+        GreetingKind::Regular => Sample {
+            nth: Some("14th"),
+            streams: Some(14),
+            row: Some(5),
+            since: Some("March 2026"),
+            ..base("Ada", "@ada", "Twitch")
+        },
+        GreetingKind::Comeback => Sample {
+            nth: Some("7th"),
+            streams: Some(7),
+            row: Some(1),
+            away: Some("3 weeks"),
+            since: Some("May 2026"),
+            ..base("Bo", "@bo", "Kick")
+        },
+        GreetingKind::Milestone => Sample {
+            nth: Some("10th"),
+            streams: Some(10),
+            row: Some(3),
+            since: Some("February 2026"),
+            ..base("Kim", "@kim", "Twitch")
+        },
         GreetingKind::Activity(kind) => match kind {
             Kind::Follow => base("new_friend", "@new_friend", "Twitch"),
             Kind::Sub => base("morgaesis", "morgaesis", "Twitch"),
@@ -293,6 +371,11 @@ fn field_value(sample: &Sample, field: &str) -> Option<String> {
         "amount" => sample.amount.unwrap_or_default().to_string(),
         "reward" => sample.reward.unwrap_or_default().to_string(),
         "others" => String::new(),
+        "nth" => sample.nth.unwrap_or_default().to_string(),
+        "streams" => sample.streams.map(|v| v.to_string()).unwrap_or_default(),
+        "row" => sample.row.map(|v| v.to_string()).unwrap_or_default(),
+        "away" => sample.away.unwrap_or_default().to_string(),
+        "since" => sample.since.unwrap_or_default().to_string(),
         _ => return None,
     })
 }
@@ -393,21 +476,19 @@ pub struct GreetingRow {
     pub warnings: Vec<String>,
 }
 
-/// `greetingWelcomes`.
-pub fn welcomes(greetings: &CohostGreetingsSettings) -> [(GreetingKind, WelcomeLine); 2] {
+/// `greetingWelcomes`, in `COHOST_WELCOME_KINDS` order.
+pub fn welcomes(greetings: &CohostGreetingsSettings) -> [(GreetingKind, WelcomeLine); 5] {
+    let welcomes = &greetings.welcomes;
     [
-        (
-            GreetingKind::FirstTime,
-            greetings.welcomes.first_time.clone(),
-        ),
-        (
-            GreetingKind::Returning,
-            greetings.welcomes.returning.clone(),
-        ),
+        (GreetingKind::FirstTime, welcomes.first_time.clone()),
+        (GreetingKind::Returning, welcomes.returning.clone()),
+        (GreetingKind::Regular, welcomes.regular.clone()),
+        (GreetingKind::Comeback, welcomes.comeback.clone()),
+        (GreetingKind::Milestone, welcomes.milestone.clone()),
     ]
 }
 
-/// The two welcomes' rows.
+/// The welcomes' rows, in `COHOST_WELCOME_KINDS` order.
 pub fn welcome_rows(greetings: &CohostGreetingsSettings, chat_caps: bool) -> Vec<GreetingRow> {
     welcomes(greetings)
         .into_iter()
@@ -677,6 +758,65 @@ mod tests {
         assert_eq!(welcomes[0].title, "First-time chatters");
         assert_eq!(welcomes[0].text, "Hi {name}, welcome to the stream!");
         assert!(welcomes[0].default);
+        // Electron's five welcomes, in its order, each on its built-in line
+        // and none warning about its own fields.
+        let titles: Vec<&str> = welcomes.iter().map(|row| row.title).collect();
+        assert_eq!(
+            titles,
+            [
+                "First-time chatters",
+                "Returning chatters",
+                "Regulars",
+                "Back after a while",
+                "Milestones"
+            ]
+        );
+        assert!(welcomes.iter().all(|row| row.default && row.enabled));
+        assert!(welcomes.iter().all(|row| row.warnings.is_empty()));
+        assert_eq!(
+            welcomes[4].text,
+            "{name}'s {nth} stream with us! Thank you!"
+        );
+        assert_eq!(welcomes[2].key, "welcome:regular");
+    }
+
+    #[test]
+    fn an_arrival_offers_what_the_community_knows() {
+        let fields = |kind: GreetingKind| -> Vec<&'static str> {
+            fields_for(kind)
+                .into_iter()
+                .map(|(field, _)| field)
+                .collect()
+        };
+        assert_eq!(
+            fields(GreetingKind::FirstTime),
+            ["name", "handle", "platform"]
+        );
+        assert_eq!(
+            fields(GreetingKind::Milestone),
+            [
+                "name", "handle", "platform", "nth", "streams", "row", "away", "since"
+            ]
+        );
+        assert_eq!(fields(GreetingKind::Activity(Kind::Follow)).len(), 15);
+        assert_eq!(
+            preview(
+                "{name}'s {nth} stream with us! Thank you!",
+                GreetingKind::Milestone
+            )
+            .0,
+            "Kim's 10th stream with us! Thank you!"
+        );
+        assert_eq!(
+            preview("Back after {away}, {name}", GreetingKind::Comeback).0,
+            "Back after 3 weeks, Bo"
+        );
+        assert_eq!(
+            GreetingKind::parse("comeback"),
+            Some(GreetingKind::Comeback)
+        );
+        assert!(GreetingKind::Regular.is_welcome() && GreetingKind::Regular.is_arrival());
+        assert!(!GreetingKind::Returning.is_arrival());
     }
 
     #[test]

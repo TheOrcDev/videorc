@@ -198,7 +198,13 @@ async function launch({ bins, stateDir }) {
       VIDEORC_APP: 'gpui',
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_SMOKE_STATE_DIR: stateDir,
-      VIDEORC_USER_DATA_DIR: join(stateDir, 'profile')
+      VIDEORC_USER_DATA_DIR: join(stateDir, 'profile'),
+      // The Electron baselines are signed out on Basic, so Premium gates are
+      // locked. The sentinel's backend is a debug build, which resolves no
+      // account to the Developer tier and opens every gate; this downgrade-
+      // only override (`entitlements.rs` `basic_override_enabled`) keeps the
+      // GPUI shots on Basic so locked states compare.
+      VIDEORC_PREMIUM_FEATURES: 'basic'
     },
     spawnSpec: {
       command: bins.app,
@@ -240,18 +246,26 @@ async function seedProfile({ app, stateDir }) {
     delete merged.baselineSink
     const streaming = merged.streaming ?? { enabled: false, mode: 'single', targets: [] }
     streaming.enabled = true
-    streaming.targets = (streaming.targets ?? []).map((target) =>
-      target.id in backend.keys
-        ? {
-            ...target,
-            enabled: true,
-            streamKey: '',
-            streamKeyPresent: true,
-            streamKeySecretRef: backend.keys[target.id],
-            updatedAt: BASELINE_SEED_TIME
-          }
-        : target
-    )
+    // As the Electron baseline's seed (`rust-ui-baseline.mjs`): every seeded
+    // destination holds its fake key, and Custom RTMP points at the local
+    // sink, so both apps read the same destinations as ready.
+    streaming.targets = (streaming.targets ?? []).map((target) => {
+      if (!(target.id in backend.keys)) return target
+      const seeded = {
+        ...target,
+        enabled: true,
+        streamKey: '',
+        streamKeyPresent: true,
+        streamKeySecretRef: backend.keys[target.id],
+        updatedAt: BASELINE_SEED_TIME
+      }
+      if (target.id === 'custom') {
+        seeded.serverUrl = patch.baselineSink.serverUrl
+        seeded.urlMode = 'server-and-key'
+        seeded.authMode = 'manual-rtmp'
+      }
+      return seeded
+    })
     merged.streaming = streaming
     merged.layout = { ...merged.layout, layoutPreset: 'screen-only' }
     merged.lastHorizontalPreset = 'screen-only'

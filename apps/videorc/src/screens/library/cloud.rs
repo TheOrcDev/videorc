@@ -7,13 +7,15 @@ use videorc_kit::{
     empty::Empty,
     kebab_menu::{KebabMenu, KebabMenuItem},
     list_row::{GroupedList, ListRow},
+    page_tabs::PageTabs,
     scroll_area::ScrollArea,
-    tabs::Tabs,
 };
 impl LibraryScreen {
-    pub(super) fn tabs(&self, cx: &mut Context<Self>) -> Tabs {
+    /// `PageTabs`: Local | Cloud in the strip under the toolbar, and the
+    /// region under it.
+    pub(super) fn tabs(&self, cx: &mut Context<Self>) -> PageTabs {
         let entity = cx.entity();
-        Tabs::new("library-tabs")
+        PageTabs::new("library-tabs", videorc_app_core::library::copy::VIEW_LABEL)
             .tab(c::LOCAL_VIEW)
             .tab(c::CLOUD_VIEW)
             .selected(usize::from(self.cloud_shown))
