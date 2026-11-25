@@ -255,6 +255,7 @@ impl RenderOnce for ListRow {
                 .overflow_hidden()
                 .child(icon)
         });
+        let row_name = self.title.clone();
         let words = div()
             .min_w(px(0.0))
             .flex()
@@ -291,7 +292,6 @@ impl RenderOnce for ListRow {
         // (`after:absolute after:inset-0`) and the control sits on top of
         // it, never inside it.
         let stretched = self.on_click.is_some() && self.meta_element.is_some();
-        let row_name = self.title.clone();
         let end = div()
             .flex_none()
             .flex()
