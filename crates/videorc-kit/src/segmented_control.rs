@@ -538,7 +538,10 @@ impl RenderOnce for SegmentedControl {
                     let width = f32::from(bounds.size.width);
                     if (*width_state.read(cx) - width).abs() > 0.5 {
                         width_state.update(cx, |w, _| *w = width);
-                        window.refresh();
+                        // `refresh` is a no-op while the window draws, and prepaint
+                        // is drawing: ask for it from the next frame, where it
+                        // re-renders every view with the new width.
+                        window.on_next_frame(|window, _| window.refresh());
                     }
                 }
             })
