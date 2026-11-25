@@ -156,6 +156,32 @@ pub fn parse_response(response: &[u8]) -> Result<Vec<u8>, RouteError> {
     Ok(body)
 }
 
+/// The picture formats a cached chat image comes in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageKind {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+}
+
+/// What a cached file is, by its first bytes (the route's bytes carry no
+/// name a view could trust); `None` for anything else, which draws the
+/// monogram instead.
+pub fn image_kind(bytes: &[u8]) -> Option<ImageKind> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(ImageKind::Png)
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some(ImageKind::Jpeg)
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(ImageKind::Gif)
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some(ImageKind::Webp)
+    } else {
+        None
+    }
+}
+
 fn dechunk(mut body: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     loop {
@@ -216,6 +242,23 @@ mod tests {
             Err(RouteError::Status(401))
         );
         assert!(parse_response(b"garbage").is_err());
+    }
+
+    #[test]
+    fn a_picture_is_known_by_its_first_bytes() {
+        assert_eq!(
+            image_kind(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"),
+            Some(ImageKind::Png)
+        );
+        assert_eq!(
+            image_kind(&[0xff, 0xd8, 0xff, 0xe0, 0, 0x10]),
+            Some(ImageKind::Jpeg)
+        );
+        assert_eq!(image_kind(b"GIF89a\x01\0"), Some(ImageKind::Gif));
+        assert_eq!(image_kind(b"RIFF\x24\0\0\0WEBPVP8 "), Some(ImageKind::Webp));
+        assert_eq!(image_kind(b"<svg xmlns="), None);
+        assert_eq!(image_kind(b"RIFF"), None);
+        assert_eq!(image_kind(b""), None);
     }
 
     #[tokio::test]

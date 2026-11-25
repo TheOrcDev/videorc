@@ -223,6 +223,7 @@ fn main() -> Result<()> {
                     .chain(screens::settings::EVENTS)
                     .chain(screens::avatar::EVENTS)
                     .chain(screens::sidekick::EVENTS)
+                    .chain(screens::studio::chat::EVENTS)
                     .chain(videorc_app_core::library::LIBRARY_EVENTS)
                     .chain(["session.log"]),
             ),
@@ -549,6 +550,15 @@ fn main() -> Result<()> {
                         cx,
                     )
                 });
+                let chat = cx.new(|cx| {
+                    screens::studio::chat::ChatSection::new(
+                        studio.clone(),
+                        core_handle.clone(),
+                        studio_state.clone(),
+                        studio.live_chat(),
+                        cx,
+                    )
+                });
                 let takeover = cx.new(|cx| {
                     TakeoverSection::new(
                         studio.backend().clone(),
@@ -572,6 +582,7 @@ fn main() -> Result<()> {
                         transport.clone(),
                         preview.clone(),
                         session,
+                        chat,
                         audio,
                         takeover,
                         scenes,

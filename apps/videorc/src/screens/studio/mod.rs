@@ -9,6 +9,7 @@
 //! inspector.
 
 pub mod audio;
+pub mod chat;
 pub mod layout;
 pub mod scenes;
 pub mod session;
@@ -34,6 +35,7 @@ use videorc_preview::lifecycle::WindowMode;
 use crate::preview::Preview;
 
 use audio::AudioSection;
+use chat::ChatSection;
 use layout::{INSPECTOR_MAX_PX, StudioLayout};
 use scenes::ScenesSection;
 use session::SessionSection;
@@ -52,6 +54,8 @@ pub struct StudioPage {
     transport: Entity<Transport>,
     preview: Entity<Preview>,
     session: Entity<SessionSection>,
+    /// Chat in Studio (P188): draws nothing until it shows.
+    chat: Entity<ChatSection>,
     audio: Entity<AudioSection>,
     takeover: Entity<TakeoverSection>,
     /// The Scenes section under the preview (P273: Scenes first in the
@@ -78,6 +82,7 @@ impl StudioPage {
         transport: Entity<Transport>,
         preview: Entity<Preview>,
         session: Entity<SessionSection>,
+        chat: Entity<ChatSection>,
         audio: Entity<AudioSection>,
         takeover: Entity<TakeoverSection>,
         scenes: Entity<ScenesSection>,
@@ -106,6 +111,7 @@ impl StudioPage {
             transport,
             preview,
             session,
+            chat,
             audio,
             takeover,
             scenes,
@@ -310,6 +316,7 @@ impl Render for StudioPage {
             .min_w_0()
             .min_h_0()
             .child(self.session.clone())
+            .child(self.chat.clone())
             .child(self.audio.clone())
             .child(self.takeover.clone());
         let transport = self.transport.clone();
