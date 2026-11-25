@@ -5,11 +5,15 @@
 use std::sync::Arc;
 
 use gpui::{Context, Window, div, prelude::*, px};
+use videorc_app_core::desktop::permissions::PermissionPlatform;
 use videorc_app_core::livestream::accounts::{destination_label, platform_label};
+use videorc_app_core::livestream::captions_preflight::{self, go_live_readiness};
 use videorc_app_core::livestream::copy as dest_copy;
 use videorc_app_core::livestream::go_live_copy as copy;
-use videorc_app_core::livestream::golive::{self, DialogView};
+use videorc_app_core::livestream::golive::{self, CaptionsStatus, DialogView};
+use videorc_app_core::livestream::plan;
 use videorc_app_core::livestream::targets::{self, Target};
+use videorc_app_core::studio::captions_readiness::captions_platform_unavailable_reason;
 use videorc_app_core::studio::go_live::GoLiveState;
 use videorc_app_core::{BackendClient, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
@@ -39,6 +43,12 @@ pub struct GoLiveDialog {
     excluded: Vec<Target>,
     has_scheduled: bool,
     has_instant: bool,
+    title_issue: Option<String>,
+    description_issue: Option<String>,
+    entitlement: Option<String>,
+    captions: CaptionsStatus,
+    /// "Go live without captions this time".
+    suppress_captions: bool,
 }
 
 impl GoLiveDialog {
@@ -77,6 +87,11 @@ impl GoLiveDialog {
             excluded: Vec::new(),
             has_scheduled: false,
             has_instant: false,
+            title_issue: None,
+            description_issue: None,
+            entitlement: None,
+            captions: CaptionsStatus::Hidden,
+            suppress_captions: false,
         };
         panel.rebuild(cx);
         panel
@@ -110,11 +125,44 @@ impl GoLiveDialog {
             .and_then(|s| s.get("throughVideorcCloud"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let captions_enabled = capture
+            .get("captions")
+            .and_then(|c| c.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let platform = match PermissionPlatform::current() {
+            PermissionPlatform::Other => "linux",
+            _ => "darwin",
+        };
+        let platform_unavailable = captions_platform_unavailable_reason(platform);
+        let recording = plan::recording_video(capture);
+        let stream_plan = plan::go_live_plan(capture, &recording, false);
+        let output_rule = captions_preflight::session_output_readiness(
+            captions_preflight::BurnTarget::Stream,
+            capture
+                .get("recordEnabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            capture
+                .get("streamEnabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            &recording,
+            std::slice::from_ref(&stream_plan.stream_video),
+        );
+        let readiness = go_live_readiness(
+            captions_enabled,
+            self.suppress_captions,
+            None,
+            output_rule,
+            platform_unavailable,
+        );
+        let captions = golive::captions_status(&readiness);
         let gate = golive::confirm_gate(
             state.preflight.as_ref(),
             details.draft.as_ref(),
             &sent,
-            false,
+            readiness.blocks_start,
             None,
             false,
         );
@@ -138,7 +186,11 @@ impl GoLiveDialog {
             || self.through_cloud != through_cloud
             || self.excluded != excluded
             || self.has_scheduled != gate.has_scheduled
-            || self.has_instant != gate.has_instant;
+            || self.has_instant != gate.has_instant
+            || self.title_issue != gate.title_issue
+            || self.description_issue != gate.description_issue
+            || self.entitlement != gate.entitlement
+            || self.captions != captions;
         self.state = state;
         self.view = gate.view;
         self.gate_blocked = gate.blocked;
@@ -147,6 +199,13 @@ impl GoLiveDialog {
         self.excluded = excluded;
         self.has_scheduled = gate.has_scheduled;
         self.has_instant = gate.has_instant;
+        self.title_issue = gate.title_issue;
+        self.description_issue = gate.description_issue;
+        self.entitlement = gate.entitlement;
+        self.captions = captions;
+        if !self.state.open {
+            self.suppress_captions = false;
+        }
         if changed {
             cx.notify();
         }
@@ -400,6 +459,20 @@ impl Render for GoLiveDialog {
         let entity = cx.entity();
         let mut body = div().flex().flex_col().gap(px(12.));
 
+        if let Some(entitlement) = &self.entitlement {
+            body = body.child(
+                Alert::new("go-live-entitlement")
+                    .variant(AlertVariant::Locked)
+                    .title(entitlement.clone())
+                    .action(
+                        Button::new("go-live-view-premium")
+                            .label(dest_copy::VIEW_PREMIUM)
+                            .variant(ButtonVariant::Outline)
+                            .on_click(|_, _, cx| cx.open_url("https://videorc.com/premium")),
+                    ),
+            );
+        }
+
         if self.has_scheduled {
             let others = if self.has_instant {
                 copy::SCHEDULED_OTHERS
@@ -411,6 +484,86 @@ impl Render for GoLiveDialog {
                     .variant(AlertVariant::Warning)
                     .title(copy::scheduled_starts_now(others)),
             );
+        }
+
+        if let Some(issue) = &self.title_issue {
+            body = body.child(
+                Alert::new("go-live-title")
+                    .variant(AlertVariant::Destructive)
+                    .title(issue.clone()),
+            );
+        }
+        if let Some(issue) = &self.description_issue {
+            body = body.child(
+                Alert::new("go-live-description")
+                    .variant(AlertVariant::Destructive)
+                    .title(issue.clone()),
+            );
+        }
+
+        match &self.captions {
+            CaptionsStatus::Blocked { description } => {
+                let entity = cx.entity();
+                body = body.child(
+                    Alert::new("go-live-captions-blocked")
+                        .variant(AlertVariant::Destructive)
+                        .title(copy::CAPTIONS_CANT_START)
+                        .description(description.clone())
+                        .action(
+                            Button::new("go-live-without-captions")
+                                .label(copy::GO_LIVE_WITHOUT_CAPTIONS)
+                                .variant(ButtonVariant::Outline)
+                                .on_click(move |_, _, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.suppress_captions = true;
+                                        this.rebuild(cx);
+                                    })
+                                }),
+                        ),
+                );
+            }
+            CaptionsStatus::Skipped { description } => {
+                body = body.child(
+                    Alert::new("go-live-captions-skipped")
+                        .variant(AlertVariant::Warning)
+                        .title(copy::NO_CAPTIONS_THIS_TIME)
+                        .description(description.clone()),
+                );
+            }
+            CaptionsStatus::Row { good, description } => {
+                body = body.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .type_scale(text::LABEL)
+                                .text_color(hsla(t.muted_foreground))
+                                .child(copy::CAPTIONS),
+                        )
+                        .child(
+                            Badge::new(if *good {
+                                READY.to_string()
+                            } else {
+                                copy::CAPTIONS_NOT_READY.to_string()
+                            })
+                            .variant(if *good {
+                                BadgeVariant::Success
+                            } else {
+                                BadgeVariant::Warning
+                            }),
+                        )
+                        .child(
+                            div()
+                                .type_scale(text::META)
+                                .text_color(hsla(t.muted_foreground))
+                                .child(description.clone()),
+                        ),
+                );
+            }
+            CaptionsStatus::Hidden => {}
         }
 
         body = body.child(
