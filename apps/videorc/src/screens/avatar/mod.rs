@@ -10,6 +10,7 @@
 mod library;
 mod persona;
 mod pictures;
+mod reactions;
 mod status;
 
 use std::path::PathBuf;
@@ -155,8 +156,11 @@ pub struct AvatarScreen {
     /// "About you": the avatar's notes (`cohost.settings` `notes`).
     notes: Option<String>,
     persona_fields: Option<persona::PersonaFields>,
-    /// A failed save in Name and personality.
-    persona_error: Option<String>,
+    /// The last failed persona save, and the section that shows it.
+    save_error: Option<(reactions::SaveSection, String)>,
+    /// `cohost.pet.list`: the worn pack's reactions.
+    packs: Vec<reactions::PackSummary>,
+    motion: Option<reactions::MotionWidgets>,
     placement: Option<Placement>,
     library: Option<LibraryState>,
     /// `aiCapabilities.cohost.buddyLibrary.alive`: the web keeps imports.
@@ -200,7 +204,9 @@ impl AvatarScreen {
             persona: None,
             notes: None,
             persona_fields: None,
-            persona_error: None,
+            save_error: None,
+            packs: Vec::new(),
+            motion: None,
             placement: None,
             library: None,
             library_alive: false,
@@ -282,6 +288,7 @@ impl AvatarScreen {
     /// The persona, the cached library (no network) and the overlay's
     /// switches.
     fn refresh(&self, cx: &mut Context<Self>) {
+        self.refresh_packs(cx);
         let studio = self.studio.clone();
         let read = self.runtime.spawn(async move {
             let backend = studio.backend().clone();
@@ -684,31 +691,45 @@ impl Render for AvatarScreen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_dialogs(window, cx);
         self.ensure_persona_fields(window, cx);
-        let body = match self.tab {
-            Tab::Profile => div()
-                .flex()
-                .flex_col()
-                .child(status::render_status(self, window, cx))
-                .child(
+        self.ensure_motion(window, cx);
+        let body =
+            match self.tab {
+                Tab::Profile => div()
+                    .flex()
+                    .flex_col()
+                    .child(status::render_status(self, window, cx))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(size::GUTTER))
+                            .p(px(size::GUTTER))
+                            .child(library::render_library(self, window, cx))
+                            .children(persona::render_persona(self, window, cx))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap(px(size::GUTTER))
+                                    .children(reactions::render_reactions(self, window, cx).map(
+                                        |section| div().flex_1().min_w(px(420.)).child(section),
+                                    ))
+                                    .children(reactions::render_motion(self, window, cx).map(
+                                        |section| div().flex_1().min_w(px(420.)).child(section),
+                                    )),
+                            ),
+                    )
+                    .into_any_element(),
+                Tab::Greetings => {
+                    let t = theme::resolve(None, window, cx);
                     div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(size::GUTTER))
                         .p(px(size::GUTTER))
-                        .child(library::render_library(self, window, cx))
-                        .children(persona::render_persona(self, window, cx)),
-                )
-                .into_any_element(),
-            Tab::Greetings => {
-                let t = theme::resolve(None, window, cx);
-                div()
-                    .p(px(size::GUTTER))
-                    .type_scale(text::META)
-                    .text_color(hsla(t.muted_foreground))
-                    .child("Greetings come in their own Phase 3 PR.")
-                    .into_any_element()
-            }
-        };
+                        .type_scale(text::META)
+                        .text_color(hsla(t.muted_foreground))
+                        .child("Greetings come in their own Phase 3 PR.")
+                        .into_any_element()
+                }
+            };
 
         let entity = cx.entity();
         let mut tabs = PageTabs::new("avatar-page", words::AVATAR_TABS_LABEL);
