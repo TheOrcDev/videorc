@@ -19,14 +19,6 @@ pub struct ReduceMotion(pub bool);
 
 impl Global for ReduceMotion {}
 
-/// A look forced on every window, light or dark, whatever the system shows
-/// (the smoke driver's `ui-appearance`, for screenshots). `None` follows the
-/// window's own appearance.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ForcedDark(pub Option<bool>);
-
-impl Global for ForcedDark {}
-
 /// Whether motion is allowed now.
 pub fn motion(cx: &App) -> bool {
     !cx.try_global::<ReduceMotion>().is_some_and(|it| it.0)
@@ -35,12 +27,7 @@ pub fn motion(cx: &App) -> bool {
 /// The appearance `window` shows now.
 pub fn current(window: &Window, cx: &App) -> Appearance {
     let increase_contrast = cx.try_global::<IncreaseContrast>().is_some_and(|it| it.0);
-    let shown = match cx.try_global::<ForcedDark>().and_then(|it| it.0) {
-        Some(true) => WindowAppearance::Dark,
-        Some(false) => WindowAppearance::Light,
-        None => window.appearance(),
-    };
-    Appearance::of(shown, increase_contrast)
+    Appearance::of(window.appearance(), increase_contrast)
 }
 
 /// The theme a component draws with: the one it was given (the gallery
