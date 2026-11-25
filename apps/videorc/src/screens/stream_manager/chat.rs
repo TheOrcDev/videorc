@@ -4,6 +4,7 @@
 //! corner pick writes the highlight's place into the overlay layout
 //! (Electron's `snapHighlightToAnchor`).
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ use tokio::sync::watch;
 use videorc_app_core::chat::LiveChat;
 use videorc_app_core::chat::highlight::FAILURE_SHOWN_FOR;
 use videorc_app_core::chat::highlight_driver::{self as driver, ChatHighlight};
+use videorc_app_core::chat::images;
 use videorc_app_core::chat::model::CommentHighlightState;
 use videorc_app_core::chat::model::{LiveChatMessage, LiveChatProviderState};
 use videorc_app_core::chat::store::DeliveryCursor;
@@ -58,6 +60,10 @@ use videorc_kit::{
 use super::SharedStudio;
 use super::layout::{Tier, full_labels};
 use super::rows::{OnHighlight, OnRemove, chat_row};
+use crate::screens::chat_media::{self, Picture};
+
+/// How many emote/GIF pictures to keep for the visible chat.
+const MEDIA_CACHE: usize = 512;
 
 const UNDO: &str = "Undo";
 
@@ -157,6 +163,8 @@ pub struct ChatPane {
     /// `overlays.layout`, once read: the card's rects.
     overlay_layout: Option<Value>,
     anchor: HighlightAnchor,
+    /// Emote and GIF pictures (P198), keyed by remote URL.
+    pictures: Rc<HashMap<String, Picture>>,
     _search: Subscription,
     _draft: Subscription,
 }
@@ -287,6 +295,7 @@ impl ChatPane {
             session_id,
             overlay_layout: None,
             anchor: HighlightAnchor::default(),
+            pictures: Rc::new(HashMap::new()),
             _search: search_sub,
             _draft: draft_sub,
         };
@@ -376,10 +385,12 @@ impl ChatPane {
             room_open,
             self.overlay_layout.as_ref(),
         );
-        let click = match self
-            .highlight
-            .click(&message, self.session_id.as_deref(), &canvas)
-        {
+        let click = match self.highlight.click(
+            &message,
+            self.session_id.as_deref(),
+            &canvas,
+            self.anchor.id(),
+        ) {
             Ok(click) => click,
             Err(mark) => {
                 self.expire_later(mark, cx);
@@ -548,7 +559,72 @@ impl ChatPane {
                 self.incomplete = true;
             }
         }
+        self.warm_media(cx);
         cx.notify();
+    }
+
+    /// Cache emote and GIF pictures for the rows on screen (P198).
+    fn warm_media(&mut self, cx: &mut Context<Self>) {
+        let mut wanted: Vec<(String, bool)> = Vec::new();
+        for message in &self.messages {
+            let row = videorc_app_core::stream_manager::rows::ManagerRow::new(
+                message,
+                videorc_app_core::chat::highlight::RowHighlight::default(),
+                self.live,
+                &self.mention_names,
+            );
+            for (url, as_gif) in chat_media::media_urls(&row.pieces, &row.gifs) {
+                if !self.pictures.contains_key(&url)
+                    && !wanted.iter().any(|(existing, _)| existing == &url)
+                {
+                    wanted.push((url, as_gif));
+                }
+            }
+        }
+        if self.pictures.len() + wanted.len() > MEDIA_CACHE {
+            let keep: std::collections::HashSet<String> = self
+                .messages
+                .iter()
+                .flat_map(|message| {
+                    let row = videorc_app_core::stream_manager::rows::ManagerRow::new(
+                        message,
+                        videorc_app_core::chat::highlight::RowHighlight::default(),
+                        self.live,
+                        &self.mention_names,
+                    );
+                    chat_media::media_urls(&row.pieces, &row.gifs)
+                        .into_iter()
+                        .map(|(url, _)| url)
+                })
+                .collect();
+            Rc::make_mut(&mut self.pictures).retain(|url, _| keep.contains(url));
+        }
+        for (url, as_gif) in wanted {
+            self.load_picture(url, as_gif, cx);
+        }
+    }
+
+    fn load_picture(&mut self, url: String, as_gif: bool, cx: &mut Context<Self>) {
+        if self.pictures.contains_key(&url) {
+            return;
+        }
+        Rc::make_mut(&mut self.pictures).insert(url.clone(), Picture::Loading);
+        let backend = self.studio.backend().clone();
+        let remote = url.clone();
+        let kind = chat_media::cache_kind_for_url(&remote, as_gif);
+        let job = self.runtime.spawn(async move {
+            let local = driver::cache_image_as(&*backend, &remote, kind).await?;
+            let bytes = images::read_route(&local).await.ok()?;
+            Some(chat_media::picture_from_bytes(bytes))
+        });
+        cx.spawn(async move |this, cx| {
+            let picture = job.await.ok().flatten().unwrap_or(Picture::Failed);
+            let _ = this.update(cx, |pane, cx| {
+                Rc::make_mut(&mut pane.pictures).insert(url, picture);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Whether a flagged message can still be removed (P1268).
@@ -1074,6 +1150,7 @@ impl Render for ChatPane {
         let providers = self.providers.clone();
         let latest = latest_by_message(&self.operations);
         let requesting = self.requesting.clone();
+        let pictures = self.pictures.clone();
         let completion_scroll = ScrollHandle::new();
         let show_jump = !self.following && !shown.is_empty();
         let (jump_label, jump_name) = view::jump_chip(self.unread, self.incomplete);
@@ -1133,6 +1210,7 @@ impl Render for ChatPane {
                                 &providers,
                                 operation,
                                 in_flight,
+                                &pictures,
                                 on_highlight.clone(),
                                 on_remove.clone(),
                             )

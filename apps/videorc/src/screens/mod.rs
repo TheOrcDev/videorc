@@ -2,6 +2,7 @@
 
 pub mod avatar;
 pub mod captions;
+pub mod chat_media;
 pub mod command_palette;
 pub mod destinations;
 pub mod dialogs;
