@@ -424,6 +424,8 @@ async fn session(
 
 /// The player's element, owned by the UI thread: on Linux its own
 /// presenter, which the Library page places on the player's slot.
+// Windows keeps the placement for the presenter S2.3b brings.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct PlaybackElement {
     feed: Option<PlaybackFeed>,
     #[cfg(target_os = "linux")]
