@@ -23,13 +23,16 @@ use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle, DialogSize};
 use videorc_kit::empty::Empty;
+use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
-use videorc_kit::list_row::{GroupedList, ListRow};
+use videorc_kit::kebab_menu::{KEBAB_HOST, KebabMenu, KebabMenuItem, KebabReveal};
+use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::scroll_area::ScrollArea;
 use videorc_kit::section_label::SectionLabel;
-use videorc_kit::theme::{self, FONT, TypeScale, hsla};
-use videorc_kit::tokens::{radius, size, text};
+use videorc_kit::spinner::Spinner;
+use videorc_kit::theme::{self, FONT, TypeScale, hsla, with_alpha};
+use videorc_kit::tokens::{Theme, radius, size, text};
 
 use crate::app::shell::Shell;
 
@@ -624,6 +627,65 @@ fn ghost_btn(
         .on_click(on_click)
 }
 
+/// A Gallery picture tile (`PresetTile`, `LiveBackgroundTile`): a 16:9
+/// frame on a hairline (`rounded-row border`, `hover:border-foreground/30`)
+/// with its name strip along the bottom (`px-2 pt-5 pb-1`, the name at
+/// text-xs medium) and, for a live background, its outline Live tag.
+fn picture_tile(
+    id: SharedString,
+    name: SharedString,
+    live: bool,
+    t: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .relative()
+        .w_full()
+        .min_w(px(0.))
+        .aspect_ratio(16. / 9.)
+        .flex()
+        .items_end()
+        .overflow_hidden()
+        .rounded(px(radius::ROW))
+        .border_1()
+        .border_color(hsla(t.border))
+        .hover(|style| style.border_color(hsla(with_alpha(t.foreground, 0.3))))
+        .bg(hsla(t.muted))
+        .child(
+            div()
+                .w_full()
+                .min_w(px(0.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(8.))
+                .pt(px(20.))
+                .pb(px(4.))
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .truncate()
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(hsla(t.foreground))
+                        .child(name),
+                )
+                .when(live, |strip| {
+                    strip.child(
+                        div()
+                            .flex_none()
+                            .child(Badge::new(assets::LIVE_BADGE).variant(BadgeVariant::Outline)),
+                    )
+                }),
+        )
+}
+
+/// `Gallery rowsOfFive`: five 16:9 tiles a row, `gap-3`.
+fn gallery() -> gpui::Div {
+    div().grid().grid_cols(5).gap(px(12.))
+}
+
 impl Render for ImagesPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme::current(window, cx).theme();
@@ -650,9 +712,16 @@ impl Render for ImagesPanel {
         let bg_import_btn = |id: &'static str| {
             let entity = entity.clone();
             Button::new(id)
-                .label(assets::background_import_label(bg_importing))
                 .variant(ButtonVariant::Outline)
                 .disabled(offline || bg_importing)
+                .child(if bg_importing {
+                    Spinner::new(SharedString::from(format!("{id}-spinner")))
+                        .size(16.)
+                        .into_any_element()
+                } else {
+                    icon(IconName::ImageSquare, 16., hsla(t.foreground)).into_any_element()
+                })
+                .child(assets::background_import_label(bg_importing))
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |panel, cx| panel.import_background(cx));
                 })
@@ -664,32 +733,30 @@ impl Render for ImagesPanel {
                 .child(bg_import_btn("images-import-bg-empty"))
                 .into_any_element()
         } else {
-            let mut grid = div().flex().flex_wrap().gap(px(8.));
+            let mut grid = gallery();
             for row in &self.backgrounds {
-                grid = grid.child(
-                    div()
-                        .id(format!("bg-asset-{}", row.id))
-                        .w(px(120.))
-                        .h(px(72.))
-                        .rounded(px(radius::CHIP))
-                        .border_1()
-                        .border_color(hsla(t.border))
-                        .bg(hsla(t.muted))
-                        .flex()
-                        .items_end()
-                        .px(px(8.))
-                        .py(px(6.))
-                        .child(
-                            div()
-                                .type_scale(text::META)
-                                .text_color(hsla(t.foreground))
-                                .child(row.name.clone()),
-                        ),
-                );
+                grid = grid.child(picture_tile(
+                    SharedString::from(format!("bg-asset-{}", row.id)),
+                    SharedString::from(row.name.clone()),
+                    false,
+                    t,
+                ));
             }
             grid.into_any_element()
         };
+        // Backgrounds: the Live group, then the Images group, each a label
+        // over its gallery (`flex flex-col gap-2`).
+        let mut live_grid = gallery();
+        for id in assets::live_backgrounds_offered() {
+            live_grid = live_grid.child(picture_tile(
+                SharedString::from(format!("live-bg-{id}")),
+                SharedString::from(assets::live_background_name(id)),
+                true,
+                t,
+            ));
+        }
         let backgrounds = PanelSection::new("images-backgrounds")
+            .icon(icon(IconName::ImageSquare, 16., hsla(t.muted_foreground)))
             .title(assets::BACKGROUNDS)
             .description(assets::BACKGROUNDS_DESCRIPTION)
             .action(bg_import_btn("images-import-bg"))
@@ -699,186 +766,183 @@ impl Render for ImagesPanel {
                     .flex_col()
                     .gap(px(8.))
                     .child(SectionLabel::new(assets::LIVE_GROUP))
-                    .child({
-                        let mut grid = div().flex().flex_wrap().gap(px(8.));
-                        for id in assets::live_backgrounds_offered() {
-                            grid = grid.child(
-                                div()
-                                    .id(format!("live-bg-{id}"))
-                                    .w(px(120.))
-                                    .h(px(72.))
-                                    .rounded(px(radius::CHIP))
-                                    .border_1()
-                                    .border_color(hsla(t.border))
-                                    .bg(hsla(t.muted))
-                                    .flex()
-                                    .items_end()
-                                    .px(px(8.))
-                                    .py(px(6.))
-                                    .child(
-                                        div()
-                                            .type_scale(text::META)
-                                            .text_color(hsla(t.foreground))
-                                            .child(assets::live_background_name(id)),
-                                    ),
-                            );
-                        }
-                        grid
-                    })
+                    .child(live_grid),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
                     .child(SectionLabel::new(assets::IMAGES_GROUP))
                     .child(image_tiles),
             );
 
         let banner_reason =
             assets::banner_import_blocked_reason(offline, self.banner_import, self.banners.len());
+        // Import image… and Import HTML…, side by side (plan 232): each
+        // wears its mark, or a spinner while its import runs.
+        let banner_import = |id: &'static str, kind: BannerImportKind| {
+            let entity = entity.clone();
+            let reason = banner_reason;
+            let running = self.banner_import != ImportPhase::Idle && self.banner_kind == kind;
+            // Electron's CodeIcon leads Import HTML…; the kit has no Code
+            // glyph yet, so that button goes without one.
+            let glyph = if running {
+                Some(
+                    Spinner::new(SharedString::from(format!("{id}-spinner")))
+                        .size(16.)
+                        .into_any_element(),
+                )
+            } else if kind == BannerImportKind::Image {
+                Some(icon(IconName::ImageSquare, 16., hsla(t.foreground)).into_any_element())
+            } else {
+                None
+            };
+            let mut button = Button::new(id)
+                .variant(ButtonVariant::Outline)
+                .disabled(reason.is_some())
+                .children(glyph)
+                .child(assets::banner_import_label(
+                    self.banner_import,
+                    kind,
+                    self.banner_kind,
+                ));
+            if let Some(reason) = reason {
+                button = button.tooltip(reason);
+            }
+            button.on_click(move |_, _, cx| {
+                if reason.is_none() {
+                    entity.update(cx, |panel, cx| panel.import_banner(kind, cx));
+                }
+            })
+        };
         let banner_actions = div()
             .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_end()
             .gap(px(8.))
-            .child({
-                let entity = entity.clone();
-                let reason = banner_reason;
-                Button::new("banner-import-image")
-                    .label(assets::banner_import_label(
-                        self.banner_import,
-                        BannerImportKind::Image,
-                        self.banner_kind,
-                    ))
-                    .variant(ButtonVariant::Outline)
-                    .disabled(reason.is_some())
-                    .on_click(move |_, _, cx| {
-                        if reason.is_none() {
-                            entity.update(cx, |panel, cx| {
-                                panel.import_banner(BannerImportKind::Image, cx)
-                            });
-                        }
-                    })
-            })
-            .child({
-                let entity = entity.clone();
-                let reason = banner_reason;
-                Button::new("banner-import-html")
-                    .label(assets::banner_import_label(
-                        self.banner_import,
-                        BannerImportKind::Html,
-                        self.banner_kind,
-                    ))
-                    .variant(ButtonVariant::Outline)
-                    .disabled(reason.is_some())
-                    .on_click(move |_, _, cx| {
-                        if reason.is_none() {
-                            entity.update(cx, |panel, cx| {
-                                panel.import_banner(BannerImportKind::Html, cx)
-                            });
-                        }
-                    })
-            });
+            .child(banner_import(
+                "banner-import-image",
+                BannerImportKind::Image,
+            ))
+            .child(banner_import("banner-import-html", BannerImportKind::Html));
 
         let mut banners_section = PanelSection::new("images-banners")
+            .icon(icon(IconName::ImageSquare, 16., hsla(t.muted_foreground)))
             .title(assets::BANNERS)
             .description(assets::BANNERS_DESCRIPTION)
             .action(banner_actions);
         if offline {
             // Alert already shown above.
         } else if !self.banners.is_empty() {
-            let mut list = GroupedList::new().label(assets::BANNERS);
+            let shown_count = self.banners.iter().filter(|banner| banner.shown).count();
+            // Electron names the list for assistive tech only.
+            let mut list = GroupedList::new();
             for (index, banner) in self.banners.iter().enumerate() {
                 let id = banner.id.clone();
                 let shown = banner.shown;
                 let first = index == 0;
                 let last = index + 1 == self.banners.len();
+                let show_blocked = !shown && shown_count >= assets::BANNER_MAX_SHOWN;
+
+                // `BannerTile`'s menu: Show or Hide and Place on Scene, then
+                // Rename…, then the order, then Delete….
+                let mut show =
+                    KebabMenuItem::new("show", if shown { assets::HIDE } else { assets::SHOW }, {
+                        let entity = entity.clone();
+                        let id = id.clone();
+                        move |_, cx| {
+                            entity
+                                .update(cx, |panel, cx| panel.toggle_banner(id.clone(), shown, cx))
+                        }
+                    })
+                    .group("use");
+                if show_blocked {
+                    show = show
+                        .disabled(true)
+                        .disabled_reason(assets::BANNER_SHOWN_LIMIT_REASON);
+                }
+                let place = KebabMenuItem::new("place", assets::PLACE_ON_SCENE, {
+                    let entity = entity.clone();
+                    move |window, cx| {
+                        entity.update(cx, |panel, cx| panel.place_on_scene(window, cx))
+                    }
+                })
+                .group("use");
+                let rename = KebabMenuItem::new("rename", assets::RENAME_ELLIPSIS, {
+                    let entity = entity.clone();
+                    let banner = banner.clone();
+                    move |window, cx| {
+                        entity.update(cx, |panel, cx| {
+                            panel.open_rename_banner(&banner, window, cx)
+                        })
+                    }
+                })
+                .group("edit");
+                let mut earlier = KebabMenuItem::new("move-earlier", assets::MOVE_EARLIER, {
+                    let entity = entity.clone();
+                    let id = id.clone();
+                    move |_, cx| {
+                        entity.update(cx, |panel, cx| panel.move_banner(id.clone(), true, cx))
+                    }
+                })
+                .group("order");
+                if first {
+                    earlier = earlier
+                        .disabled(true)
+                        .disabled_reason(assets::BANNER_ALREADY_FIRST);
+                }
+                let mut later = KebabMenuItem::new("move-later", assets::MOVE_LATER, {
+                    let entity = entity.clone();
+                    let id = id.clone();
+                    move |_, cx| {
+                        entity.update(cx, |panel, cx| panel.move_banner(id.clone(), false, cx))
+                    }
+                })
+                .group("order");
+                if last {
+                    later = later
+                        .disabled(true)
+                        .disabled_reason(assets::BANNER_ALREADY_LAST);
+                }
+                let delete = KebabMenuItem::new("delete", assets::DELETE_ELLIPSIS, {
+                    let entity = entity.clone();
+                    let id = id.clone();
+                    move |window, cx| {
+                        entity.update(cx, |panel, cx| {
+                            panel.ask_delete_banner(id.clone(), window, cx)
+                        })
+                    }
+                })
+                .destructive(true)
+                .group("delete");
+
                 let mut row = ListRow::new(format!("banner-{}", banner.id), banner.name.clone())
+                    .grouped()
                     .context(format!("{} × {}", banner.width, banner.height));
+                if banner.kind == videorc_app_core::protocol::BannerKind::Html {
+                    row = row.child(Badge::new(assets::HTML_BADGE).variant(BadgeVariant::Outline));
+                }
                 if shown {
-                    row = row.child(Badge::new(assets::SHOWING).variant(BadgeVariant::Success));
+                    // `InUseChip label="Showing"`: the default Badge.
+                    row = row.child(Badge::new(assets::SHOWING));
                 }
                 row = row.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .child(ghost_btn(
-                            format!("banner-show-{id}"),
-                            if shown { assets::HIDE } else { assets::SHOW },
-                            offline,
-                            {
-                                let entity = entity.clone();
-                                let id = id.clone();
-                                move |_, _, cx| {
-                                    entity.update(cx, |panel, cx| {
-                                        panel.toggle_banner(id.clone(), shown, cx)
-                                    })
-                                }
-                            },
-                        ))
-                        .child(ghost_btn(
-                            format!("banner-place-{id}"),
-                            assets::PLACE_ON_SCENE,
-                            offline,
-                            {
-                                let entity = entity.clone();
-                                move |_, window, cx| {
-                                    entity.update(cx, |panel, cx| panel.place_on_scene(window, cx))
-                                }
-                            },
-                        ))
-                        .child(ghost_btn(
-                            format!("banner-rename-{id}"),
-                            assets::RENAME_ELLIPSIS,
-                            offline,
-                            {
-                                let entity = entity.clone();
-                                let banner = banner.clone();
-                                move |_, window, cx| {
-                                    entity.update(cx, |panel, cx| {
-                                        panel.open_rename_banner(&banner, window, cx)
-                                    })
-                                }
-                            },
-                        ))
-                        .child(ghost_btn(
-                            format!("banner-earlier-{id}"),
-                            assets::MOVE_EARLIER,
-                            offline || first,
-                            {
-                                let entity = entity.clone();
-                                let id = id.clone();
-                                move |_, _, cx| {
-                                    entity.update(cx, |panel, cx| {
-                                        panel.move_banner(id.clone(), true, cx)
-                                    })
-                                }
-                            },
-                        ))
-                        .child(ghost_btn(
-                            format!("banner-later-{id}"),
-                            assets::MOVE_LATER,
-                            offline || last,
-                            {
-                                let entity = entity.clone();
-                                let id = id.clone();
-                                move |_, _, cx| {
-                                    entity.update(cx, |panel, cx| {
-                                        panel.move_banner(id.clone(), false, cx)
-                                    })
-                                }
-                            },
-                        ))
-                        .child(ghost_btn(
-                            format!("banner-delete-{id}"),
-                            assets::DELETE_ELLIPSIS,
-                            offline,
-                            {
-                                let entity = entity.clone();
-                                let id = id.clone();
-                                move |_, window, cx| {
-                                    entity.update(cx, |panel, cx| {
-                                        panel.ask_delete_banner(id.clone(), window, cx)
-                                    })
-                                }
-                            },
-                        )),
+                    KebabMenu::new(
+                        SharedString::from(format!("banner-actions-{id}")),
+                        vec![show, place, rename, earlier, later, delete],
+                    )
+                    .label(format!("Actions for {}", banner.name))
+                    .disabled(offline)
+                    .reveal(KebabReveal::Hover),
                 );
-                list = list.item(row);
+                list = list.item(
+                    div()
+                        .id(SharedString::from(format!("banner-host-{id}")))
+                        .group(KEBAB_HOST)
+                        .child(row),
+                );
             }
             banners_section = banners_section.child(list);
         } else {
@@ -901,46 +965,56 @@ impl Render for ImagesPanel {
                     );
                 }
                 LoadState::Ready => {
-                    banners_section = banners_section.child({
-                        let entity = entity.clone();
-                        let reason = banner_reason;
+                    // Both imports, as in the section's header.
+                    banners_section = banners_section.child(
                         Empty::new().title(assets::NO_BANNERS).child(
-                            Button::new("banner-import-empty")
-                                .label(assets::IMPORT_IMAGE)
-                                .variant(ButtonVariant::Outline)
-                                .disabled(reason.is_some())
-                                .on_click(move |_, _, cx| {
-                                    if reason.is_none() {
-                                        entity.update(cx, |panel, cx| {
-                                            panel.import_banner(BannerImportKind::Image, cx)
-                                        });
-                                    }
-                                }),
-                        )
-                    });
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .justify_center()
+                                .gap(px(8.))
+                                .child(banner_import(
+                                    "banner-import-empty",
+                                    BannerImportKind::Image,
+                                ))
+                                .child(banner_import(
+                                    "banner-import-html-empty",
+                                    BannerImportKind::Html,
+                                )),
+                        ),
+                    );
                 }
             }
         }
 
         let mut takeovers_section = PanelSection::new("images-takeovers")
+            .icon(icon(IconName::FrameCorners, 16., hsla(t.muted_foreground)))
             .title(assets::TAKEOVERS)
             .description(assets::TAKEOVERS_DESCRIPTION)
             .last(true)
             .action({
                 let entity = entity.clone();
                 Button::new("takeover-import")
-                    .label(assets::takeover_import_label(
+                    .variant(ButtonVariant::Outline)
+                    .child(if self.takeover_importing {
+                        Spinner::new("takeover-import-spinner")
+                            .size(16.)
+                            .into_any_element()
+                    } else {
+                        icon(IconName::ImageSquare, 16., hsla(t.foreground)).into_any_element()
+                    })
+                    .child(assets::takeover_import_label(
                         false,
                         self.takeover_importing,
                     ))
-                    .variant(ButtonVariant::Outline)
                     .disabled(offline || self.takeover_importing || session_lock)
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |panel, cx| panel.import_takeovers(cx));
                     })
             });
         if !self.takeovers.is_empty() {
-            let mut list = GroupedList::new().label(assets::TAKEOVERS);
+            let mut list = GroupedList::new();
             for (index, screen) in self.takeovers.iter().enumerate() {
                 let id = screen.id.clone();
                 let name = screen.name.clone();
@@ -1146,36 +1220,38 @@ impl Render for ImagesPanel {
             .bg(hsla(t.glass_solid))
             .text_color(hsla(t.foreground))
             .type_scale(text::META)
+            // The toolbar's title; the shell gives this page no toolbar yet.
             .child(
-                ScrollArea::new("images-scroll").child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .px(px(size::GUTTER))
-                        .py(px(8.))
-                        .gap(px(16.))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(4.))
-                                .child(
-                                    div()
-                                        .type_scale(text::SECTION)
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(assets::TITLE),
-                                )
-                                .child(
-                                    div()
-                                        .type_scale(text::META)
-                                        .text_color(hsla(t.muted_foreground))
-                                        .child(assets::DESCRIPTION),
-                                ),
-                        )
-                        .child(notices)
-                        .child(backgrounds)
-                        .child(banners_section)
-                        .child(takeovers_section),
+                div()
+                    .flex_none()
+                    .px(px(size::GUTTER))
+                    .pb(px(8.))
+                    .type_scale(text::SECTION)
+                    .child(assets::TITLE),
+            )
+            .child(
+                div().flex_1().min_h(px(0.)).child(
+                    ScrollArea::new("images-scroll").child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            // `PageHeader`: `px-gutter pt-3 pb-1`, text-xs.
+                            .child(
+                                div()
+                                    .px(px(size::GUTTER))
+                                    .pt(px(12.))
+                                    .pb(px(4.))
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .text_color(hsla(t.muted_foreground))
+                                    .child(assets::DESCRIPTION),
+                            )
+                            .child(div().px(px(size::GUTTER)).child(notices))
+                            // The sections are flush: each owns its gutter.
+                            .child(backgrounds)
+                            .child(banners_section)
+                            .child(takeovers_section),
+                    ),
                 ),
             )
             .child(rename_dialog)
