@@ -985,6 +985,11 @@ async fn import_starters(
                 continue;
             }
         };
+        // The keys the board has now (`store.getSnapshot()` before each
+        // import), so a sound added mid-run keeps its key.
+        if let Ok(board) = studio.backend().sounds_list().await {
+            taken.extend(board.sounds.iter().filter_map(|sound| sound.hotkey.clone()));
+        }
         let params = starter_import_params(&row, &issued.capability_id, &taken);
         match studio
             .backend()
