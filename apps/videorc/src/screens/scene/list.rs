@@ -83,9 +83,9 @@ impl ScenePage {
             .label(copy::ADD_SCENE)
             .variant(ButtonVariant::Outline)
             .disabled(list.read_only)
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.open_picker(PickerMode::Add, window, cx)
-            }));
+            .on_click(
+                cx.listener(|this, _, window, cx| this.open_picker(PickerMode::Add, window, cx)),
+            );
         if list.read_only {
             add = add.tooltip(copy::READ_ONLY_REASON);
         }
@@ -260,16 +260,17 @@ impl ScenePage {
         let (change_id, change_name, change_on_stream) =
             (row.id.clone(), row.name.clone(), row.on_stream);
         let change_page = page.clone();
-        let mut change = KebabMenuItem::new("change-screen", copy::CHANGE_SCREEN, move |window, cx| {
-            let mode = PickerMode::Change {
-                scene_id: change_id.clone(),
-                name: change_name.clone(),
-                on_stream: change_on_stream,
-                for_layout: None,
-            };
-            let _ = change_page.update(cx, |page, cx| page.open_picker(mode, window, cx));
-        })
-        .group("edit");
+        let mut change =
+            KebabMenuItem::new("change-screen", copy::CHANGE_SCREEN, move |window, cx| {
+                let mode = PickerMode::Change {
+                    scene_id: change_id.clone(),
+                    name: change_name.clone(),
+                    on_stream: change_on_stream,
+                    for_layout: None,
+                };
+                let _ = change_page.update(cx, |page, cx| page.open_picker(mode, window, cx));
+            })
+            .group("edit");
         if let Some(reason) = read_only_reason
             .map(str::to_string)
             .or_else(|| row.change_screen_reason.clone())

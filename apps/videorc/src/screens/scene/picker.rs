@@ -64,7 +64,9 @@ pub(super) mod copy {
     pub fn change_description(name: &str, on_stream: bool, for_layout: Option<&str>) -> String {
         match for_layout {
             Some(layout) => {
-                format!("{layout} shows a screen, and “{name}” shows none yet. Choose the screen it shows.")
+                format!(
+                    "{layout} shows a screen, and “{name}” shows none yet. Choose the screen it shows."
+                )
             }
             None if on_stream => {
                 format!("Choose what “{name}” shows. It’s on stream, so the stream changes too.")
@@ -138,7 +140,12 @@ impl ScenePage {
             .and_then(|library| library.scenes.iter().find(|scene| scene.id == id).cloned())
     }
 
-    pub(super) fn open_picker(&mut self, mode: PickerMode, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_picker(
+        &mut self,
+        mode: PickerMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Change screen… starts with what the scene shows chosen (not for
         // a layout that asked for a screen).
         let chosen = match &mode {
@@ -162,7 +169,8 @@ impl ScenePage {
             copy::SEARCH_CHANGE
         };
         self.picker_search = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
-        cx.observe(&self.picker_search, |_, _, cx| cx.notify()).detach();
+        cx.observe(&self.picker_search, |_, _, cx| cx.notify())
+            .detach();
         self.picking = Some(Picking {
             mode,
             chosen,
@@ -182,8 +190,18 @@ impl ScenePage {
         let picks = app_choices_from_devices(devices, &own)
             .into_iter()
             .map(ScreenPick::App)
-            .chain(window_choices(devices, &own).into_iter().cloned().map(ScreenPick::Window))
-            .chain(display_choices(devices, platform()).into_iter().cloned().map(ScreenPick::Display))
+            .chain(
+                window_choices(devices, &own)
+                    .into_iter()
+                    .cloned()
+                    .map(ScreenPick::Window),
+            )
+            .chain(
+                display_choices(devices, platform())
+                    .into_iter()
+                    .cloned()
+                    .map(ScreenPick::Display),
+            )
             .chain(std::iter::once(ScreenPick::None));
         picks.into_iter().find(|pick| shows_pick(shows, pick))
     }
@@ -195,7 +213,11 @@ impl ScenePage {
         let key = pick_key(&pick);
         match picking.mode {
             PickerMode::Add => {
-                if let Some(at) = picking.chosen.iter().position(|chosen| pick_key(chosen) == key) {
+                if let Some(at) = picking
+                    .chosen
+                    .iter()
+                    .position(|chosen| pick_key(chosen) == key)
+                {
                     picking.chosen.remove(at);
                 } else {
                     picking.chosen.push(pick);
@@ -209,7 +231,10 @@ impl ScenePage {
     /// Why the primary button waits, if it does.
     fn picker_blocked(&self, picking: &Picking) -> Option<String> {
         match &picking.mode {
-            PickerMode::Add => picking.chosen.is_empty().then(|| copy::CHOOSE_ONE.to_string()),
+            PickerMode::Add => picking
+                .chosen
+                .is_empty()
+                .then(|| copy::CHOOSE_ONE.to_string()),
             PickerMode::Change { scene_id, name, .. } => {
                 let Some(pick) = picking.chosen.first() else {
                     return Some(copy::choose_what(name));
@@ -302,10 +327,16 @@ impl ScenePage {
                             eprintln!("[videorc-app] Change screen: {switched:?}");
                         }
                         ScreenPick::None => {
-                            let switched = studio.select_source_device(SourceKind::Capture, None).await;
+                            let switched =
+                                studio.select_source_device(SourceKind::Capture, None).await;
                             eprintln!("[videorc-app] Change screen: {switched:?}");
-                            let layout = if vertical { &next.vertical } else { &next.horizontal };
-                            if let Some(preset) = layout.get("layoutPreset").and_then(Value::as_str) {
+                            let layout = if vertical {
+                                &next.vertical
+                            } else {
+                                &next.horizontal
+                            };
+                            if let Some(preset) = layout.get("layoutPreset").and_then(Value::as_str)
+                            {
                                 studio.apply_layout_preset(preset).await;
                             }
                         }
@@ -412,7 +443,11 @@ impl ScenePage {
             .into_any_element()
     }
 
-    pub(super) fn picker_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn picker_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(picking) = &self.picking else {
             return div().into_any_element();
         };
@@ -432,7 +467,13 @@ impl ScenePage {
         let own: Vec<String> = OWN_BUNDLE_IDS.iter().map(|id| id.to_string()).collect();
         let query = self.picker_search.read(cx).value().trim().to_string();
         let change = matches!(mode, PickerMode::Change { .. });
-        let for_layout = matches!(&mode, PickerMode::Change { for_layout: Some(_), .. });
+        let for_layout = matches!(
+            &mode,
+            PickerMode::Change {
+                for_layout: Some(_),
+                ..
+            }
+        );
 
         let apps: Vec<AppChoice> = if mac {
             app_choices_from_devices(devices, &own)
@@ -462,7 +503,11 @@ impl ScenePage {
             .filter(|device| matches_search(&[Some(device.name.as_str())], &query))
             .cloned()
             .collect();
-        let camera_title = if change { copy::NO_SCREEN } else { copy::CAMERA_ONLY };
+        let camera_title = if change {
+            copy::NO_SCREEN
+        } else {
+            copy::CAMERA_ONLY
+        };
         let camera_shown =
             !for_layout && matches_search(&[Some(camera_title), Some("camera")], &query);
 
@@ -538,7 +583,8 @@ impl ScenePage {
                 for app in shown_apps {
                     let pick = ScreenPick::App(app.clone());
                     let selected = chosen_keys.contains(&pick_key(&pick));
-                    let meta = window_count_label(app.window_count).or(app.front_window_title.clone());
+                    let meta =
+                        window_count_label(app.window_count).or(app.front_window_title.clone());
                     grid = grid.child(self.card(
                         SharedString::from(format!("pick-{}", pick_key(&pick))),
                         app.name.clone(),
@@ -563,7 +609,11 @@ impl ScenePage {
                     .variant(ButtonVariant::Ghost)
                     .size(ButtonSize::Xs)
                     .child(icon(
-                        if open { IconName::CaretDown } else { IconName::CaretRight },
+                        if open {
+                            IconName::CaretDown
+                        } else {
+                            IconName::CaretRight
+                        },
                         12.,
                         muted,
                     ))
@@ -600,7 +650,9 @@ impl ScenePage {
                         )
                         .grouped()
                         .selected(selected)
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_pick(pick.clone(), cx)));
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.toggle_pick(pick.clone(), cx)),
+                        );
                         if let Some(app) = &device.app {
                             row = row.context(app.name.clone());
                         }
@@ -712,18 +764,32 @@ impl ScenePage {
         }
 
         // P497: the scene's layout shows no screen.
-        if let (PickerMode::Change { scene_id, name, for_layout: None, .. }, Some(pick)) =
-            (&mode, &first_pick)
+        if let (
+            PickerMode::Change {
+                scene_id,
+                name,
+                for_layout: None,
+                ..
+            },
+            Some(pick),
+        ) = (&mode, &first_pick)
             && !matches!(pick, ScreenPick::None)
         {
             let vertical = snapshot.settings.capture_doc["layout"]["layoutPreset"]
                 .as_str()
                 .is_some_and(|preset| preset.starts_with("vertical-"));
             if let Some(scene) = self.stored_scene(scene_id) {
-                let layout = if vertical { &scene.vertical } else { &scene.horizontal };
+                let layout = if vertical {
+                    &scene.vertical
+                } else {
+                    &scene.horizontal
+                };
                 if layout_draws_no_screen(layout) {
                     let label = layout_preset_label(
-                        layout.get("layoutPreset").and_then(Value::as_str).unwrap_or_default(),
+                        layout
+                            .get("layoutPreset")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
                     );
                     body = body.child(
                         div()

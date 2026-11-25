@@ -71,9 +71,8 @@ impl ScenePage {
                 let _ = presets_page.update(cx, |page, cx| page.choose_layout(&preset, window, cx));
             });
         for option in &view.presets {
-            presets = presets.option(
-                Segment::new(option.id, option.label.clone()).disabled(option.disabled),
-            );
+            presets = presets
+                .option(Segment::new(option.id, option.label.clone()).disabled(option.disabled));
         }
 
         let mut section = PanelSection::new("scene-layout")
@@ -207,18 +206,14 @@ impl ScenePage {
             let on_stream = {
                 let watch = self.studio.watch();
                 let snapshot = watch.borrow();
-                snapshot
-                    .scenes
-                    .on_stream_id
-                    .clone()
-                    .and_then(|id| {
-                        snapshot
-                            .scenes
-                            .scenes
-                            .iter()
-                            .find(|scene| scene.id == id)
-                            .map(|scene| (id, scene.name.clone()))
-                    })
+                snapshot.scenes.on_stream_id.clone().and_then(|id| {
+                    snapshot
+                        .scenes
+                        .scenes
+                        .iter()
+                        .find(|scene| scene.id == id)
+                        .map(|scene| (id, scene.name.clone()))
+                })
             };
             if let Some((scene_id, name)) = on_stream {
                 let mode = PickerMode::Change {
