@@ -105,9 +105,11 @@ objc2-video-toolbox = { version = "0.3.2", default-features = false, features = 
 # overlay rasteriser links no system library.
 fontique = { version = "0.11.1", default-features = false, features = ["fontconfig-dlopen"] }
 # L4 portal screen capture (Plan 0006): org.freedesktop.portal.ScreenCast over
-# zbus, and the PipeWire stream the portal grants.
+# zbus, and the PipeWire stream the portal grants. `v0_3_49` gives
+# `Buffer::requested()`, the frames the Sounds monitor's playback quantum asks
+# for (plan 260 S1.3, `linux_sound_output.rs`); PipeWire 0.3.49 shipped in 2022.
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
-pipewire = "0.10"
+pipewire = { version = "0.10", features = ["v0_3_49"] }
 # Plan 190: the GLES live background renderer. EGL and GLES are loaded with
 # dlopen the first time a live background composes, so no system library is
 # linked and a machine without them shows the poster.
