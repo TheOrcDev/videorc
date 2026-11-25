@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use gpui::{Context, EventEmitter, Hsla, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, EventEmitter, Hsla, Window, div, prelude::*, px};
 use videorc_app_core::nav::PageId;
 use videorc_app_core::studio::{StudioBackend, connection_blocked_reason};
 use videorc_app_core::{BackendClient, StudioSnapshot};
@@ -17,6 +17,7 @@ use videorc_protocol::{StreamScreen, StreamScreenStatus};
 
 use super::transport::OpenPage;
 use crate::app::bridge::Mirror;
+use crate::lcd;
 
 pub const TITLE: &str = "Takeover";
 pub const EMPTY: &str = "No takeovers yet.";
@@ -83,6 +84,8 @@ impl TakeoverView {
 pub struct TakeoverLink {
     pub disconnected: Option<&'static str>,
     pub generation: u64,
+    /// Settings → General → Retro LCD.
+    pub retro: bool,
 }
 
 impl TakeoverLink {
@@ -90,6 +93,7 @@ impl TakeoverLink {
         Self {
             disconnected: connection_blocked_reason(&snapshot.connection),
             generation: snapshot.connection_generation,
+            retro: snapshot.settings.studio.retro_lcd_studio(),
         }
     }
 }
@@ -187,17 +191,17 @@ impl TakeoverSection {
     }
 }
 
-impl Render for TakeoverSection {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = theme::resolve(None, window, cx);
+impl TakeoverSection {
+    fn render_default(
+        &self,
+        theme: &videorc_kit::tokens::Theme,
+        view: TakeoverView,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let muted = hsla(theme.muted_foreground);
-        // Ghost / Outline ink (`button.rs`): `foreground`. Default metal ink:
-        // `chrome_fill_ink`.
         let ghost_ink = hsla(theme.foreground);
         let outline_ink = hsla(theme.foreground);
         let default_ink = hsla(theme.chrome_fill_ink);
-        let link = self.link.read(cx).value().clone();
-        let view = TakeoverView::of(&self.screens, self.active.as_ref(), link.disconnected);
         let section = PanelSection::new("studio-takeover").title(TITLE).action(
             Button::new("takeover-open-images")
                 .variant(ButtonVariant::Ghost)
@@ -208,26 +212,29 @@ impl Render for TakeoverSection {
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Assets)))),
         );
         if view.buttons.is_empty() {
-            return section.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .type_scale(text::META)
-                    .text_color(muted)
-                    // Electron: ImageIcon `size-3.5` (14 px) before the empty words.
-                    .child(icon(IconName::ImageSquare, 14., muted))
-                    .child(div().min_w_0().child(EMPTY))
-                    .child(
-                        Button::new("takeover-add-in-images")
-                            .variant(ButtonVariant::Link)
-                            .size(ButtonSize::Xs)
-                            .label(ADD_IN_IMAGES)
-                            .on_click(
-                                cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Assets))),
-                            ),
-                    ),
-            );
+            return section
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .type_scale(text::META)
+                        .text_color(muted)
+                        .child(icon(IconName::ImageSquare, 14., muted))
+                        .child(div().min_w_0().child(EMPTY))
+                        .child(
+                            Button::new("takeover-add-in-images")
+                                .variant(ButtonVariant::Link)
+                                .size(ButtonSize::Xs)
+                                .label(ADD_IN_IMAGES)
+                                .on_click(
+                                    cx.listener(|_, _, _, cx| {
+                                        cx.emit(OpenPage::of(PageId::Assets))
+                                    }),
+                                ),
+                        ),
+                )
+                .into_any_element();
         }
         let disconnected = view.disconnected.clone();
         let mut row = div().flex().flex_wrap().gap(px(6.));
@@ -242,8 +249,6 @@ impl Render for TakeoverSection {
                         ButtonVariant::Outline
                     })
                     .accessibility_label(name.clone())
-                    // Leading ImageIcon, then the name (kit draws `.label`
-                    // before children, so both ride as children).
                     .child(icon(IconName::ImageSquare, 16., ink))
                     .child(name)
                     .disabled(disconnected.is_some())
@@ -255,15 +260,88 @@ impl Render for TakeoverSection {
                     ),
             );
         }
-        section.child(row).child(
+        section
+            .child(row)
+            .child(
+                div()
+                    .min_h(px(32.))
+                    .type_scale(text::META)
+                    .text_color(muted)
+                    .child(view.hint),
+            )
+            .into_any_element()
+    }
+
+    /// Retro LCD Takeover (P244–P247): title + Open Images cog, empty nav
+    /// row or press rows, and the hint as a screen message.
+    fn render_retro(
+        &self,
+        theme: &videorc_kit::tokens::Theme,
+        view: TakeoverView,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let cog = lcd::cog(
+            "takeover-open-images",
+            theme,
+            OPEN_IMAGES,
+            cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Assets))),
+        );
+        let mut screen =
+            div()
+                .flex()
+                .flex_col()
+                .child(lcd::header(theme, TITLE, Some(cog.into_any_element())));
+        if view.buttons.is_empty() {
+            screen = screen.child(lcd::nav_row(
+                "takeover-empty",
+                theme,
+                "None yet",
+                ADD_IN_IMAGES,
+                cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Assets))),
+            ));
+        } else {
+            let disconnected = view.disconnected.is_some();
+            for (index, button) in view.buttons.iter().enumerate() {
+                if index > 0 {
+                    screen = screen.child(lcd::separator(theme));
+                }
+                let id = button.id.clone();
+                let active = button.active;
+                screen = screen.child(lcd::press_row(
+                    ("takeover", index),
+                    theme,
+                    button.name.clone(),
+                    active,
+                    disconnected,
+                    cx.listener(move |section, _, _, cx| {
+                        section.flip(id.clone(), active, cx);
+                    }),
+                ));
+            }
             // Two lines held, so the longer on-air hint never pushes the
             // inspector down.
-            div()
-                .min_h(px(32.))
-                .type_scale(text::META)
-                .text_color(muted)
-                .child(view.hint),
-        )
+            screen = screen.child(
+                div()
+                    .min_h(px(40.))
+                    .child(lcd::message(theme, view.hint.clone())),
+            );
+        }
+        PanelSection::new("studio-takeover")
+            .child(lcd::panel("studio-lcd-takeover", theme, TITLE, screen))
+            .into_any_element()
+    }
+}
+
+impl Render for TakeoverSection {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = theme::resolve(None, window, cx);
+        let link = self.link.read(cx).value().clone();
+        let view = TakeoverView::of(&self.screens, self.active.as_ref(), link.disconnected);
+        if link.retro {
+            self.render_retro(&theme, view, cx)
+        } else {
+            self.render_default(&theme, view, cx)
+        }
     }
 }
 

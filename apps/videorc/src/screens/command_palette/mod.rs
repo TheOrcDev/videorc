@@ -33,6 +33,8 @@ pub enum Command {
     Microphone,
     Clip(u32),
     Scene(String),
+    /// Studio's Add scene… (plan 231 D14): the Studio page opens its picker.
+    AddScene,
     Theme(ThemeChoice),
     Chat,
     Unavailable,
@@ -264,13 +266,27 @@ impl CommandPalette {
             Command::CaptionsReader,
             true,
         ));
-        rows.push(Row::new(
-            "add-scene",
-            "Scenes",
-            "Add scene…",
-            Command::Unavailable,
-            false,
-        ));
+        // `command-palette.tsx:618`: with any scene, Studio's Add scene…,
+        // off in a library from a newer Videorc.
+        if !s.scenes.scenes.is_empty() {
+            rows.push(
+                Row::new(
+                    "add-scene",
+                    "Scenes",
+                    "Add scene…",
+                    Command::AddScene,
+                    !s.scenes.read_only,
+                )
+                .keywords(&[
+                    "new scene",
+                    "scene",
+                    "app",
+                    "window",
+                    "display",
+                    "camera only",
+                ]),
+            );
+        }
         for scene in &s.scenes.scenes {
             rows.push(Row::new(
                 format!("scene-{}", scene.id),
@@ -374,6 +390,7 @@ impl CommandPalette {
             | Command::StreamManager
             | Command::Notes
             | Command::CaptionsReader
+            | Command::AddScene
             | Command::Notifications => cx.emit(command),
             _ => {
                 if command == Command::Stop {

@@ -10,27 +10,29 @@
 
 pub mod alerts;
 pub mod audio;
+pub mod background;
 pub mod chat;
 pub mod layout;
+pub mod quick_settings;
 pub mod scenes;
 pub mod session;
+pub mod show_stage;
 pub mod space;
 pub mod takeover;
+pub mod talk_show_host;
 pub mod transport;
+pub mod vertical_stream;
 
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding,
     KeyDownEvent, Window, canvas, div, prelude::*, px,
 };
 use videorc_app_core::StopOrigin;
-use videorc_app_core::guests::view::CLOSE_THE_ROOM_LABEL;
-use videorc_app_core::studio::screen_views::{
-    CLOSE_THE_ROOM_UNAVAILABLE, PREVIEW_REPLACED_BY_SHOW_STAGE, SHOW_HERE_LABEL,
-};
+use videorc_app_core::studio::screen_views::SHOW_HERE_LABEL;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
-use videorc_kit::{Button, ButtonSize, ButtonVariant};
+use videorc_kit::{Button, ButtonVariant};
 use videorc_preview::lifecycle::WindowMode;
 
 use crate::preview::Preview;
@@ -39,11 +41,15 @@ use alerts::{CloudResumeSlot, StudioRequest};
 use audio::AudioSection;
 use chat::ChatSection;
 use layout::{INSPECTOR_MAX_PX, StudioLayout};
+use quick_settings::QuickSettingsSection;
 use scenes::ScenesSection;
 use session::SessionSection;
+use show_stage::ShowStage;
 use space::{KEY_CONTEXT, SPACE, SpaceAction, SpacePress, ToggleRecord, space_action};
 use takeover::TakeoverSection;
+use talk_show_host::TalkShowRoomHost;
 use transport::{OpenPage, Transport};
+use vertical_stream::VerticalStreamSection;
 
 /// Binds the page's keys; call once at start.
 pub fn bind_keys(cx: &mut App) {
@@ -62,10 +68,18 @@ pub struct StudioPage {
     /// Chat in Studio (P188): draws nothing until it shows.
     chat: Entity<ChatSection>,
     audio: Entity<AudioSection>,
+    /// Camera / Captions / Chat mirrors (P248–P263).
+    quick_settings: Entity<QuickSettingsSection>,
     takeover: Entity<TakeoverSection>,
     /// The Scenes section under the preview (P273: Scenes first in the
     /// bottom row; Soundboard and the vertical leg fill in after it).
     scenes: Entity<ScenesSection>,
+    /// Vertical stream panel (P273 / P334–P339); draws nothing until armed.
+    vertical_stream: Entity<VerticalStreamSection>,
+    /// Show stage (P357–P394): replaces the Preview while the room is open.
+    show_stage: Entity<ShowStage>,
+    /// Talk-show room host (P395–P399): no chrome; recording watch + retire.
+    talk_show_host: Entity<TalkShowRoomHost>,
     /// The page's width at the last paint, for the breakpoint.
     width: f32,
     /// The Space now dispatching is a held key's repeat.
@@ -83,6 +97,7 @@ impl Focusable for StudioPage {
 impl StudioPage {
     /// The page holds the focus from the start, so Space reaches it before
     /// anything else is clicked.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         transport: Entity<Transport>,
         preview: Entity<Preview>,
@@ -90,8 +105,12 @@ impl StudioPage {
         session: Entity<SessionSection>,
         chat: Entity<ChatSection>,
         audio: Entity<AudioSection>,
+        quick_settings: Entity<QuickSettingsSection>,
         takeover: Entity<TakeoverSection>,
         scenes: Entity<ScenesSection>,
+        vertical_stream: Entity<VerticalStreamSection>,
+        show_stage: Entity<ShowStage>,
+        talk_show_host: Entity<TalkShowRoomHost>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -117,15 +136,23 @@ impl StudioPage {
         .detach();
         cx.subscribe(&audio, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
+        cx.subscribe(&quick_settings, |_, _, open: &OpenPage, cx| cx.emit(*open))
+            .detach();
         cx.subscribe(&takeover, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
         cx.subscribe(&scenes, |_, _, open: &OpenPage, cx| cx.emit(*open))
             .detach();
+        cx.subscribe(&show_stage, |_, _, open: &OpenPage, cx| cx.emit(*open))
+            .detach();
         // The preview notifies only when its slot's words or its window
         // change, never per video frame. The transport also carries the
-        // talk-show room (P122): the Preview yields to the Show stage card.
+        // talk-show room (P122): the Preview yields to the Show stage.
         cx.observe(&preview, |_, _, cx| cx.notify()).detach();
         cx.observe(&transport, |_, _, cx| cx.notify()).detach();
+        cx.observe(&vertical_stream, |_, _, cx| cx.notify())
+            .detach();
+        cx.observe(&show_stage, |_, _, cx| cx.notify()).detach();
+        cx.observe(&talk_show_host, |_, _, cx| cx.notify()).detach();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         Self {
@@ -136,11 +163,21 @@ impl StudioPage {
             session,
             chat,
             audio,
+            quick_settings,
             takeover,
             scenes,
+            vertical_stream,
+            show_stage,
+            talk_show_host,
             width: 0.,
             space_held: false,
         }
+    }
+
+    /// ⌘K's Add scene… (P283): the Scenes section's picker.
+    pub fn open_add_scene(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.scenes
+            .update(cx, |scenes, cx| scenes.open_add(window, cx));
     }
 
     fn measured(&mut self, width: f32, cx: &mut Context<Self>) {
@@ -254,36 +291,6 @@ impl StudioPage {
         let _ = (floating, muted);
         Some(row.into_any_element())
     }
-
-    /// `TalkShowPreviewCard`: the Preview's place while the room is open.
-    fn show_stage_card(&self, _window: &mut Window, _cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .id("preview-replaced-by-show-stage")
-            .flex()
-            .flex_1()
-            .min_h_0()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(12.))
-            .child(
-                div()
-                    .type_scale(text::LABEL)
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .child(PREVIEW_REPLACED_BY_SHOW_STAGE),
-            )
-            .child(
-                Button::new("close-the-room")
-                    .variant(ButtonVariant::Outline)
-                    .size(ButtonSize::Xs)
-                    .label(CLOSE_THE_ROOM_LABEL)
-                    .tooltip(CLOSE_THE_ROOM_UNAVAILABLE)
-                    .on_click(|_, _, _| {
-                        eprintln!("[videorc-app] Close the room: {CLOSE_THE_ROOM_UNAVAILABLE}");
-                    }),
-            )
-            .into_any_element()
-    }
 }
 
 impl Render for StudioPage {
@@ -304,10 +311,13 @@ impl Render for StudioPage {
 
         let preview_replaced = self.transport.read(cx).talk_show(cx).preview_replaced;
         let stage = if preview_replaced {
-            // P122: the Show stage replaces the Preview while the room is
-            // open. The Show stage itself is another lane; until it lands,
-            // Electron's TalkShowPreviewCard (P147) is the swap.
-            self.show_stage_card(window, cx)
+            // P122 / P357: the Show stage replaces the Preview while the room
+            // is open.
+            div()
+                .flex_1()
+                .min_h_0()
+                .child(self.show_stage.clone())
+                .into_any_element()
         } else {
             div()
                 .flex_1()
@@ -330,8 +340,7 @@ impl Render for StudioPage {
                     .flatten(),
             );
         // "Session inspector" (P114): cloud resume, the session section,
-        // chat, audio, quick settings and takeover, in that order. Chat and
-        // quick settings fill their slots as they land.
+        // chat, audio, quick settings and takeover, in that order.
         let inspector = div()
             .id("studio-session-inspector")
             .flex()
@@ -342,14 +351,23 @@ impl Render for StudioPage {
             .child(self.session.clone())
             .child(self.chat.clone())
             .child(self.audio.clone())
+            .child(self.quick_settings.clone())
             .child(self.takeover.clone());
         let transport = self.transport.clone();
-        // `StudioDashboardBottomRow`: under the preview stage, in the
-        // preview column. Wide, the stage keeps the room the row leaves.
+        // `StudioDashboardBottomRow` (P273): Scenes, then Soundboard (C3),
+        // then Vertical stream. Wide, the stage keeps the room the row leaves.
         let stage_column = match layout {
             StudioLayout::Wide => preview_column.flex_1(),
             StudioLayout::Narrow => preview_column,
         };
+        let bottom_row = div()
+            .id("studio-dashboard-bottom-row")
+            .flex()
+            .flex_col()
+            .flex_none()
+            .child(self.scenes.clone())
+            // Soundboard slot: C3.
+            .child(self.vertical_stream.clone());
         let preview_column = div()
             .id("studio-preview-and-scenes")
             .flex()
@@ -357,7 +375,7 @@ impl Render for StudioPage {
             .min_w_0()
             .min_h_0()
             .child(stage_column)
-            .child(div().flex_none().child(self.scenes.clone()));
+            .child(bottom_row);
 
         let grid = match layout {
             StudioLayout::Wide => div()
@@ -397,6 +415,8 @@ impl Render for StudioPage {
             .relative()
             .size_full()
             .child(measure)
+            // P395: talk-show host draws nothing; keep it mounted for watches.
+            .child(self.talk_show_host.clone())
             .child(grid)
     }
 }
