@@ -16,6 +16,7 @@ use videorc_app_core::livestream::go_live_privacy;
 use videorc_app_core::livestream::golive::{self, CaptionsStatus, DialogView};
 use videorc_app_core::livestream::plan;
 use videorc_app_core::livestream::targets::{self, Target};
+use videorc_app_core::shortcuts::shortcut_accelerator;
 use videorc_app_core::studio::captions_readiness::captions_platform_unavailable_reason;
 use videorc_app_core::studio::go_live::GoLiveState;
 use videorc_app_core::{BackendClient, Studio};
@@ -28,6 +29,7 @@ use videorc_kit::icon::IconName;
 use videorc_kit::input::InputState;
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::section_label::SectionLabel;
+use videorc_kit::shortcut_keys::ShortcutKeys;
 use videorc_kit::status_dot::StatusTone;
 use videorc_kit::textarea::TextareaState;
 use videorc_kit::theme::{self, TypeScale, hsla};
@@ -888,6 +890,16 @@ impl Render for GoLiveDialog {
                     .label(self.confirm_label.clone())
                     .variant(ButtonVariant::GoLive)
                     .icon(IconName::Broadcast)
+                    // The confirm key after the label, not while pending.
+                    .when_some(
+                        shortcut_accelerator("go-live-confirm").filter(|_| !pending),
+                        |button, accelerator| {
+                            button.child(
+                                ShortcutKeys::accelerator(accelerator)
+                                    .on_filled(t.chrome_copper_ink),
+                            )
+                        },
+                    )
                     .disabled(!can_confirm)
                     .when(
                         !pending && self.gate_blocked && self.state.partial.is_none(),

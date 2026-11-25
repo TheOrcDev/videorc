@@ -819,6 +819,7 @@ impl Render for GuestsPanel {
                     .child(
                         Button::new("guests-invite-rotate")
                             .label(if self.rotating { MAKING } else { NEW_LINK })
+                            .icon(IconName::ArrowClockwise)
                             .variant(ButtonVariant::Outline)
                             .disabled(disabled || !room_open || self.rotating)
                             .when(!disabled && !room_open, |b| {
