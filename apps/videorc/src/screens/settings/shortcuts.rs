@@ -18,7 +18,8 @@ use videorc_kit::{
 #[derive(Clone, Copy)]
 struct Ink {
     muted: Hsla,
-    input: Hsla,
+    /// The input group's fill (`bg-input/50`).
+    fill: Hsla,
     ring: Hsla,
     destructive: Hsla,
 }
@@ -213,7 +214,7 @@ impl SettingsScreen {
         } else if row.conflict.is_some() {
             ink.destructive
         } else {
-            ink.input
+            gpui::transparent_black()
         };
         let mut control = div()
             .id(SharedString::from(format!("record-{}", row.action)))
@@ -239,7 +240,10 @@ impl SettingsScreen {
             .items_center()
             .w(px(176.))
             .h(px(size::CONTROL))
-            .rounded(px(radius::MD))
+            // `InputGroup`: `rounded-chip bg-input/50`, the border clear
+            // until armed (ring) or refused (destructive).
+            .rounded(px(radius::CHIP))
+            .bg(ink.fill)
             .border_1()
             .border_color(border)
             .child(control);
@@ -270,7 +274,7 @@ impl SettingsScreen {
         let t = theme::current(window, cx).theme();
         let ink = Ink {
             muted: hsla(t.muted_foreground),
-            input: hsla(t.input),
+            fill: hsla(videorc_kit::theme::with_alpha(t.input, 0.5)),
             ring: hsla(t.ring),
             destructive: hsla(t.destructive),
         };
