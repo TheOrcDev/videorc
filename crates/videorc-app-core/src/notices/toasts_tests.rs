@@ -738,17 +738,19 @@ fn a_failure_outranks_the_microphone_and_system_only_losses_stay_quiet() {
         dismissed(&commands),
         ["recording-stopped-unexpectedly", "microphone-input-lost"]
     );
-    let toast = shown(&commands)[0];
-    assert_eq!(toast.title, "Microphone is back");
-    assert_eq!(toast.kind, NoticeKind::Success);
-    assert_eq!(toast.lifetime, secs(8));
+    // "Microphone is back" is the store's entry (`sources::devices`, #1865),
+    // never a SessionNotices toast (Electron's `showSessionHealthEvent`).
+    assert!(shown(&commands).is_empty());
     assert_eq!(notices.microphone_notice(), None);
 }
 
 // ── showSessionHealthEvent ──────────────────────────────────────────────
 
+/// Electron's `showSessionHealthEvent` toasts only the Error barrier
+/// timeout; every other health code is an L6 store entry (#1865, tested in
+/// `sources::health` and `health_kinds`), so SessionNotices shows nothing.
 #[test]
-fn every_live_output_code_has_its_toast() {
+fn only_the_barrier_timeout_stays_a_session_toast() {
     let mut notices = SessionNotices::new();
     let running = live("s1");
     let warn = HealthLevel::Warn;
@@ -942,26 +944,21 @@ fn every_live_output_code_has_its_toast() {
         let commands =
             notices.on_health_event(&health, context(&running, Some("s1")), Instant::now());
         let toasts = shown(&commands);
+        if code != "recording-startup-barrier-timeout" {
+            assert!(toasts.is_empty(), "{code}: a store entry, not a toast");
+            continue;
+        }
         assert_eq!(toasts.len(), 1, "{code}");
         let toast = toasts[0];
         assert_eq!(toast.kind, kind, "{code}");
         assert_eq!(toast.title, title, "{code}");
         assert_eq!(toast.id.as_deref(), Some(id), "{code}");
         assert_eq!(toast.lifetime, lifetime, "{code}");
-        if code == "recording-startup-cadence-unsteady" {
-            assert_eq!(
-                toast.description.as_deref(),
-                Some(
-                    "Videorc took a moment to settle when the recording started. Check its start."
-                )
-            );
-        } else {
-            assert_eq!(
-                toast.description.as_deref(),
-                Some("What happened."),
-                "{code}"
-            );
-        }
+        assert_eq!(
+            toast.description.as_deref(),
+            Some("What happened."),
+            "{code}"
+        );
     }
     // A code nobody toasts.
     let quiet = event("recording-started", HealthLevel::Info, Some("s1"), "x");
