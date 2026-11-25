@@ -75,6 +75,8 @@ impl MenuShortcut {
 pub struct MenuItem {
     label: SharedString,
     icon: Option<MenuIcon>,
+    /// Trailing mark on the right (Health's status dot), before a shortcut.
+    end: Option<MenuIcon>,
     shortcut: Option<MenuShortcut>,
     tone: MenuItemTone,
     disabled: bool,
@@ -87,6 +89,7 @@ impl MenuItem {
         MenuItem {
             label: label.into(),
             icon: None,
+            end: None,
             shortcut: None,
             tone: MenuItemTone::Default,
             disabled: false,
@@ -98,6 +101,13 @@ impl MenuItem {
     /// A 16 px icon before the word, drawn in the row's colour.
     pub fn icon<E: IntoElement>(mut self, icon: impl Fn(Hsla) -> E + 'static) -> Self {
         self.icon = Some(Rc::new(move |color| icon(color).into_any_element()));
+        self
+    }
+
+    /// A trailing mark after the label (ml-auto), drawn in the row's colour.
+    /// Health's status dot sits here; a shortcut, if any, follows it.
+    pub fn end<E: IntoElement>(mut self, end: impl Fn(Hsla) -> E + 'static) -> Self {
+        self.end = Some(Rc::new(move |color| end(color).into_any_element()));
         self
     }
 
@@ -488,9 +498,17 @@ pub(crate) fn menu_panel(panel: Panel, window: &mut Window, cx: &mut App) -> Sta
                         .when_some(reason, |row, reason| row.tooltip(tooltip(reason)))
                         .children(item.icon.as_ref().map(|icon| icon(text)))
                         .child(item.label.clone())
-                        .children(item.shortcut.as_ref().map(|shortcut| {
+                        .children(item.end.as_ref().map(|end| {
                             div()
                                 .ml_auto()
+                                .pl(px(16.0))
+                                .flex()
+                                .items_center()
+                                .child(end(text))
+                        }))
+                        .children(item.shortcut.as_ref().map(|shortcut| {
+                            div()
+                                .when(item.end.is_none(), |slot| slot.ml_auto())
                                 .pl(px(16.0))
                                 .text_size(px(12.0))
                                 .text_color(hsla(shortcut_color))

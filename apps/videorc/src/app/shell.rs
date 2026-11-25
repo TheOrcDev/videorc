@@ -10,7 +10,7 @@ use crate::screens::dialogs::{DialogsHost, OpenPage as DialogOpenPage};
 use crate::screens::error_panels::ErrorPanels;
 use crate::screens::notifications::{Centre, Hub, Navigate as NoticeNavigate, ToggleNotifications};
 use crate::screens::settings::{Navigate, SettingsScreen};
-use gpui::{Context, Entity, Focusable, Window, div, prelude::*, px};
+use gpui::{Context, Entity, Focusable, ModifiersChangedEvent, Window, div, prelude::*, px};
 use videorc_app_core::nav::{self, PageId, ZONES};
 use videorc_app_core::notices::NoticeAction;
 use videorc_app_core::{BackendState, ConnectionState, Tone};
@@ -75,6 +75,16 @@ fn status_tone(tone: Tone) -> StatusTone {
         Tone::Busy => StatusTone::Warn,
         Tone::Failed => StatusTone::Error,
         Tone::Stopped => StatusTone::Neutral,
+    }
+}
+
+/// Top inset under the window chrome: traffic lights on macOS (P020/P044),
+/// a slim pad when Windows/Linux draw the native title bar (P046).
+fn chrome_top() -> gpui::Pixels {
+    if cfg!(target_os = "macos") {
+        px(40.)
+    } else {
+        px(8.)
     }
 }
 
@@ -148,6 +158,8 @@ pub struct Shell {
     account: Option<Entity<Mirror<videorc_app_core::accounts::AccountsState>>>,
     /// P025: a chat destination waits on the Videorc sign-in.
     chat_waits: Option<Entity<Mirror<bool>>>,
+    /// P017: sidebar shortcut chips while ⌘ / Ctrl is held.
+    command_held: bool,
 }
 
 impl Shell {
@@ -204,6 +216,7 @@ impl Shell {
             cx.observe(chat_waits, |_, _, cx| cx.notify()).detach();
         }
         palette.update(cx, |palette, _| palette.set_notifications_available());
+        let command_held = false;
         let captions = crate::screens::captions::page(cx);
         if let Some(captions) = &captions {
             cx.observe(captions, |_, _, cx| cx.notify()).detach();
@@ -405,6 +418,7 @@ impl Shell {
             scene,
             account,
             chat_waits,
+            command_held,
         }
     }
 
@@ -529,6 +543,10 @@ impl Shell {
     }
 
     pub fn open_page(&mut self, page: PageId, window: &mut Window, cx: &mut Context<Self>) {
+        // P017: a fired page shortcut closes the reminder layer.
+        if self.command_held {
+            self.command_held = false;
+        }
         if self.page != page {
             self.settings
                 .update(cx, |settings, cx| settings.disarm_shortcut(cx));
@@ -596,7 +614,7 @@ impl Shell {
             .flex_col()
             .gap(px(2.))
             .px(px(8.))
-            .pt(px(40.))
+            .pt(chrome_top())
             .bg(hsla(t.glass_solid))
             .border_r_1()
             .border_color(hsla(t.border));
@@ -619,10 +637,16 @@ impl Shell {
                 } else {
                     hsla(t.muted_foreground)
                 };
+                // P017: chips stay mounted (width reserved) and fade in while
+                // ⌘/Ctrl is held; aria-hidden — the row's click is enough.
                 let shortcut = page
                     .key()
                     .and_then(super::menus::page_action)
-                    .map(|action| ShortcutKeys::for_action(action.as_ref()));
+                    .map(|action| {
+                        div()
+                            .opacity(if self.command_held { 1. } else { 0. })
+                            .child(ShortcutKeys::for_action(action.as_ref()))
+                    });
                 column =
                     column.child(
                         div()
@@ -682,9 +706,13 @@ impl Shell {
                                     .is_some_and(|waits| *waits.read(cx).value()),
                                 self.sidekick.read(cx).cohost_reason(),
                             );
+                            let status = self.backend.read(cx).value();
                             super::account_menu::row(
                                 state,
                                 needs_sign_in,
+                                status_tone(status.tone),
+                                status.text.clone(),
+                                matches!(status.tone, Tone::Busy),
                                 cx.entity().downgrade(),
                                 t,
                             )
@@ -748,6 +776,14 @@ impl Render for Shell {
             .on_key_down(
                 cx.listener(|this, _, _, cx| this.notice_hub.update(cx, |hub, _| hub.pressed())),
             )
+            // P017: chips follow the command modifier (⌘ / Ctrl).
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                let held = event.modifiers.secondary(cx);
+                if this.command_held != held {
+                    this.command_held = held;
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleNotifications, _, cx| {
                 this.notices.update(cx, |centre, cx| centre.toggle(cx))
             }))
@@ -780,7 +816,7 @@ impl Render for Shell {
                             .min_h(px(0.))
                             .flex()
                             .flex_col()
-                            .pt(px(40.))
+                            .pt(chrome_top())
                             .child(self.errors.clone())
                     } else if page == PageId::Studio {
                         div()
@@ -789,7 +825,7 @@ impl Render for Shell {
                             .min_h(px(0.))
                             .flex()
                             .flex_col()
-                            .pt(px(40.))
+                            .pt(chrome_top())
                             .child(self.studio.clone())
                     } else if page == PageId::Layouts {
                         div()
@@ -798,7 +834,7 @@ impl Render for Shell {
                             .min_h(px(0.))
                             .flex()
                             .flex_col()
-                            .pt(px(40.))
+                            .pt(chrome_top())
                             .gap(px(8.))
                             .child(
                                 div()
@@ -812,14 +848,14 @@ impl Render for Shell {
                             .flex_1()
                             .min_w(px(0.))
                             .min_h(px(0.))
-                            .pt(px(40.))
+                            .pt(chrome_top())
                             .child(self.library.clone())
                     } else if page == PageId::Sources {
                         div()
                             .flex_1()
                             .flex()
                             .flex_col()
-                            .pt(px(40.))
+                            .pt(chrome_top())
                             .px(px(24.))
                             .gap(px(8.))
                             .child(div().type_scale(text::SECTION).child(page.label()))
@@ -831,7 +867,7 @@ impl Render for Shell {
                             .min_h(px(0.))
                             .flex()
                             .flex_col()
-                            .pt(px(40.))
+                            .pt(chrome_top())
                             .px(px(24.))
                             .gap(px(8.))
                             .child(div().type_scale(text::SECTION).child(page.label()))
@@ -843,7 +879,7 @@ impl Render for Shell {
                             .min_h(px(0.))
                             .flex()
                             .flex_col()
-                            .pt(px(40.))
+                            .pt(chrome_top())
                             .px(px(24.))
                             .gap(px(8.))
                             .child(div().type_scale(text::SECTION).child(page.label()))
@@ -855,7 +891,7 @@ impl Render for Shell {
                             .min_h(px(0.))
                             .flex()
                             .flex_col()
-                            .pt(px(40.))
+                            .pt(chrome_top())
                             .px(px(24.))
                             .gap(px(8.))
                             .child(div().type_scale(text::SECTION).child(page.label()))
@@ -867,7 +903,7 @@ impl Render for Shell {
                             .min_h(px(0.))
                             .flex()
                             .flex_col()
-                            .pt(px(40.))
+                            .pt(chrome_top())
                             .px(px(24.))
                             .gap(px(8.))
                             .child(div().type_scale(text::SECTION).child(page.label()))
@@ -879,7 +915,7 @@ impl Render for Shell {
                             .min_h(px(0.))
                             .flex()
                             .flex_col()
-                            .pt(px(40.))
+                            .pt(chrome_top())
                             .child(avatar)
                     } else if page == PageId::Ai {
                         div()
@@ -888,7 +924,7 @@ impl Render for Shell {
                             .min_h(px(0.))
                             .flex()
                             .flex_col()
-                            .pt(px(40.))
+                            .pt(chrome_top())
                             .child(sidekick)
                     } else if page == PageId::Assets {
                         div()
@@ -897,7 +933,7 @@ impl Render for Shell {
                             .min_h(px(0.))
                             .flex()
                             .flex_col()
-                            .pt(px(40.))
+                            .pt(chrome_top())
                             .child(images)
                     } else if page == PageId::Sounds {
                         div()
@@ -906,7 +942,7 @@ impl Render for Shell {
                             .min_h(px(0.))
                             .flex()
                             .flex_col()
-                            .pt(px(40.))
+                            .pt(chrome_top())
                             .child(sounds)
                     } else {
                         div()
@@ -915,7 +951,7 @@ impl Render for Shell {
                             .min_h(px(0.))
                             .flex()
                             .flex_col()
-                            .pt(px(40.))
+                            .pt(chrome_top())
                             .px(px(24.))
                             .gap(px(8.))
                             .child(div().type_scale(text::SECTION).child(page.label()))
