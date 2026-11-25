@@ -24,6 +24,7 @@ use videorc_kit::{
 
 use super::bridge::Mirror;
 use crate::preview::Preview;
+use crate::screens::captions::page::{CaptionsPanel, OpenPage as CaptionsOpenPage};
 use crate::screens::destinations::DestinationsPanel;
 use crate::screens::first_run::{FirstRunScreen, OpenPage as FirstRunOpenPage};
 use crate::screens::go_live::GoLiveDialog;
@@ -86,6 +87,9 @@ pub struct Shell {
     sources: Entity<SourcesPanel>,
     /// Phase 3: Output ⌘5.
     output: Entity<OutputPanel>,
+    /// Phase 3: Captions ⌘4 (L2), built with its feed by
+    /// `screens::captions::install`.
+    captions: Option<Entity<CaptionsPanel>>,
     /// Phase 3: Destinations ⌘6.
     destinations: Entity<DestinationsPanel>,
     /// Phase 3: Guests ⌘7.
@@ -139,6 +143,16 @@ impl Shell {
     ) -> Self {
         let notices = cx.new(|cx| Centre::new(notice_hub.clone(), "main", window, cx));
         palette.update(cx, |palette, _| palette.set_notifications_available());
+        let captions = crate::screens::captions::page(cx);
+        if let Some(captions) = &captions {
+            cx.observe(captions, |_, _, cx| cx.notify()).detach();
+            cx.subscribe_in(
+                captions,
+                window,
+                |this, _, open: &CaptionsOpenPage, window, cx| this.open_page(open.0, window, cx),
+            )
+            .detach();
+        }
         cx.subscribe_in(
             &dialogs,
             window,
@@ -251,6 +265,9 @@ impl Shell {
                     window.dispatch_action(Box::new(super::menus::ToggleStreamManager), cx)
                 }
                 Command::Notes => window.dispatch_action(Box::new(super::menus::ToggleNotes), cx),
+                Command::CaptionsReader => {
+                    window.dispatch_action(Box::new(super::menus::ToggleCaptions), cx)
+                }
                 _ => {}
             },
         )
@@ -263,6 +280,7 @@ impl Shell {
             preview,
             sources,
             output,
+            captions,
             destinations,
             guests,
             avatar,
@@ -331,6 +349,11 @@ impl Shell {
             self.avatar.update(cx, |avatar, cx| {
                 avatar.set_active(page == PageId::Avatar, cx)
             });
+            if let Some(captions) = &self.captions {
+                captions.update(cx, |captions, cx| {
+                    captions.set_active(page == PageId::Captions, cx)
+                });
+            }
             if page == PageId::Library {
                 self.library
                     .update(cx, |library, cx| library.focus_session(None, window, cx));
@@ -418,6 +441,7 @@ impl Render for Shell {
         let page = self.page;
         let sources = self.sources.clone();
         let output = self.output.clone();
+        let captions = self.captions.clone();
         let destinations = self.destinations.clone();
         let guests = self.guests.clone();
         let avatar = self.avatar.clone();
@@ -491,6 +515,18 @@ impl Render for Shell {
                             .gap(px(8.))
                             .child(div().type_scale(text::SECTION).child(page.label()))
                             .child(output)
+                    } else if let (PageId::Captions, Some(captions)) = (page, captions) {
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_col()
+                            .pt(px(40.))
+                            .px(px(24.))
+                            .gap(px(8.))
+                            .child(div().type_scale(text::SECTION).child(page.label()))
+                            .child(captions)
                     } else if page == PageId::Live {
                         div()
                             .flex_1()

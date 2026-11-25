@@ -10,6 +10,7 @@
 pub mod account;
 pub mod assets;
 pub mod buddy;
+pub mod captions;
 pub mod chat;
 pub mod client;
 pub mod command_score;
