@@ -13,11 +13,13 @@ use gpui::{
     App, AppContext, Bounds, Context, FocusHandle, Global, KeyBinding, Subscription, Window,
     WindowHandle, actions, div, prelude::*, px, size,
 };
+use serde_json::{Value, json};
 use tokio::sync::watch;
 use videorc_app_core::desktop::capture_protection::{
     HideMethod, WindowRole, stream_manager_hide_method,
 };
 use videorc_app_core::desktop::permissions::PermissionPlatform;
+use videorc_app_core::protocol::{ScreenPrivacy, ScreenPrivacyReason};
 use videorc_app_core::stream_manager::copy::WINDOW_NAME;
 use videorc_app_core::stream_manager::dashboard::{LiveDashboard, SessionState};
 use videorc_app_core::{BackendClient, Studio};
@@ -188,6 +190,9 @@ pub struct StreamManager {
     pinned: bool,
     hidden: bool,
     hide_method: HideMethod,
+    /// Hide screen (frost) state from `screen.privacy.*`.
+    screen_hidden: bool,
+    screen_blocked: Option<String>,
     clear: DialogHandle,
     focus: FocusHandle,
     _bounds: Subscription,
@@ -255,6 +260,29 @@ impl StreamManager {
             }
         })
         .detach();
+        // Hide screen: seed from `screen.privacy.get`.
+        {
+            let studio = studio.clone();
+            let runtime = runtime.clone();
+            cx.spawn(async move |this, cx| {
+                let answer = runtime
+                    .spawn(async move {
+                        studio
+                            .backend()
+                            .request("screen.privacy.get", Value::Null)
+                            .await
+                    })
+                    .await;
+                let Ok(Ok(value)) = answer else {
+                    return;
+                };
+                let Ok(privacy) = serde_json::from_value::<ScreenPrivacy>(value) else {
+                    return;
+                };
+                let _ = this.update(cx, |sm, cx| sm.apply_screen_privacy(privacy, cx));
+            })
+            .detach();
+        }
         Self {
             frame,
             studio,
@@ -273,6 +301,8 @@ impl StreamManager {
             pinned,
             hidden,
             hide_method,
+            screen_hidden: false,
+            screen_blocked: None,
             clear: DialogHandle::new(false),
             focus,
             _bounds: bounds,
@@ -295,6 +325,42 @@ impl StreamManager {
         self.runtime.spawn(async move {
             let _ = studio.mark_clip(Some(seconds)).await;
         });
+    }
+
+    fn apply_screen_privacy(&mut self, privacy: ScreenPrivacy, cx: &mut Context<Self>) {
+        self.screen_hidden = privacy.hidden;
+        self.screen_blocked = privacy.unavailable;
+        cx.notify();
+    }
+
+    fn set_screen_hidden(&mut self, hide: bool, cx: &mut Context<Self>) {
+        if self.screen_blocked.is_some() {
+            return;
+        }
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let answer = runtime
+                .spawn(async move {
+                    if hide {
+                        studio
+                            .backend()
+                            .request("screen.hide", json!({ "reason": ScreenPrivacyReason::You }))
+                            .await
+                    } else {
+                        studio.backend().request("screen.show", Value::Null).await
+                    }
+                })
+                .await;
+            let Ok(Ok(value)) = answer else {
+                return;
+            };
+            let Ok(privacy) = serde_json::from_value::<ScreenPrivacy>(value) else {
+                return;
+            };
+            let _ = this.update(cx, |sm, cx| sm.apply_screen_privacy(privacy, cx));
+        })
+        .detach();
     }
 
     fn set_pinned(&mut self, pinned: bool, window: &Window, cx: &mut Context<Self>) {
@@ -377,11 +443,14 @@ impl Render for StreamManager {
         let pinned = self.pinned;
         let hidden = self.hidden;
         let hide_method = self.hide_method;
+        let screen_hidden = self.screen_hidden;
+        let screen_blocked = self.screen_blocked.clone();
         let this = cx.entity().downgrade();
         let pin = this.clone();
         let hide = this.clone();
         let clear = this.clone();
         let clip = this.clone();
+        let screen = this.clone();
         let clear_dialog = Dialog::new("stream-manager-clear", &self.clear, "Clear the view?")
             .description(
                 "Chat and Activity in this window are emptied and the messages per minute start over. The Library keeps the history.",
@@ -448,6 +517,8 @@ impl Render for StreamManager {
                     pinned,
                     hidden,
                     hide_method,
+                    screen_hidden,
+                    screen_blocked,
                     width,
                     move |next, _, window, app| {
                         let _ = pin.update(app, |this, cx| this.set_pinned(next, window, cx));
@@ -460,6 +531,9 @@ impl Render for StreamManager {
                     },
                     move |seconds, _window, app| {
                         let _ = clip.update(app, |this, _| this.mark_clip(seconds));
+                    },
+                    move |hide, _window, app| {
+                        let _ = screen.update(app, |this, cx| this.set_screen_hidden(hide, cx));
                     },
                 ))
                 .child(clear_dialog)
