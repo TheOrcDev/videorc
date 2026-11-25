@@ -42,7 +42,15 @@ fn live(cx: &App) -> bool {
 }
 
 /// The menu, built while it shows.
-fn build_menu(account: &Account, tier: &'static str, shell: &WeakEntity<Shell>, cx: &App) -> Menu {
+fn build_menu(
+    account: &Account,
+    tier: &'static str,
+    health: StatusTone,
+    health_label: &str,
+    health_pulse: bool,
+    shell: &WeakEntity<Shell>,
+    cx: &App,
+) -> Menu {
     let signed_in = account.is_signed_in();
     let header = if signed_in {
         account.display_name()
@@ -70,12 +78,23 @@ fn build_menu(account: &Account, tier: &'static str, shell: &WeakEntity<Shell>, 
             ),
             Row::Health => {
                 let shell = shell.clone();
-                menu.separator()
-                    .item(MenuItem::new(copy::HEALTH).on_select(move |window, cx| {
-                        let _ = shell.update(cx, |shell, cx| {
-                            shell.open_page(PageId::Diagnostics, window, cx)
-                        });
-                    }))
+                let health_label = health_label.to_string();
+                menu.separator().item(
+                    MenuItem::new(copy::HEALTH)
+                        .icon(|ink| icon(IconName::Pulse, 16., ink))
+                        .end(move |_| {
+                            StatusDot::new("account-menu-health")
+                                .tone(health)
+                                .label(health_label.clone())
+                                .pulse(health_pulse)
+                                .into_any_element()
+                        })
+                        .on_select(move |window, cx| {
+                            let _ = shell.update(cx, |shell, cx| {
+                                shell.open_page(PageId::Diagnostics, window, cx)
+                            });
+                        }),
+                )
             }
             Row::Settings => {
                 let shell = shell.clone();
@@ -113,12 +132,16 @@ fn build_menu(account: &Account, tier: &'static str, shell: &WeakEntity<Shell>, 
 pub fn row(
     state: &AccountsState,
     needs_sign_in: bool,
+    health: StatusTone,
+    health_label: impl Into<String>,
+    health_pulse: bool,
     shell: WeakEntity<Shell>,
     t: &Theme,
 ) -> impl IntoElement {
     let account = state.account.clone();
     let tier = state.tier_label();
     let name = account.display_name();
+    let health_label = health_label.into();
     let picture = if account.is_signed_in() {
         Avatar::new(initials(&name)).sm().into_any_element()
     } else {
@@ -143,5 +166,15 @@ pub fn row(
         );
     DropdownMenu::new("account-menu")
         .trigger(trigger)
-        .menu(move |_: &mut Window, cx: &mut App| build_menu(&account, tier, &shell, cx))
+        .menu(move |_: &mut Window, cx: &mut App| {
+            build_menu(
+                &account,
+                tier,
+                health,
+                &health_label,
+                health_pulse,
+                &shell,
+                cx,
+            )
+        })
 }

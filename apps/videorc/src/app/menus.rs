@@ -19,8 +19,12 @@
 //! `platform::macos::speech`): a GPUI field is not the AppKit text view the
 //! roles' selectors would reach.
 
-use gpui::{Action, App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, actions};
+use gpui::{
+    Action, App, KeyBinding, KeyBindingContextPredicate, Menu, MenuItem, OsAction, SystemMenuType,
+    actions,
+};
 use gpui_base::input as text;
+use std::rc::Rc;
 use videorc_app_core::desktop::menu::{
     MenuCommand, MenuEntry, MenuPlatform, MenuRole, PageKey, WindowId, app_menu_template,
     release_notes_url,
@@ -59,6 +63,8 @@ actions!(
         TogglePreview,
         ToggleNotes,
         ToggleStreamManager,
+        /// ⌘J: show Stream Manager (P054); ⇧⌘J toggles it (P055).
+        ShowStreamManager,
         ToggleCaptions,
         OpenReleaseNotes,
         ToggleSearch,
@@ -66,6 +72,9 @@ actions!(
         ToggleTheme,
     ]
 );
+
+/// P061: shell chords do nothing while a dialog, popover, select or menu is open.
+pub const SHELL_GATE: &str = "!Dialog && !Popover && !Select && !Menu";
 
 /// The app's name in its menus.
 pub const APP_NAME: &str = "Videorc";
@@ -167,10 +176,16 @@ fn bind(
     bindings: &mut Vec<KeyBinding>,
     accelerator: Option<String>,
     action: &dyn Action,
+    context: Option<&str>,
 ) {
     if let Some(accelerator) = accelerator {
         let keys = keystroke(&accelerator);
-        match KeyBinding::load(&keys, action.boxed_clone(), None, false, None, cx) {
+        let predicate = context.map(|context| {
+            Rc::new(
+                KeyBindingContextPredicate::parse(context).expect("shell key context must parse"),
+            )
+        });
+        match KeyBinding::load(&keys, action.boxed_clone(), predicate, false, None, cx) {
             Ok(binding) => bindings.push(binding),
             Err(error) => {
                 eprintln!("[videorc-app] menu key {accelerator} doesn't bind: {error:?}")
@@ -187,7 +202,7 @@ fn items(cx: &App, entries: &[MenuEntry], bindings: &mut Vec<KeyBinding>) -> Vec
             MenuEntry::Separator => out.push(MenuItem::separator()),
             MenuEntry::Role(role) => match role_item(*role) {
                 RoleItem::Action(action) => {
-                    bind(cx, bindings, entry.accelerator(), action.as_ref());
+                    bind(cx, bindings, entry.accelerator(), action.as_ref(), None);
                     out.push(MenuItem::Action {
                         name: title.into(),
                         action,
@@ -197,7 +212,7 @@ fn items(cx: &App, entries: &[MenuEntry], bindings: &mut Vec<KeyBinding>) -> Vec
                     });
                 }
                 RoleItem::Os(action, os_action) => {
-                    bind(cx, bindings, entry.accelerator(), action.as_ref());
+                    bind(cx, bindings, entry.accelerator(), action.as_ref(), None);
                     out.push(MenuItem::Action {
                         name: title.into(),
                         action,
@@ -218,7 +233,14 @@ fn items(cx: &App, entries: &[MenuEntry], bindings: &mut Vec<KeyBinding>) -> Vec
                     MenuCommand::OpenReleaseNotes => Some(Box::new(OpenReleaseNotes) as _),
                 };
                 if let Some(action) = action {
-                    bind(cx, bindings, entry.accelerator(), action.as_ref());
+                    // Page and window chords share Electron's modal gate (P061).
+                    bind(
+                        cx,
+                        bindings,
+                        entry.accelerator(),
+                        action.as_ref(),
+                        Some(SHELL_GATE),
+                    );
                     out.push(MenuItem::Action {
                         name: title.into(),
                         action,
@@ -296,7 +318,13 @@ fn item_bindings(cx: &App, entries: &[MenuEntry], bindings: &mut Vec<KeyBinding>
                     MenuCommand::OpenReleaseNotes => None,
                 };
                 if let Some(action) = action {
-                    bind(cx, bindings, entry.accelerator(), action.as_ref());
+                    bind(
+                        cx,
+                        bindings,
+                        entry.accelerator(),
+                        action.as_ref(),
+                        Some(SHELL_GATE),
+                    );
                 }
             }
             MenuEntry::Submenu {
@@ -309,15 +337,9 @@ fn item_bindings(cx: &App, entries: &[MenuEntry], bindings: &mut Vec<KeyBinding>
 
 /// The windows that exist; each handles its own command
 /// (`screens::stream_manager::window::install`, `screens::notes`, and the
-/// Preview's in `main.rs`). The Preview floats on macOS only; the Captions
-/// reader is not in this build yet.
+/// Preview's in `main.rs`). Captions reader waits on its window install.
 fn windows() -> Vec<WindowId> {
-    let mut windows = Vec::new();
-    if cfg!(target_os = "macos") {
-        windows.push(WindowId::Preview);
-    }
-    windows.extend([WindowId::StreamManager, WindowId::Notes]);
-    windows
+    vec![WindowId::Preview, WindowId::StreamManager, WindowId::Notes]
 }
 
 /// The roles' handlers, and the commands that work now. Pages and windows
@@ -327,14 +349,12 @@ pub fn install(cx: &mut App) {
     #[cfg(target_os = "macos")]
     super::speech::install(cx);
     cx.bind_keys([
-        KeyBinding::new(
-            "secondary-k",
-            ToggleSearch,
-            Some("!Dialog && !Popover && !Select && !Menu"),
-        ),
+        KeyBinding::new("secondary-k", ToggleSearch, Some(SHELL_GATE)),
         KeyBinding::new("secondary-k", ToggleSearch, Some("CommandPalette")),
-        KeyBinding::new("secondary-,", ShowSettings, None),
-        KeyBinding::new("secondary-/", ShowShortcuts, None),
+        KeyBinding::new("secondary-,", ShowSettings, Some(SHELL_GATE)),
+        KeyBinding::new("secondary-/", ShowShortcuts, Some(SHELL_GATE)),
+        // ⌘J shows Stream Manager (P054); the SM window's own ⌘J focuses Buddy.
+        KeyBinding::new("secondary-j", ShowStreamManager, Some(SHELL_GATE)),
         // Plain D (no modifiers): Electron's theme toggle. Skip while a
         // dialog, menu, select or text field holds the key context.
         KeyBinding::new(
@@ -350,6 +370,9 @@ pub fn install(cx: &mut App) {
         cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
         cx.bind_keys(menu_less_bindings(cx, &windows()));
     }
+    cx.on_action(|_: &ShowStreamManager, cx| {
+        crate::screens::stream_manager::window::show(cx);
+    });
     // Quit and Close Window on the main window ask first while on air.
     cx.on_action(|_: &Quit, cx| super::exit::ExitGuard::request_quit(cx));
     cx.on_action(|_: &HideApp, cx| cx.hide());
