@@ -465,7 +465,14 @@ fn main() -> Result<()> {
         let sources = cx.new(|cx| {
             SourcesPanel::new(studio.clone(), permissions.clone(), core_handle.clone(), cx)
         });
-        let output = cx.new(|cx| OutputPanel::new(studio.clone(), core_handle.clone(), cx));
+        let output = cx.new(|cx| {
+            OutputPanel::new(
+                studio.clone(),
+                core_handle.clone(),
+                global_keys.clone(),
+                cx,
+            )
+        });
         // Captions ⌘4 and the reader share one caption feed (plan 260, L2).
         screens::captions::install(studio.clone(), core_handle.clone(), cx);
         let destinations =

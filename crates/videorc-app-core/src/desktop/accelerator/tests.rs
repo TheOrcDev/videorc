@@ -335,3 +335,20 @@ fn the_tables_are_the_renderers() {
     assert!(owner.contains("return `Already used by ${label}.`"));
     assert!(owner.contains("return `Another app uses ${acceleratorLabel(accelerator, platform)}`"));
 }
+
+#[test]
+fn gpui_key_names_become_dom_codes() {
+    for (key, code) in [
+        ("m", "KeyM"),
+        ("5", "Digit5"),
+        ("f12", "F12"),
+        ("up", "ArrowUp"),
+        ("-", "Minus"),
+        ("space", "Space"),
+        ("µ", "Unsupported"),
+        ("f25", "Unsupported"),
+        ("shift", "Unsupported"),
+    ] {
+        assert_eq!(code_for_gpui_key(key), code, "{key}");
+    }
+}
