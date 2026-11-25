@@ -559,7 +559,14 @@ fn main() -> Result<()> {
                 cx,
             )
         });
-        let images = cx.new(|cx| ImagesPanel::new(studio.clone(), core_handle.clone(), cx));
+        let images = cx.new(|cx| {
+            ImagesPanel::new(
+                studio.clone(),
+                core_handle.clone(),
+                backend_state.clone(),
+                cx,
+            )
+        });
         let go_live = cx.new(|cx| GoLiveDialog::new(studio.clone(), core_handle.clone(), cx));
         let first_run = cx.new(|cx| {
             FirstRunScreen::new(studio.clone(), permissions.clone(), core_handle.clone(), cx)
