@@ -37,6 +37,10 @@ pub enum Delivery {
 pub enum Navigate {
     Action(NoticeAction),
     Settings(videorc_app_core::settings_page::SettingsTab),
+    /// The cloud-controller entry's Turn on (plan 249 S24): this computer's
+    /// camera and microphone go to the room after a takeover
+    /// (`TalkShowRoomHost::enable_devices`).
+    EnableRoomDevices,
 }
 impl EventEmitter<Delivery> for Hub {}
 impl EventEmitter<Navigate> for Hub {}
@@ -224,6 +228,24 @@ impl Hub {
     }
     /// A toast belonging to an explicit press (for example marker delete/Undo).
     /// Automatic work uses the typed notice store instead.
+    /// Plan 249 S24 (`publishCloudController` / `withdrawCloudController`):
+    /// while this computer's devices are held after a takeover, the entry
+    /// that turns them on, naming what else stays off; `None` withdraws it.
+    pub fn set_cloud_controller(&mut self, needs: Option<Vec<String>>, cx: &mut Context<Self>) {
+        use videorc_app_core::notices::sources::cloud::{CLOUD_CONTROLLER_KEY, cloud_controller};
+        match needs {
+            Some(needs) => {
+                let needs: Vec<&str> = needs.iter().map(String::as_str).collect();
+                self.store.publish(cloud_controller(&needs), now());
+            }
+            None if self.store.has(CLOUD_CONTROLLER_KEY) => {
+                self.store.withdraw(CLOUD_CONTROLLER_KEY, None, now());
+            }
+            None => return,
+        }
+        self.flush(cx);
+    }
+
     pub fn press_toast(&mut self, id: String, toast: ToastData, cx: &mut Context<Self>) {
         self.pressed();
         cx.emit(Delivery::PressToast { id, toast });
@@ -306,6 +328,13 @@ impl Hub {
             "open-shortcuts" => cx.emit(Navigate::Settings(
                 videorc_app_core::settings_page::SettingsTab::Shortcuts,
             )),
+            _ if matches!(
+                videorc_app_core::notices::sources::cloud::cloud_press(key, id),
+                Some(videorc_app_core::notices::sources::cloud::CloudPress::TurnOn)
+            ) =>
+            {
+                cx.emit(Navigate::EnableRoomDevices)
+            }
             _ => {
                 if let Some(job) = self.watchdog_job(key, id) {
                     self.run_watchdog(job, key, cx);

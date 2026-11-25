@@ -59,6 +59,9 @@ pub struct TalkShowRoomHost {
     room_media: Option<RoomMedia>,
     /// The takeover hold the streamer last turned the devices on for.
     enabled_epoch: u64,
+    /// The cloud-controller entry last asked for (what else stays off), so a
+    /// repeat publishes nothing.
+    controller_notice: Option<Vec<String>>,
     /// The params last sent (microphone, camera, sheet), so a repeat sends
     /// nothing; cleared when the room closes (the backend lets go).
     sent: [Option<Value>; 3],
@@ -174,6 +177,24 @@ impl TalkShowRoomHost {
             }
         })
         .detach();
+        // The cloud-controller entry's Turn on.
+        if let Some(hub) = cx
+            .try_global::<crate::screens::notifications::Shared>()
+            .map(|shared| shared.0.clone())
+        {
+            cx.subscribe(
+                &hub,
+                |host, _, navigate: &crate::screens::notifications::Navigate, cx| {
+                    if matches!(
+                        navigate,
+                        crate::screens::notifications::Navigate::EnableRoomDevices
+                    ) {
+                        host.enable_devices(cx);
+                    }
+                },
+            )
+            .detach();
+        }
         let initial = talk_show.read(cx).value().clone();
         let mut host = Self {
             studio,
@@ -184,6 +205,7 @@ impl TalkShowRoomHost {
             last_recording_active: false,
             room_media: None,
             enabled_epoch: 0,
+            controller_notice: None,
             sent: [None, None, None],
             frames: HashMap::new(),
             monitor: false,
@@ -284,6 +306,30 @@ impl TalkShowRoomHost {
                 }
             }
             FramePoll::Unchanged => {}
+        }
+    }
+
+    /// While the room is open and the devices are held, the entry that turns
+    /// them on (with the controller's other needs); withdrawn otherwise.
+    fn sync_controller_notice(&mut self, cx: &mut Context<Self>) {
+        let wanted = (self.room_open() && self.devices_held()).then(|| {
+            self.studio
+                .cloud_now()
+                .status
+                .and_then(|status| status.controller)
+                .and_then(|controller| controller.get("needsEnable").cloned())
+                .and_then(|needs| serde_json::from_value::<Vec<String>>(needs).ok())
+                .unwrap_or_default()
+        });
+        if wanted == self.controller_notice {
+            return;
+        }
+        self.controller_notice = wanted.clone();
+        if let Some(hub) = cx
+            .try_global::<crate::screens::notifications::Shared>()
+            .map(|shared| shared.0.clone())
+        {
+            hub.update(cx, |hub, cx| hub.set_cloud_controller(wanted, cx));
         }
     }
 
@@ -402,6 +448,7 @@ impl TalkShowRoomHost {
     /// backend answers `held: false` while it doesn't hold the seat, and
     /// lets every device go when the room ends.
     fn sync_room(&mut self, cx: &mut Context<Self>) {
+        self.sync_controller_notice(cx);
         if !self.room_open() {
             self.sent = [None, None, None];
             if self.room_media.take().is_some() || !self.frames.is_empty() {
