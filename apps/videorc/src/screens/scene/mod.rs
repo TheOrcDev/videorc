@@ -80,6 +80,8 @@ pub struct ScenePage {
     /// Set key….
     set_key: DialogHandle,
     setting_key: Option<setkey::SettingKey>,
+    /// Hide screen's Add app… popover.
+    add_app_open: bool,
     /// The global keys, kept quiet while Set key… records.
     hotkeys: crate::app::hotkeys::Hotkeys,
     /// Draws again when the switch status line is due (no timer lives in
@@ -174,6 +176,7 @@ impl ScenePage {
             guesting: None,
             resolve: DialogHandle::new(false),
             resolving: None,
+            add_app_open: false,
             set_key: DialogHandle::new(false),
             setting_key: None,
             hotkeys,

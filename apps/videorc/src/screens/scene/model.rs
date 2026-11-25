@@ -68,6 +68,8 @@ pub mod copy {
     pub const PASSWORD_MANAGERS: &str = "Password managers";
     pub const REMOVE: &str = "Remove";
     pub const RESTORE_BUILT_IN: &str = "Restore built-in apps";
+    pub const ADD_APP: &str = "Add app…";
+    pub const OPEN_APPS: &str = "Open apps";
     // Layout.
     pub const LAYOUT_TITLE: &str = "Layout";
     pub const ORIENTATION: &str = "Orientation";
