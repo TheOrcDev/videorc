@@ -170,6 +170,9 @@ pub struct DashboardPushCoalescer {
     last_push_at: i64,
     pending: Option<LiveDashboard>,
     due_at: Option<i64>,
+    /// Bumped each time a trailing push is due, so only the newest timer
+    /// fires it.
+    timer: u64,
 }
 
 impl Default for DashboardPushCoalescer {
@@ -178,6 +181,7 @@ impl Default for DashboardPushCoalescer {
             last_push_at: i64::MIN / 4,
             pending: None,
             due_at: None,
+            timer: 0,
         }
     }
 }
@@ -194,7 +198,24 @@ impl DashboardPushCoalescer {
             return self.flush(now_ms);
         }
         self.due_at = Some(now_ms + wait);
+        self.timer += 1;
         None
+    }
+
+    /// When the trailing push is due, and the timer that owns it.
+    pub fn due(&self) -> Option<(i64, u64)> {
+        self.due_at.map(|due| (due, self.timer))
+    }
+
+    /// The timer armed for the trailing push fired (Electron's
+    /// `setTimeout(send, wait)`): it pushes unless a flush or a dispose came
+    /// first. It never waits on the wall clock again, so a sleep that ends a
+    /// moment early still pushes.
+    pub fn fire(&mut self, timer: u64, now_ms: i64) -> Option<LiveDashboard> {
+        if timer != self.timer || self.due_at.is_none() {
+            return None;
+        }
+        self.flush(now_ms)
     }
 
     /// Pushes the pending state when its timer is due.
@@ -384,10 +405,10 @@ impl DashboardRelay {
                     .iter()
                     .map(|leg| DashboardTarget {
                         target_id: leg.target_id.clone(),
-                        platform: String::new(),
-                        label: String::new(),
+                        platform: leg.platform.clone(),
+                        label: leg.label.clone(),
                         state: leg.state.clone(),
-                        message: None,
+                        message: leg.message.clone(),
                     })
                     .collect();
                 if targets != self.state.targets {
@@ -467,6 +488,20 @@ pub(super) struct DashboardInner {
     pub coalescer: DashboardPushCoalescer,
     pub hydrated_session_id: Option<String>,
     pub cloud_state_seen: bool,
+    /// A lag's totals refresh is out (single-flight).
+    pub totals_refreshing: bool,
+}
+
+/// Ends the totals refresh however its task ends.
+struct TotalsRefreshDone(Arc<Mutex<DashboardInner>>);
+
+impl Drop for TotalsRefreshDone {
+    fn drop(&mut self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .totals_refreshing = false;
+    }
 }
 
 impl DashboardInner {
@@ -476,6 +511,7 @@ impl DashboardInner {
             coalescer: DashboardPushCoalescer::default(),
             hydrated_session_id: None,
             cloud_state_seen: false,
+            totals_refreshing: false,
         }
     }
 }
@@ -517,8 +553,7 @@ impl<B: StudioBackend> Studio<B> {
         if !changed {
             return None;
         }
-        let state = inner.relay.current().clone();
-        inner.coalescer.schedule(state, now_ms)
+        schedule_push(&self.dashboard, &self.dashboard_tx, inner, now_ms)
     }
 
     fn publish_dashboard(&self, state: Option<LiveDashboard>) {
@@ -547,7 +582,14 @@ impl<B: StudioBackend> Studio<B> {
                             if status.session_id.is_some() && session_runs_for_the_window(&status) {
                                 hydrate = status.session_id.clone();
                             }
-                            inner.relay.recording(&status, &now)
+                            let changed = inner.relay.recording(&status, &now);
+                            // Session over: the viewer chip clears, never
+                            // freezes (`use-studio.tsx`, rider V2).
+                            let ended = matches!(
+                                status.state,
+                                RecordingState::Idle | RecordingState::Failed
+                            ) && inner.relay.viewers(None, &now);
+                            changed || ended
                         }
                         Err(error) => {
                             self.config.logger.warn(format!(
@@ -603,8 +645,10 @@ impl<B: StudioBackend> Studio<B> {
                     }
                 }
                 crate::client::names::EVENTS_LAGGED => {
-                    refresh_totals = inner.relay.confirmed_session_id().map(str::to_string);
-                    true
+                    // `refreshTotals(relay.current().sessionId)`: nothing
+                    // changed yet; the answer is what may.
+                    refresh_totals = inner.relay.current().session_id.clone();
+                    false
                 }
                 _ => return false,
             };
@@ -618,7 +662,7 @@ impl<B: StudioBackend> Studio<B> {
             self.kick_dashboard_hydrate(session_id);
         }
         if let Some(session_id) = refresh_totals {
-            self.kick_dashboard_hydrate(session_id);
+            self.kick_dashboard_totals(session_id);
         }
         handled
     }
@@ -691,6 +735,25 @@ impl<B: StudioBackend> Studio<B> {
         });
     }
 
+    /// `refreshTotals`: the chat totals again after a lag, whether or not
+    /// the session was hydrated; a refresh already out answers for this one.
+    fn kick_dashboard_totals(&self, session_id: String) {
+        {
+            let mut inner = self.lock_dashboard();
+            if inner.totals_refreshing {
+                return;
+            }
+            inner.totals_refreshing = true;
+        }
+        let backend = Arc::clone(&self.backend);
+        let dashboard = Arc::clone(&self.dashboard);
+        let dashboard_tx = self.dashboard_tx.clone();
+        tokio::spawn(async move {
+            let _done = TotalsRefreshDone(Arc::clone(&dashboard));
+            read_dashboard_totals(backend.as_ref(), &dashboard, &dashboard_tx, &session_id).await;
+        });
+    }
+
     /// Seed cloud once when the connection opens (Electron's mid-show reload).
     pub(super) async fn read_dashboard(&self) {
         let seen = self.lock_dashboard().cloud_state_seen;
@@ -717,7 +780,6 @@ async fn read_dashboard_backfill<B: StudioBackend>(
     session_id: String,
 ) {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let now_ms = chrono::Utc::now().timestamp_millis();
     if let Ok(page) = backend
         .livestream_request(VIEWERS_LIST, json!({ "sessionId": session_id }))
         .await
@@ -729,7 +791,7 @@ async fn read_dashboard_backfill<B: StudioBackend>(
             .flatten()
             .filter_map(|sample| serde_json::from_value(sample.clone()).ok())
             .collect();
-        publish_if_changed(&dashboard, &dashboard_tx, now_ms, |inner| {
+        publish_if_changed(&dashboard, &dashboard_tx, |inner| {
             inner.relay.backfill_viewers(&session_id, &samples, &now)
         });
     } else {
@@ -741,42 +803,55 @@ async fn read_dashboard_backfill<B: StudioBackend>(
     {
         if let Ok(snapshot) = serde_json::from_value::<AudienceSnapshot>(snapshot) {
             if snapshot.session_id == session_id {
-                publish_if_changed(&dashboard, &dashboard_tx, now_ms, |inner| {
+                publish_if_changed(&dashboard, &dashboard_tx, |inner| {
                     inner.relay.audience(snapshot, &now)
                 });
             }
         }
     }
-    if let Ok(totals) = backend
+    read_dashboard_totals(backend.as_ref(), &dashboard, &dashboard_tx, &session_id).await;
+}
+
+/// `sessions.comments.totals` for the session still on the dashboard.
+async fn read_dashboard_totals<B: StudioBackend>(
+    backend: &B,
+    dashboard: &Arc<Mutex<DashboardInner>>,
+    dashboard_tx: &watch::Sender<LiveDashboard>,
+    session_id: &str,
+) {
+    let Ok(totals) = backend
         .livestream_request(COMMENTS_TOTALS, json!({ "sessionId": session_id }))
         .await
-    {
-        if let Ok(totals) = serde_json::from_value::<SessionChatTotals>(totals) {
-            publish_if_changed(&dashboard, &dashboard_tx, now_ms, |inner| {
-                if inner.relay.current().session_id.as_deref() == Some(session_id.as_str()) {
-                    inner.relay.chat_totals(totals, &now)
-                } else {
-                    false
-                }
-            });
+    else {
+        return;
+    };
+    let Ok(totals) = serde_json::from_value::<SessionChatTotals>(totals) else {
+        return;
+    };
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    publish_if_changed(dashboard, dashboard_tx, |inner| {
+        if inner.relay.current().session_id.as_deref() == Some(session_id) {
+            inner.relay.chat_totals(totals, &now)
+        } else {
+            false
         }
-    }
+    });
 }
 
 fn publish_if_changed(
-    dashboard: &Mutex<DashboardInner>,
+    dashboard: &Arc<Mutex<DashboardInner>>,
     dashboard_tx: &watch::Sender<LiveDashboard>,
-    now_ms: i64,
     edit: impl FnOnce(&mut DashboardInner) -> bool,
 ) {
+    // The clock when the answer lands, not when the backfill began.
+    let now_ms = chrono::Utc::now().timestamp_millis();
     let push = {
         let mut inner = dashboard
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let changed = edit(&mut inner);
         if changed {
-            let state = inner.relay.current().clone();
-            inner.coalescer.schedule(state, now_ms)
+            schedule_push(dashboard, dashboard_tx, &mut inner, now_ms)
         } else {
             None
         }
@@ -784,6 +859,56 @@ fn publish_if_changed(
     if let Some(state) = push {
         let _ = dashboard_tx.send(state);
     }
+}
+
+/// Schedules the relay's state on the coalescer. A trailing push gets a real
+/// timer (Electron's `setTimeout(send, wait)`): without one, a second change
+/// within a second left the push due forever and the store never moved
+/// again.
+fn schedule_push(
+    dashboard: &Arc<Mutex<DashboardInner>>,
+    dashboard_tx: &watch::Sender<LiveDashboard>,
+    inner: &mut DashboardInner,
+    now_ms: i64,
+) -> Option<LiveDashboard> {
+    let armed = inner.coalescer.due();
+    let state = inner.relay.current().clone();
+    let push = inner.coalescer.schedule(state, now_ms);
+    if let (None, Some((due, timer))) = (armed, inner.coalescer.due()) {
+        arm_push_timer(
+            Arc::clone(dashboard),
+            dashboard_tx.clone(),
+            due - now_ms,
+            timer,
+        );
+    }
+    push
+}
+
+/// Sleeps until the trailing push is due, then sends it. The lock is never
+/// held across the sleep. Without a runtime (a plain unit test) nothing is
+/// armed and the test's clock drives `tick_dashboard`.
+fn arm_push_timer(
+    dashboard: Arc<Mutex<DashboardInner>>,
+    dashboard_tx: watch::Sender<LiveDashboard>,
+    wait_ms: i64,
+    timer: u64,
+) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    runtime.spawn(async move {
+        let wait = std::time::Duration::from_millis(u64::try_from(wait_ms).unwrap_or(0));
+        tokio::time::sleep(wait).await;
+        let push = dashboard
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .coalescer
+            .fire(timer, chrono::Utc::now().timestamp_millis());
+        if let Some(state) = push {
+            let _ = dashboard_tx.send(state);
+        }
+    });
 }
 
 #[cfg(test)]

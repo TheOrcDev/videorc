@@ -138,7 +138,10 @@ fn talk_show_room_reads_as_on_air_under_the_show_id() {
         })),
         legs: vec![CloudLeg {
             target_id: "twitch-1".into(),
+            platform: "twitch".into(),
+            label: "Twitch".into(),
             state: "live".into(),
+            message: None,
         }],
         live_seconds: Some(30),
         ..CloudStatus::default()
@@ -198,6 +201,42 @@ fn coalescer_pushes_at_most_once_a_second() {
         .tick(PUSH_INTERVAL_MS as i64)
         .expect("trailing push");
     assert_eq!(trailing.updated_at, "t2");
+}
+
+#[test]
+fn only_the_newest_timer_fires_the_trailing_push() {
+    let mut coalescer = DashboardPushCoalescer::default();
+    let state = |at: &str| LiveDashboard {
+        updated_at: at.into(),
+        ..LiveDashboard::default()
+    };
+    assert!(coalescer.schedule(state("t1"), 0).is_some());
+    assert!(
+        coalescer.due().is_none(),
+        "the first push leaves nothing due"
+    );
+    assert!(coalescer.schedule(state("t2"), 100).is_none());
+    let (due, first_timer) = coalescer.due().expect("a trailing push is due");
+    assert_eq!(due, PUSH_INTERVAL_MS as i64);
+    // A sleep that ends a moment early still pushes.
+    let pushed = coalescer
+        .fire(first_timer, due - 5)
+        .expect("the timer pushes");
+    assert_eq!(pushed.updated_at, "t2");
+    assert!(coalescer.fire(first_timer, due).is_none(), "nothing twice");
+
+    assert!(coalescer.schedule(state("t3"), due + 10).is_none());
+    let (_, second_timer) = coalescer.due().unwrap();
+    assert_ne!(second_timer, first_timer);
+    assert!(
+        coalescer.fire(first_timer, due + 2_000).is_none(),
+        "a stale timer"
+    );
+    coalescer.dispose();
+    assert!(
+        coalescer.fire(second_timer, due + 2_000).is_none(),
+        "disposed"
+    );
 }
 
 #[test]

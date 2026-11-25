@@ -4538,3 +4538,38 @@ async fn a_cloud_recording_stop_that_did_not_happen_says_so_once() {
     assert_eq!(stop_calls(&backend), 0);
     assert_eq!(said(&mut notices), expected);
 }
+
+// --- The live dashboard's 1 s push (#1969 review) -------------------------
+
+#[tokio::test]
+async fn a_second_dashboard_change_within_a_second_still_reaches_the_store() {
+    use videorc_app_core::stream_manager::dashboard::SessionState;
+
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    studio
+        .handle_event(BackendEvent::RecordingStatus(Box::new(live("s-dash"))))
+        .await;
+    // The session ends well within the push interval: the trailing push
+    // must still go out on its own timer, with no tick from anyone.
+    studio
+        .handle_event(BackendEvent::RecordingStatus(Box::new(status(
+            RecordingState::Idle,
+            Some("s-dash"),
+        ))))
+        .await;
+    let off_air = async {
+        loop {
+            let state = studio.dashboard_now();
+            if state.session == SessionState::OffAir && state.session_id.is_some() {
+                return state;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+    let state = tokio::time::timeout(std::time::Duration::from_secs(5), off_air)
+        .await
+        .expect("the trailing push lands within its second");
+    assert_eq!(state.session_id.as_deref(), Some("s-dash"));
+}

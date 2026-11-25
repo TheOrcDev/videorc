@@ -57,8 +57,12 @@ pub struct CloudLiveInterval {
 #[serde(default, rename_all = "camelCase")]
 pub struct CloudLeg {
     pub target_id: String,
+    /// The Activity pane's words for the leg (`StreamTargetRuntime`).
+    pub platform: String,
+    pub label: String,
     /// `idle`, `connecting`, `live`, `warning`, `failed` or `stopped`.
     pub state: String,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
