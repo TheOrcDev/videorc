@@ -28,7 +28,7 @@ mod test_dialog;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{AnyElement, Context, EventEmitter, Window, canvas, div, prelude::*, px};
+use gpui::{Context, EventEmitter, Window, canvas, div, prelude::*};
 use serde_json::{Value, json};
 use videorc_app_core::buddy::chat::display_name;
 use videorc_app_core::buddy::copy as words;
@@ -41,10 +41,10 @@ use videorc_app_core::user_error::{Failure, UserErrorContext, user_error_message
 use videorc_app_core::{BackendClient, BackendEvent, Studio};
 use videorc_kit::dialog::DialogHandle;
 use videorc_kit::input::InputState;
+use videorc_kit::page::{CONFIG_GRID_TWO_COLUMNS, ConfigGrid, PageStack};
 use videorc_kit::page_tabs::PageTabs;
 use videorc_kit::textarea::TextareaState;
 use videorc_kit::theme::{self, FONT, hsla};
-use videorc_kit::tokens::Theme;
 use videorc_protocol::cohost::CohostPersona;
 
 use status::Placement;
@@ -68,8 +68,6 @@ const LIBRARY_CHANGED_EVENT: &str = "cohost.library.changed";
 /// Premium changed: the create gates read again.
 const ENTITLEMENTS_UPDATED: &str = "entitlements.updated";
 const SETTINGS_CHANGED_EVENT: &str = "cohost.settings.changed";
-/// `ConfigGrid`: two columns from 940 px of page (`@min-[940px]/page`).
-const CONFIG_GRID_TWO_COLUMNS: f32 = 940.;
 
 /// A refused library call, as one sentence (`problemOf`,
 /// `use-buddy-library.ts`).
@@ -180,8 +178,8 @@ pub struct AvatarScreen {
     user_data_dir: PathBuf,
     tab: Tab,
     active: bool,
-    /// The page's width as last laid out: the gallery's tracks and the
-    /// config grid's columns follow the page, never the window.
+    /// The page's width as last laid out: the config grid's column count,
+    /// which decides whether Reactions draws its own bottom hairline.
     page_width: f32,
     persona: Option<CohostPersona>,
     /// "About you": the avatar's notes (`cohost.settings` `notes`).
@@ -793,36 +791,6 @@ impl AvatarScreen {
     }
 }
 
-/// `ConfigGrid` for two sections: one column with the first's hairline
-/// between them, or two from 940 px of page with a hairline between the
-/// columns; the grid's own hairline closes it either way.
-fn config_grid(
-    first: Option<AnyElement>,
-    second: Option<AnyElement>,
-    two_columns: bool,
-    t: &Theme,
-) -> Option<AnyElement> {
-    if first.is_none() && second.is_none() {
-        return None;
-    }
-    let grid = div().flex().border_b_1().border_color(hsla(t.border));
-    let grid = if two_columns {
-        grid.flex_row()
-            .children(first.map(|section| {
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .border_r_1()
-                    .border_color(hsla(t.border))
-                    .child(section)
-            }))
-            .children(second.map(|section| div().flex_1().min_w(px(0.)).child(section)))
-    } else {
-        grid.flex_col().children(first).children(second)
-    };
-    Some(grid.into_any_element())
-}
-
 fn sync_handle(
     handle: &DialogHandle,
     want_open: &mut bool,
@@ -881,21 +849,29 @@ impl Render for AvatarScreen {
                 )
                 .absolute()
                 .size_full();
+                // The grid's own hairline closes it (`border-b`); its
+                // sections drop theirs in two columns, so the grid is told
+                // the count the page measured.
+                let pet_settings =
+                    (reactions_section.is_some() || motion_section.is_some()).then(|| {
+                        div().border_b_1().border_color(hsla(t.border)).child(
+                            ConfigGrid::new("avatar-pet-settings")
+                                .two_columns(two_columns)
+                                .children(reactions_section)
+                                .children(motion_section),
+                        )
+                    });
                 div()
                     .relative()
-                    .flex()
-                    .flex_col()
                     .child(measure)
-                    .child(status::render_status(self, window, cx))
-                    .child(library::render_library(self, window, cx))
-                    .children(persona::render_persona(self, window, cx))
-                    .children(look::render_look(self, window, cx))
-                    .children(config_grid(
-                        reactions_section,
-                        motion_section,
-                        two_columns,
-                        t,
-                    ))
+                    .child(
+                        PageStack::new()
+                            .child(status::render_status(self, window, cx))
+                            .child(library::render_library(self, window, cx))
+                            .children(persona::render_persona(self, window, cx))
+                            .children(look::render_look(self, window, cx))
+                            .children(pet_settings),
+                    )
                     .into_any_element()
             }
             Tab::Greetings => div()
