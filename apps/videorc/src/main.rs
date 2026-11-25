@@ -397,6 +397,7 @@ fn main() -> Result<()> {
         );
         menus::install(cx);
         studio_screen::bind_keys(cx);
+        screens::scene::bind_keys(cx);
         screens::notifications::install_keys(cx);
         let notices = cx.new(|cx| {
             screens::notifications::Hub::new(
@@ -641,6 +642,7 @@ fn main() -> Result<()> {
                         studio.clone(),
                         core_handle.clone(),
                         global_keys.clone(),
+                        preview.clone(),
                         window,
                         cx,
                     )

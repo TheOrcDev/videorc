@@ -27,12 +27,12 @@ use videorc_kit::input::InputState;
 use super::AppStudio;
 use picker::PickerMode;
 
-/// Called once when the dialog it was opened with closes: `true` when its
-/// write or apply went through.
 /// The ⋯ menu's words for the dialogs whose copy lives here.
 pub const SET_KEY_LABEL: &str = setkey::copy::MENU_ITEM;
 pub const GUESTS_LABEL: &str = guests::copy::MENU_ITEM;
 
+/// Called once when the dialog it was opened with closes: `true` when its
+/// write or apply went through.
 pub type Done = Box<dyn FnOnce(bool, &mut Window, &mut App)>;
 
 /// The Rename dialog while it is open.
@@ -141,7 +141,8 @@ impl SceneDialogs {
         self.succeeded = false;
     }
 
-    fn any_open(&self) -> bool {
+    /// A scene dialog is open (the page's ⌘Z waits for it).
+    pub fn any_open(&self) -> bool {
         self.renaming.is_some()
             || self.deleting.is_some()
             || self.picking.is_some()
