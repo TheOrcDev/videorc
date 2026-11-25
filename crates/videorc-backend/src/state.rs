@@ -1134,6 +1134,10 @@ pub struct AppState {
     pub compositor: CompositorSlot,
     /// Plan 260 S1.7: the CPU preview ring (route (d)) the backend writes.
     pub preview_cpu_ring: Arc<crate::preview_cpu_ring::PreviewCpuRingService>,
+    /// Plan 260 (L5): the playback's CPU ring (Windows and Linux) and the
+    /// decoder's frame store it reads (`playback_cpu_ring.rs`).
+    pub playback_cpu_ring: Arc<crate::preview_cpu_ring::PreviewCpuRingService>,
+    pub playback_frames: Arc<crate::playback_cpu_ring::PlaybackFrames>,
     /// Serializes compositor worker stop/start handoffs so concurrent preview and
     /// recording ownership changes cannot orphan a `spawn_blocking` render worker.
     pub compositor_lifecycle: Arc<tokio::sync::Mutex<()>>,
@@ -1526,6 +1530,8 @@ impl AppState {
             windows_d3d11_media: Arc::new(StdMutex::new(WindowsD3d11MediaCoordinator::new())),
             compositor: Arc::new(tokio::sync::Mutex::new(initial_compositor_state())),
             preview_cpu_ring: Arc::new(crate::preview_cpu_ring::PreviewCpuRingService::default()),
+            playback_cpu_ring: Arc::new(crate::preview_cpu_ring::PreviewCpuRingService::default()),
+            playback_frames: Arc::new(crate::playback_cpu_ring::PlaybackFrames::default()),
             compositor_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             scene: Arc::new(tokio::sync::Mutex::new(default_scene())),
             scene_commit: Arc::new(tokio::sync::Mutex::new(())),
