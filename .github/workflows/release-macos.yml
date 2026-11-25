@@ -23,19 +23,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-macos-${{ github.ref }}
-  cancel-in-progress: true
+  # Prevent an older changelog or latest pointer from racing another platform.
+  group: release-publication
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   macos:
-    # Distinct refs may build independently, but publishing the shared feed
-    # still serializes with exact-candidate promotion.
-    concurrency:
-      group: release-publication
-      cancel-in-progress: false
     if: ${{ vars.VIDEORC_RELEASE_CONTROLLER_ENABLED != 'true' }}
     name: Build signed macOS artifact
     runs-on: macos-15

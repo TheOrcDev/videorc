@@ -19,10 +19,6 @@ run-name: ${{ inputs.correlation || 'release-control-reconcile' }}
 permissions:
   contents: read
   actions: read
-concurrency:
-  group: release-control-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   submit:
     if: >-
