@@ -666,6 +666,17 @@ impl PlaybackElement {
         self.layer.is_some()
     }
 
+    /// The frame the UI last set on the player's layer (the smokes'
+    /// geometry read).
+    pub fn frame(&self) -> Option<LayerRect> {
+        self.layer.as_ref().and_then(VideoLayer::frame)
+    }
+
+    /// The frame Core Animation displays for the player's layer.
+    pub fn displayed_frame(&self) -> Option<LayerRect> {
+        self.layer.as_ref().and_then(VideoLayer::displayed_frame)
+    }
+
     /// The UI laid the slot out: the layer follows in the same pass.
     /// Returns true when the layer's frame changed.
     pub fn place(&mut self, rect: LayerRect) -> bool {

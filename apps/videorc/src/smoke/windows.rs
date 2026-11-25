@@ -42,6 +42,7 @@ pub const WINDOW_COMMANDS: &[&str] = &[
     "notes-window-set-bounds",
     "notes-window-state",
     "raise-window",
+    "session-player-geometry",
 ];
 
 const NOTES_CLOSED: &str = "Notes window is not open.";
@@ -197,6 +198,25 @@ fn run(command: &str, params: &Map<String, Value>, cx: &mut App) -> Result<Value
             Ok(json!({ "bounds": bounds }))
         }
         "raise-window" => raise(params, cx),
+        "session-player-geometry" => {
+            // Every live session player (the Library's, and any a page hosts),
+            // newest last.
+            let players: Vec<_> = cx
+                .try_global::<crate::screens::session_player::SmokePlayers>()
+                .map(|players| {
+                    players
+                        .0
+                        .iter()
+                        .filter_map(|player| player.upgrade())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let geometry: Vec<Value> = players
+                .iter()
+                .map(|player| player.read(cx).smoke_geometry())
+                .collect();
+            Ok(json!({ "players": geometry }))
+        }
         other => Err(format!("{other} is not a Notes or Stream Manager command.")),
     }
 }
