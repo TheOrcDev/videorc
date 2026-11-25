@@ -25,6 +25,12 @@
 //! A retired ring (the backend made a new one for a new frame size, or went
 //! away) sends `CpuRequest::Reopen` to the session, which asks the backend
 //! for the current ring and hands the handle back here.
+//!
+//! A new order while a ring shows is not a retirement: the session handed a
+//! ring over again (a closed Preview opened, the surface created again), and
+//! it may be the same ring. It is mapped as given. Only a retired ring makes
+//! the same generation a stale answer (ogre, 2026-11-25: a reopened Preview
+//! asked for the ring it already had every 100 ms and never showed again).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -63,6 +69,33 @@ enum NativeAnswer {
     Gone,
     /// The source stopped while the presenter still had the frame.
     Stopped,
+}
+
+/// Why a ring stopped showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PresentExit {
+    /// The backend retired it (a new frame size, or it went away).
+    Retired,
+    /// The session handed a ring over again; it may be this one.
+    NewOrder,
+    /// The source is stopping.
+    Stopped,
+}
+
+/// What follows a ring that stopped showing: the generation a later handover
+/// is compared with (a retired one is a stale answer; anything else maps as
+/// given), and whether to ask the session for the current ring.
+fn after_present(exit: PresentExit, generation: u64) -> (Option<u64>, bool) {
+    match exit {
+        PresentExit::Retired => (Some(generation), true),
+        PresentExit::NewOrder | PresentExit::Stopped => (None, false),
+    }
+}
+
+/// A handover of `generation` right after that generation retired: the
+/// backend's status had not moved on yet.
+fn stale_handover(retired: Option<u64>, generation: u64) -> bool {
+    retired == Some(generation)
 }
 
 /// What the thread asks the session for.
@@ -322,7 +355,9 @@ impl Reader {
 
     fn run(mut self) {
         let mut seen = 0_u64;
-        let mut last_generation: Option<u64> = None;
+        // The generation that last retired: a handover of it again is the
+        // backend not having moved on yet.
+        let mut retired: Option<u64> = None;
         self.refresh_sinks();
         while let Some((order, ring)) = self.next_order(seen) {
             seen = order;
@@ -337,7 +372,7 @@ impl Reader {
                 }
                 continue;
             };
-            if last_generation == Some(ring.generation) {
+            if stale_handover(retired, ring.generation) {
                 // The status had not moved past the retired ring: ask again
                 // after a moment.
                 std::thread::sleep(REOPEN_SPACING);
@@ -370,7 +405,6 @@ impl Reader {
                     continue;
                 }
             };
-            last_generation = Some(ring.generation);
             self.logger.log(
                 Level::Info,
                 &format!(
@@ -385,13 +419,17 @@ impl Reader {
             );
             self.note_ring(true, ring.generation);
             self.set_current_ring(Some(&reader));
-            self.present_from(&reader, seen);
-            self.note_ring(false, last_generation.unwrap_or(0));
+            let exit = self.present_from(&reader, seen);
+            self.note_ring(false, ring.generation);
             self.set_current_ring(None);
-            if self.stopped() {
+            if exit == PresentExit::Stopped || self.stopped() {
                 break;
             }
-            let _ = self.requests.send(CpuRequest::Reopen);
+            let (stale, reopen) = after_present(exit, ring.generation);
+            retired = stale;
+            if reopen {
+                let _ = self.requests.send(CpuRequest::Reopen);
+            }
         }
         self.set_current_ring(None);
     }
@@ -426,12 +464,12 @@ impl Reader {
     }
 
     /// Presents frames from `reader` until it retires, a new order arrives
-    /// or the stop.
-    fn present_from(&mut self, reader: &RingReader, order: u64) {
+    /// or the stop, and says which.
+    fn present_from(&mut self, reader: &RingReader, order: u64) -> PresentExit {
         let mut last_id = 0_u64;
         loop {
             if self.stopped() {
-                return;
+                return PresentExit::Stopped;
             }
             {
                 let current = self
@@ -440,7 +478,7 @@ impl Reader {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if current.order != order {
-                    return;
+                    return PresentExit::NewOrder;
                 }
             }
             self.refresh_sinks();
@@ -451,7 +489,7 @@ impl Reader {
             }
             let kick = self.control.kick.swap(false, Ordering::AcqRel);
             match reader.wait_newer(last_id, FRAME_WAIT) {
-                Wait::Retired => return,
+                Wait::Retired => return PresentExit::Retired,
                 Wait::Timeout => {
                     if kick && last_id > 0 {
                         last_id -= 1;
@@ -580,7 +618,7 @@ impl Reader {
                         // off that slot) instead of going back with the
                         // guard. Only the stop gets here.
                         std::mem::forget(leased);
-                        return;
+                        return PresentExit::Stopped;
                     }
                 }
             }
@@ -674,5 +712,35 @@ impl Reader {
         let texture = self.textures[self.next_texture].clone();
         self.next_texture = (self.next_texture + 1) % TEXTURE_POOL;
         texture
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_ring_handed_over_again_while_it_shows_is_mapped_again() {
+        // ogre, 2026-11-25: a closed Preview opened and the session handed
+        // the same ring (generation 6) over again. That is no retirement:
+        // nothing is stale, and nothing is asked of the session.
+        let (retired, reopen) = after_present(PresentExit::NewOrder, 6);
+        assert_eq!(retired, None);
+        assert!(!reopen);
+        assert!(!stale_handover(retired, 6));
+    }
+
+    #[test]
+    fn a_retired_ring_handed_back_is_stale_until_the_status_moves_on() {
+        let (retired, reopen) = after_present(PresentExit::Retired, 6);
+        assert!(reopen);
+        assert!(stale_handover(retired, 6));
+        assert!(!stale_handover(retired, 7));
+    }
+
+    #[test]
+    fn the_stop_asks_for_nothing() {
+        assert_eq!(after_present(PresentExit::Stopped, 3), (None, false));
+        assert!(!stale_handover(None, 1));
     }
 }
