@@ -3,9 +3,11 @@
 //!
 //! - `feed`: the lines, the plan's lock, and captions starting and
 //!   stopping with a session.
+//! - `burn`: the caption bar on the stream and the recording.
 //! - `page`: the caption preview, Live captions and the host transcript.
 //! - `reader`: the ⇧⌘C window.
 
+pub mod burn;
 pub mod feed;
 pub mod page;
 pub mod reader;

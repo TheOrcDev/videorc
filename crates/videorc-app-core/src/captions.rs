@@ -8,6 +8,8 @@
 //! The Go Live rules (fps, one stream quality, Linux) stay in
 //! [`crate::livestream::captions_preflight`]; this module reads them.
 
+pub mod overlay;
+
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -76,6 +78,13 @@ pub mod methods {
     pub const TRANSCRIPT: &str = "cloud.speech.transcript";
     pub const ENTITLEMENTS_GET: &str = "entitlements.get";
     pub const OVERLAY_LAYOUT_GET: &str = "overlays.layout.get";
+    /// The streamer moved the captions in Scene.
+    pub const OVERLAY_LAYOUT_EVENT: &str = "overlays.layout";
+    /// The bar on one compositor target, drawn by the backend from the text.
+    pub const OVERLAY_SET: &str = "captions.overlay.set";
+    pub const OVERLAY_CLEAR: &str = "captions.overlay.clear";
+    /// The bar while a talk-show room is open.
+    pub const ROOM_OVERLAY: &str = "cloud.speech.overlay";
     pub const UPDATE_EVENT: &str = "captions.update";
     pub const CLEARED_EVENT: &str = "captions.cleared";
     pub const ENTITLEMENTS_EVENT: &str = "entitlements.updated";

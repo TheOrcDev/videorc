@@ -439,7 +439,9 @@ pub struct Overlay {
     expires_at: i64,
     stream: bool,
     recording: bool,
-    frame: SetCaptionOverlayParams,
+    /// The bar: the line's text for the backend to draw (plan 260, the GPUI
+    /// app), or the renderer's own `pngBase64` bar (Electron).
+    frame: CaptionOverlaySetRequest,
 }
 /// A room caption picture belongs to a live caption source: the host's
 /// provider session over a valid host microphone, or the guests' captions-only
@@ -468,10 +470,14 @@ pub async fn install_overlay(
         "Caption source or cue expired."
     );
     anyhow::ensure!(
-        input.frame.png_base64.len() <= 1024 * 1024,
+        input
+            .frame
+            .png_base64
+            .as_ref()
+            .is_none_or(|png| png.len() <= 1024 * 1024),
         "Caption raster exceeds the room budget."
     );
-    let result = install_caption_overlays(&state.caption_overlay, input.frame)?;
+    let result = set_caption_overlay(&state.caption_overlay, input.frame).await?;
     c.room_presentation = Some(Presentation {
         session: input.session_client_id,
         expires_at: input.expires_at,
