@@ -210,6 +210,10 @@ impl StudioPage {
         scenes.update(cx, |scenes, cx| {
             scenes.bind_room_host(talk_show_host.clone(), cx);
         });
+        // L1 / R4: Show stage tiles, Screens, layouts and Program + Listen.
+        show_stage.update(cx, |stage, cx| {
+            stage.bind_room_host(talk_show_host.clone(), cx);
+        });
         // The preview's notes: Open Health goes through the page's door, and
         // the check's line redraws the docked row.
         let studio = transport.read(cx).studio();
