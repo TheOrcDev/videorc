@@ -17,6 +17,7 @@ pub struct ScrollArea {
     id: ElementId,
     children: SmallVec<[AnyElement; 2]>,
     appearance: Option<Appearance>,
+    handle: Option<ScrollHandle>,
 }
 
 impl ScrollArea {
@@ -25,12 +26,20 @@ impl ScrollArea {
             id: id.into(),
             children: SmallVec::new(),
             appearance: None,
+            handle: None,
         }
     }
 
     /// Draws in this appearance instead of the window's (the gallery).
     pub fn appearance(mut self, appearance: Appearance) -> Self {
         self.appearance = Some(appearance);
+        self
+    }
+
+    /// Scrolls with this handle (a page that brings a section into view)
+    /// instead of one the pane keeps for itself.
+    pub fn handle(mut self, handle: ScrollHandle) -> Self {
+        self.handle = Some(handle);
         self
     }
 }
@@ -44,10 +53,13 @@ impl ParentElement for ScrollArea {
 impl RenderOnce for ScrollArea {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
-        let handle = window
-            .use_keyed_state(self.id.clone(), cx, |_, _| ScrollHandle::new())
-            .read(cx)
-            .clone();
+        let handle = match self.handle {
+            Some(handle) => handle,
+            None => window
+                .use_keyed_state(self.id.clone(), cx, |_, _| ScrollHandle::new())
+                .read(cx)
+                .clone(),
+        };
         let (thumb, thumb_hover) = (t.scrollbar_thumb, t.scrollbar_thumb_hover);
         div()
             .relative()

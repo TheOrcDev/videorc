@@ -26,11 +26,14 @@ mod list;
 pub mod model;
 mod stage;
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    Context, Entity, EventEmitter, FocusHandle, KeyBinding, Task, Window, actions, div, prelude::*,
+    Context, Entity, EventEmitter, FocusHandle, KeyBinding, ScrollHandle, Task, Window, actions,
+    div, prelude::*,
 };
 use videorc_app_core::nav::PageId;
 use videorc_app_core::settings_page::SettingsTab;
@@ -86,6 +89,13 @@ pub struct ScenePage {
     stage: stage::Stage,
     /// The layout undo slot holds an entry (Undo shows, ⌘Z works).
     undo_available: bool,
+    /// The page's scroll, so Background settings can bring the camera's
+    /// Background into view (P575).
+    scroll: ScrollHandle,
+    /// The Background tile that takes focus (the chosen one, else the
+    /// first), and a reveal waiting for the section's next paint.
+    background_focus: FocusHandle,
+    background_reveal: Rc<Cell<bool>>,
     model: SceneModel,
     /// The scene dialogs, shared with the Studio's Scenes section.
     dialogs: Entity<SceneDialogs>,
@@ -181,6 +191,9 @@ impl ScenePage {
             preview,
             stage: stage::Stage::new(),
             undo_available: false,
+            scroll: ScrollHandle::new(),
+            background_focus: cx.focus_handle(),
+            background_reveal: Rc::new(Cell::new(false)),
             model,
             dialogs,
             add_app_open: false,
@@ -377,6 +390,7 @@ impl Render for ScenePage {
             .child(measure)
             .child(
                 ScrollArea::new("scene-scroll")
+                    .handle(self.scroll.clone())
                     .child(div().flex().flex_col().w_full().child(list).child(grid)),
             )
             .child(self.camera_reset_dialog(cx))
