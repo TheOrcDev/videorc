@@ -82,18 +82,21 @@ pub fn parse() -> Result<Args> {
     Ok(args)
 }
 
-/// The workspace root: `--workspace`, `VIDEORC_WORKSPACE_ROOT`, the
-/// executable's `target/<profile>/..` parent, the manifest's grandparent, or
-/// the current directory; the first that holds a `Cargo.toml` and a `crates`
-/// directory wins.
-pub fn workspace_root(explicit: Option<PathBuf>) -> Result<PathBuf> {
+/// A checkout this run was pointed at: `--workspace`, else
+/// `VIDEORC_WORKSPACE_ROOT`; the first that holds a `Cargo.toml` and a
+/// `crates` directory. It wins even in a package (L4: a packaged run must
+/// not adopt a checkout it merely finds).
+pub fn explicit_workspace_root(explicit: Option<PathBuf>) -> Option<PathBuf> {
+    let env = std::env::var_os("VIDEORC_WORKSPACE_ROOT").map(PathBuf::from);
+    first_checkout(explicit.into_iter().chain(env))
+}
+
+/// A checkout found without being asked: the executable's
+/// `target/<profile>/..` parent, the manifest's grandparent (baked in at
+/// compile time), or the current directory. A dev build's root; a package
+/// never uses it, or it would share a dev app's owned-process ledger.
+pub fn discovered_workspace_root() -> Option<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(path) = explicit {
-        candidates.push(path);
-    }
-    if let Some(path) = std::env::var_os("VIDEORC_WORKSPACE_ROOT") {
-        candidates.push(PathBuf::from(path));
-    }
     if let Ok(exe) = std::env::current_exe()
         && let Some(root) = exe
             .parent()
@@ -110,12 +113,17 @@ pub fn workspace_root(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd);
     }
-    for candidate in candidates {
-        if candidate.join("Cargo.toml").is_file() && candidate.join("crates").is_dir() {
-            return Ok(candidate.canonicalize().unwrap_or(candidate));
-        }
-    }
-    bail!("could not find the workspace root; pass --workspace")
+    first_checkout(candidates)
+}
+
+/// The first candidate that is a checkout (a `Cargo.toml` and `crates/`).
+fn first_checkout(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    candidates
+        .into_iter()
+        .find(|candidate| {
+            candidate.join("Cargo.toml").is_file() && candidate.join("crates").is_dir()
+        })
+        .map(|candidate| candidate.canonicalize().unwrap_or(candidate))
 }
 
 /// `debug` or `release`: the backend built the same way as this binary.

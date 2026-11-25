@@ -20,7 +20,11 @@ use std::sync::OnceLock;
 
 use crate::studio::room_background::{MANAGED_BACKGROUND_DIR, managed_background_roots};
 
-/// Overrides where a package keeps its resources.
+/// Overrides where a package keeps its resources. Setting it makes the run
+/// a package: on a dev build it also moves [`run_root`] to the executable's
+/// folder (`target/<profile>`) unless `--workspace` or
+/// `VIDEORC_WORKSPACE_ROOT` names the checkout, which is useful for testing a
+/// package's layout from a checkout.
 pub const RESOURCES_DIR_ENV: &str = "VIDEORC_RESOURCES_DIR";
 
 /// electron-builder's destinations under the resources directory.
@@ -132,6 +136,33 @@ pub fn packaged_resources_dir(exe: &Path, env: impl Fn(&str) -> Option<String>) 
         .into_iter()
         .flatten()
         .find(|dir| dir.join(BACKGROUNDS_IN_RESOURCES).is_dir())
+}
+
+/// The folder this run works from: the backend's working directory and the
+/// owned-process ledger's key. In order:
+///
+/// 1. A checkout the run was pointed at (`--workspace`,
+///    `VIDEORC_WORKSPACE_ROOT`).
+/// 2. In a package (its resources found), the executable's folder, where
+///    the backend ships beside it. A package never adopts a checkout it
+///    merely finds (the compile-time manifest path, the working directory):
+///    that root would share a dev app's ledger, and each could reap the
+///    other's recorded backend.
+/// 3. A checkout found without being asked (`discovered`, a dev build's).
+/// 4. None: the app can't start.
+pub fn run_root(
+    explicit: Option<PathBuf>,
+    resources: Option<&Path>,
+    exe: &Path,
+    discovered: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if explicit.is_some() {
+        return explicit;
+    }
+    if resources.is_some() {
+        return exe.parent().map(Path::to_path_buf);
+    }
+    discovered()
 }
 
 static BUNDLED: OnceLock<BundledAssets> = OnceLock::new();
@@ -249,5 +280,28 @@ mod tests {
         let exe = root.join("Videorc.app/Contents/MacOS/videorc");
         assert_eq!(packaged_resources_dir(&exe, |_| None), Some(resources));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_package_runs_from_its_executables_folder_unless_pointed_at_a_checkout() {
+        let exe = Path::new("/Applications/Videorc.app/Contents/MacOS/videorc");
+        let resources = Some(Path::new("/Applications/Videorc.app/Contents/Resources"));
+        let found = || Some(PathBuf::from("/repo"));
+        let macos = Some(PathBuf::from("/Applications/Videorc.app/Contents/MacOS"));
+        // Packaged, with a checkout merely found on this Mac: the package's own folder.
+        assert_eq!(run_root(None, resources, exe, found), macos);
+        // Packaged, pointed at a checkout (--workspace): the checkout.
+        assert_eq!(
+            run_root(Some(PathBuf::from("/work")), resources, exe, found),
+            Some(PathBuf::from("/work"))
+        );
+        // A dev build (no resources): the checkout it finds.
+        let dev = Path::new("/repo/target/release/videorc");
+        assert_eq!(
+            run_root(None, None, dev, found),
+            Some(PathBuf::from("/repo"))
+        );
+        // Neither: nothing to run from.
+        assert_eq!(run_root(None, None, dev, || None), None);
     }
 }
