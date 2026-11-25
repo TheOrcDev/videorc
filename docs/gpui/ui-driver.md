@@ -174,6 +174,13 @@ grid (each channel within `VIDEORC_PREVIEW_WINDOW_TOLERANCE`, 48; at least 13 of
 after main-window resizes, in the Preview window (opened, moved and sized off 16:9 with `preview-window-set-bounds`),
 after its close button and ⌘P, docked back, and on the Scene page. It needs Screen Recording and the debug backend.
 
+`VIDEORC_APP=gpui pnpm smoke:preview-interaction-stress` runs `scripts/gpui-preview-interaction-stress.mjs`: a
+sampler reads `presentedFrameId` and the phase every 100 ms while rapid layout intents (a burst, then
+`VIDEORC_PREVIEW_STRESS_SCENE_ROUNDS` rounds of Electron's sequence), a Preview window move/resize storm (then the
+alignment read) and a main-window storm (`main-window-set-bounds`, now on GPUI) run with no settle. A phase fails when
+the preview stood still longer than `VIDEORC_PREVIEW_STRESS_MAX_STILL_MS` (1000), left presenting, or presented
+nothing; a layout the backend refuses without a real device makes the scene phase a named SKIP.
+
 Wait for a GPUI product path or new commands first:
 
 | Smoke                                                                                                                                            | Missing on GPUI                                                                                                                                                                                                |
