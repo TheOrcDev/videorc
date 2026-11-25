@@ -7,6 +7,7 @@ mod chat;
 mod clean_cut;
 mod clean_cut_review;
 mod community;
+mod community_preview;
 mod live;
 mod overview;
 mod reports;
@@ -1187,7 +1188,6 @@ impl Render for SidekickScreen {
         };
         let settings = self.settings.as_ref();
         let widgets = self.chat.as_ref().expect("chat widgets");
-        let community = self.community.as_ref().expect("community state");
         let body = match self.tab {
             Tab::Overview => render_overview(overview, window, cx),
             Tab::Chat => {
@@ -1197,14 +1197,18 @@ impl Render for SidekickScreen {
                 );
                 render_chat(&view, settings, widgets, errors, window, cx)
             }
-            Tab::Community => render_community(
-                &view,
-                self.entitled,
-                community,
-                &community_settings,
-                window,
-                cx,
-            ),
+            Tab::Community => {
+                let preview = self.render_community_preview(window, cx);
+                render_community(
+                    &view,
+                    self.entitled,
+                    self.community.as_ref().expect("community state"),
+                    &community_settings,
+                    preview,
+                    window,
+                    cx,
+                )
+            }
             Tab::Voice => {
                 let paused = command_availability_lines(self.state.command_availability.as_ref());
                 let rows = remove_messages_rows(&self.studio.platforms_now());
