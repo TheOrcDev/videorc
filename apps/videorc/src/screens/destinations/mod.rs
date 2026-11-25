@@ -104,6 +104,9 @@ pub struct DestinationsPanel {
     details: DetailsState,
     details_inputs: Option<details::DetailsInputs>,
     details_dirty: bool,
+    /// The title was edited or Save pressed: only then is an empty title an
+    /// error (`titleChecked`, Electron V-3).
+    title_checked: bool,
     chat_commands: ChatCommandsStore,
     command_editor: Option<chat_commands::CommandEditor>,
     watchdog: WatchdogSettingsStore,
@@ -211,6 +214,7 @@ impl DestinationsPanel {
             details: DetailsState::default(),
             details_inputs: None,
             details_dirty: false,
+            title_checked: false,
             chat_commands: ChatCommandsStore::default(),
             command_editor: None,
             watchdog: WatchdogSettingsStore::default(),
