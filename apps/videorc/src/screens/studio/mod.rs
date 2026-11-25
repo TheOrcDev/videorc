@@ -35,6 +35,7 @@ use std::time::Instant;
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, KeyBinding,
     KeyDownEvent, KeyUpEvent, Role, ScrollHandle, Task, Window, canvas, div, point, prelude::*, px,
+    relative,
 };
 use videorc_app_core::StopOrigin;
 use videorc_app_core::desktop::permissions::{PermissionPlatform, SystemPermissionPane};
@@ -72,7 +73,10 @@ use crate::preview::Preview;
 use alerts::{CloudResumeSlot, PreviewNotes, StudioRequest};
 use audio::AudioSection;
 use chat::ChatSection;
-use layout::{INSPECTOR_MAX_PX, StudioLayout, StudioSection, reveal_offset, stage_footprint};
+use layout::{
+    INSPECTOR_MAX_PX, StudioLayout, StudioSection, reveal_offset, stage_footprint,
+    stage_slot_aspect, stage_slot_share,
+};
 use quick_settings::QuickSettingsSection;
 use scenes::ScenesSection;
 use session::SessionSection;
@@ -173,12 +177,7 @@ impl StudioPage {
             &session,
             window,
             |page, _, request: &StudioRequest, window, cx| match request {
-                StudioRequest::FocusAudio => {
-                    let strip = page.audio.read(cx).focus_handle(cx);
-                    strip.focus(window, cx);
-                    // P172 / P180: and the Microphone row in view.
-                    page.reveal_section(StudioSection::Audio, cx);
-                }
+                StudioRequest::FocusAudio => page.reveal_audio(window, cx),
                 StudioRequest::TakeoverEnded => page
                     .takeover
                     .update(cx, |takeover, cx| takeover.refresh(cx)),
@@ -266,7 +265,17 @@ impl StudioPage {
         self.reveal_section(StudioSection::Scenes, cx);
     }
 
-    fn reveal_section(&mut self, section: StudioSection, cx: &mut Context<Self>) {
+    /// Open Audio (P172 / P180), from the session's door or the bell: the
+    /// Microphone strip focused and its row in view.
+    pub fn reveal_audio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let strip = self.audio.read(cx).focus_handle(cx);
+        strip.focus(window, cx);
+        self.reveal_section(StudioSection::Audio, cx);
+    }
+
+    /// Brings `section` (`layout::StudioSection`) into view at the page's
+    /// next paint.
+    pub fn reveal_section(&mut self, section: StudioSection, cx: &mut Context<Self>) {
         self.reveal.set(Some(section));
         cx.notify();
     }
@@ -305,13 +314,18 @@ impl StudioPage {
         .size_full()
     }
 
-    /// The stage's footprint (`previewFootprintRatio`) for the recording
-    /// profile (`captureConfig.video`).
-    fn stage_aspect(&self, cx: &App) -> f32 {
+    /// The stage's footprint (`previewFootprintRatio`), its slot's real
+    /// aspect (`previewSlotRatio`) and the slot's share of the footprint's
+    /// width, for the recording profile (`captureConfig.video`).
+    fn stage_aspect(&self, cx: &App) -> (f32, f32, f32) {
         let watch = self.transport.read(cx).studio().watch();
         let snapshot = watch.borrow();
         let video = plan::recording_video(&snapshot.settings.capture_doc);
-        stage_footprint(video.width, video.height)
+        (
+            stage_footprint(video.width, video.height),
+            stage_slot_aspect(video.width, video.height),
+            stage_slot_share(video.width, video.height),
+        )
     }
 
     fn measured(&mut self, width: f32, cx: &mut Context<Self>) {
@@ -937,6 +951,11 @@ impl Render for StudioPage {
         .size_full();
 
         let preview_replaced = self.transport.read(cx).talk_show(cx).preview_replaced;
+        // P116: "Preview" heads the stage while it isn't docked (in its own
+        // window, closed, or without the native surface); docked, the video
+        // is the pane, with no title (`studio-tab.tsx:466-485`).
+        let stage_shape = (!preview_replaced).then(|| stage_view(self.preview.read(cx)));
+        let preview_docked = stage_shape.as_ref().is_some_and(|view| view.docked);
         let stage = if preview_replaced {
             // P122 / P357: the Show stage replaces the Preview while the room
             // is open; its well keeps its own aspect.
@@ -950,8 +969,17 @@ impl Render for StudioPage {
             // scrolls under a stage of a known height. It is never taller
             // than the scroll view leaves under the column's gutters, so the
             // docked slot fits whole at the top (Linux hides its child while
-            // the slot is not wholly in view).
-            let aspect = self.stage_aspect(cx);
+            // the slot is not wholly in view). The slot holding the native
+            // surface takes the canvas's real aspect at the footprint's full
+            // height, centred on the video ground (`preview-stage.tsx:357-370`):
+            // a portrait canvas gets a true 9:16 slot, never a squeezed one.
+            // Not docked, the stage's card keeps the whole footprint.
+            let (aspect, slot_aspect, slot_share) = self.stage_aspect(cx);
+            let (slot_aspect, slot_share) = if preview_docked {
+                (slot_aspect, slot_share)
+            } else {
+                (aspect, 1.)
+            };
             let view_height = f32::from(self.scroll.bounds().size.height);
             let widest =
                 (view_height > 0.).then(|| (view_height - 2. * size::GUTTER).max(120.) * aspect);
@@ -964,18 +992,24 @@ impl Render for StudioPage {
                         .w_full()
                         .when_some(widest, |stage, widest| stage.max_w(px(widest)))
                         .aspect_ratio(aspect)
-                        .child(Preview::docked_slot(&self.preview, cx))
+                        .flex()
+                        .justify_center()
+                        .rounded(px(radius::PANEL))
+                        .bg(hsla(theme.video_ground))
+                        .child(
+                            div()
+                                .relative()
+                                .flex_none()
+                                .w(relative(slot_share))
+                                .aspect_ratio(slot_aspect)
+                                .child(Preview::docked_slot(&self.preview, cx)),
+                        )
                         // P135: over the slot's "Opening preview…" until the
                         // first frame (`preview-stage.tsx:373-380`).
                         .child(self.preview_startup.clone()),
                 )
                 .into_any_element()
         };
-        // P116: "Preview" heads the stage while it isn't docked (in its own
-        // window, closed, or without the native surface); docked, the video
-        // is the pane, with no title (`studio-tab.tsx:466-485`).
-        let stage_shape = (!preview_replaced).then(|| stage_view(self.preview.read(cx)));
-        let preview_docked = stage_shape.as_ref().is_some_and(|view| view.docked);
         let title = stage_shape
             .and_then(|view| view.section_title)
             .map(|title| {

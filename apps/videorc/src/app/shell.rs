@@ -241,6 +241,10 @@ impl Shell {
             window,
             |this, _, navigation: &NoticeNavigate, window, cx| match navigation {
                 NoticeNavigate::Settings(tab) => this.open_settings(Some(*tab), window, cx),
+                NoticeNavigate::StudioAudio => {
+                    this.open_studio_audio(window, cx);
+                    window.activate_window();
+                }
                 NoticeNavigate::Action(NoticeAction::OpenLibrary { session_id }) => {
                     this.open_page(PageId::Library, window, cx);
                     this.library.update(cx, |library, cx| {
@@ -550,6 +554,14 @@ impl Shell {
             .update(cx, |studio, cx| studio.reveal_scenes(cx));
     }
 
+    /// P172 / P180: the bell's Open Audio, the Studio with its Microphone
+    /// strip focused and in view (the session's own door, `FocusAudio`).
+    pub fn open_studio_audio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_page(PageId::Studio, window, cx);
+        self.studio
+            .update(cx, |studio, cx| studio.reveal_audio(window, cx));
+    }
+
     pub fn open_page(&mut self, page: PageId, window: &mut Window, cx: &mut Context<Self>) {
         // P017: a fired page shortcut closes the reminder layer.
         if self.command_held {
@@ -814,11 +826,26 @@ impl Render for Shell {
                     this.toggle_theme(window, cx)
                 }),
             )
+            // ⌘C (Edit ▸ Copy) copies the window's text selection, as
+            // gpui_base's `Root` does; with none it goes on to the next taker.
+            .on_action(|_: &gpui_base::input::Copy, window, cx| {
+                let text = gpui_base::TextSelection::selected_text(window, cx)
+                    .trim()
+                    .to_string();
+                if text.is_empty() {
+                    cx.propagate();
+                    return;
+                }
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            })
             .font_family(FONT)
             .flex()
             .flex_col()
             .bg(hsla(t.glass_solid))
             .text_color(hsla(t.foreground))
+            // The window's text selection (`SelectableText`, P184): one
+            // zero-sized layer, the root's first child (gpui_base's rule).
+            .child(gpui_base::TextSelectionLayer)
             .child(
                 div()
                     .flex_1()
