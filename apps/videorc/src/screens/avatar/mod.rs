@@ -334,6 +334,11 @@ impl AvatarScreen {
                                 }
                             });
                         }
+                        // P1064: a sign-in or sign-out reads the page again
+                        // (the signed-out empty state, the gates).
+                        videorc_app_core::accounts::methods::CHANGED_EVENT => {
+                            let _ = this.update(cx, |screen, cx| screen.refresh(cx));
+                        }
                         videorc_app_core::chat::overlay::LAYOUT_EVENT => {
                             let placement = Placement::from_layout(&payload);
                             let _ = this.update(cx, |screen, cx| {
@@ -579,8 +584,9 @@ impl AvatarScreen {
         self.show_onboarding(1, cx);
     }
 
-    pub(crate) fn sign_in(&mut self, _cx: &mut Context<Self>) {
-        eprintln!("[videorc-app] Avatar: Sign in (account UI next)");
+    /// P1064 and the gates' Sign in: the Videorc sign-in in the browser.
+    pub(crate) fn sign_in(&mut self, cx: &mut Context<Self>) {
+        crate::app::accounts::sign_in(cx);
     }
 
     pub(crate) fn open_page(&mut self, page: PageId, _window: &mut Window, cx: &mut Context<Self>) {

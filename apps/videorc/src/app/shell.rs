@@ -121,6 +121,8 @@ pub struct Shell {
     notice_hub: Entity<Hub>,
     /// Phase 3 (L1): Scene ⌘3.
     scene: Entity<ScenePage>,
+    /// S1.6f (L4): the Videorc account, for the sidebar's account row.
+    account: Option<Entity<Mirror<videorc_app_core::accounts::AccountsState>>>,
 }
 
 impl Shell {
@@ -152,6 +154,19 @@ impl Shell {
         let notices = cx.new(|cx| Centre::new(notice_hub.clone(), "main", window, cx));
         let errors = cx.new(ErrorPanels::new);
         cx.observe(&errors, |_, _, cx| cx.notify()).detach();
+        let account_store = cx
+            .try_global::<super::accounts::Shared>()
+            .map(|shared| shared.accounts.watch());
+        let account = account_store.map(|store| {
+            super::bridge::mirror(
+                cx,
+                store,
+                |state: &videorc_app_core::accounts::AccountsState| state.clone(),
+            )
+        });
+        if let Some(account) = &account {
+            cx.observe(account, |_, _, cx| cx.notify()).detach();
+        }
         palette.update(cx, |palette, _| palette.set_notifications_available());
         let captions = crate::screens::captions::page(cx);
         if let Some(captions) = &captions {
@@ -196,6 +211,7 @@ impl Shell {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()))
                 }
                 NoticeNavigate::Action(NoticeAction::OpenUrl { url }) => cx.open_url(url),
+                NoticeNavigate::Action(NoticeAction::SignIn) => super::accounts::sign_in(cx),
                 _ => {}
             },
         )
@@ -344,6 +360,7 @@ impl Shell {
             notices,
             notice_hub,
             scene,
+            account,
         }
     }
 
@@ -563,7 +580,7 @@ impl Shell {
                     );
             }
         }
-        // Bottom: theme toggle (P022). Account row waits on L4's accounts stub.
+        // Bottom: the account row (P024) and the theme toggle (P022).
         let dark = matches!(
             window.appearance(),
             gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
@@ -572,11 +589,24 @@ impl Shell {
             div()
                 .flex()
                 .items_center()
-                .justify_end()
+                .justify_between()
+                .gap(px(4.))
                 .border_t_1()
                 .border_color(hsla(t.border))
                 .px(px(4.))
                 .py(px(6.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .children(self.account.as_ref().map(|account| {
+                            super::account_menu::row(
+                                account.read(cx).value(),
+                                cx.entity().downgrade(),
+                                t,
+                            )
+                        })),
+                )
                 .child(
                     Button::new("sidebar-theme-toggle")
                         .size(ButtonSize::Xs)
