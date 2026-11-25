@@ -888,6 +888,30 @@ fn main() -> Result<()> {
                 window.activate_window();
             });
         });
+        // View → the pages and ⌘1–⌘0 (P1499–P1503, P1559): the page as its
+        // sidebar row opens it, from any window; the main window comes up.
+        let show_page = move |key: videorc_app_core::desktop::menu::PageKey, cx: &mut App| {
+            let Some(page) = PageId::from_menu_key(key) else {
+                return;
+            };
+            let _ = main_window.update(cx, |shell, window, cx| {
+                shell.open_page(page, window, cx);
+                window.activate_window();
+            });
+        };
+        {
+            use videorc_app_core::desktop::menu::PageKey::Digit;
+            cx.on_action(move |_: &menus::ShowPage1, cx| show_page(Digit(1), cx));
+            cx.on_action(move |_: &menus::ShowPage2, cx| show_page(Digit(2), cx));
+            cx.on_action(move |_: &menus::ShowPage3, cx| show_page(Digit(3), cx));
+            cx.on_action(move |_: &menus::ShowPage4, cx| show_page(Digit(4), cx));
+            cx.on_action(move |_: &menus::ShowPage5, cx| show_page(Digit(5), cx));
+            cx.on_action(move |_: &menus::ShowPage6, cx| show_page(Digit(6), cx));
+            cx.on_action(move |_: &menus::ShowPage7, cx| show_page(Digit(7), cx));
+            cx.on_action(move |_: &menus::ShowPage8, cx| show_page(Digit(8), cx));
+            cx.on_action(move |_: &menus::ShowPage9, cx| show_page(Digit(9), cx));
+            cx.on_action(move |_: &menus::ShowPage0, cx| show_page(Digit(0), cx));
+        }
 
         // The main window coming to the front re-checks a grant System
         // Settings may have made meanwhile.
