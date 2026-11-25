@@ -208,6 +208,7 @@ fn main() -> Result<()> {
                     .into_iter()
                     .chain([camera::VIRTUAL_CAMERA_CHANGED, app::exit::CLOUD_STATE])
                     .chain(screens::settings::EVENTS)
+                    .chain(screens::avatar::EVENTS)
                     .chain(videorc_app_core::library::LIBRARY_EVENTS)
                     .chain(["session.log"]),
             ),
@@ -428,6 +429,14 @@ fn main() -> Result<()> {
                 cx,
             )
         });
+        let avatar = cx.new(|cx| {
+            screens::avatar::AvatarScreen::new(
+                studio.clone(),
+                core_handle.clone(),
+                paths.user_data_dir.clone(),
+                cx,
+            )
+        });
         let images = cx.new(|cx| ImagesPanel::new(studio.clone(), core_handle.clone(), cx));
         let go_live = cx.new(|cx| GoLiveDialog::new(studio.clone(), core_handle.clone(), cx));
         let first_run = cx.new(|cx| {
@@ -552,6 +561,7 @@ fn main() -> Result<()> {
                         output.clone(),
                         destinations.clone(),
                         guests.clone(),
+                        avatar.clone(),
                         sidekick.clone(),
                         images.clone(),
                         sounds,
