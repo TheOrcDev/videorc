@@ -242,12 +242,15 @@ impl StreamManager {
         let notices = cx.new(|cx| {
             crate::screens::notifications::Centre::new(hub, "stream-manager", window, cx)
         });
+        let toaster = notices.read(cx).toasts();
         let live = matches!(dashboard.borrow().session, SessionState::Live);
         let chat = cx.new(|cx| {
             ChatPane::new(
                 studio.clone(),
                 runtime.clone(),
                 studio.live_chat(),
+                studio.moderation_operations(),
+                toaster,
                 live,
                 window,
                 cx,
@@ -421,6 +424,10 @@ impl StreamManager {
             SidekickEvent::JumpTo(id) => {
                 self.panes.pick(Pane::Chat);
                 self.chat.update(cx, |chat, cx| chat.jump_to(id, cx));
+            }
+            SidekickEvent::RemoveFromChat(id) => {
+                self.chat
+                    .update(cx, |chat, cx| chat.remove_from_chat(id, window, cx));
             }
         }
         cx.notify();
