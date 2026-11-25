@@ -114,3 +114,25 @@ Run with `VIDEORC_APP=gpui`:
   `--real-screen` stays Electron-only until the GPUI app has `select-screen-device`.
 - `smoke:recording-matrix` drives the backend directly (`session.start` with the test pattern) and needs only
   `authorize-smoke-resource`, so it runs unchanged.
+
+### The rest of `smoke:recording-studio` on GPUI (2026-11-25)
+
+Should run with `VIDEORC_APP=gpui` (nothing app-specific beyond supported commands and backend RPC):
+`smoke:output-stall`, `smoke:live-layout-switch-recording`, `smoke:app-quit-recording`, `smoke:buddy-pet` (its
+bubble case skips on GPUI), `smoke:dev` (its asset background goes through `import-smoke-background`, now in the
+core), `smoke:preview-real-launch` (on GPUI the main side of the chain is `inspect-native-preview-runtime`).
+
+Wait for a GPUI product path or new commands first:
+
+| Smoke                                                                                                                                            | Missing on GPUI                                                                                                                       |
+| ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `smoke:captions-live`                                                                                                                            | the renderer's caption frame submissions (live PNG and cue frames)                                                                    |
+| `smoke:preview-overlay-presentation`                                                                                                             | `native-preview-surface-status`, `preview-surface-sample`                                                                             |
+| `smoke:banners`, `smoke:html-overlay`                                                                                                            | `import-takeover-image` (the Images takeover import), `html-overlay-stats` (an HTML overlay host)                                     |
+| `smoke:screens`                                                                                                                                  | `import-takeover-image`, `main-window-id`, `capture-page` (gap 3)                                                                     |
+| `smoke:live-background`                                                                                                                          | `inspect-native-preview-live-background`, the scene-preset commands                                                                   |
+| `smoke:preview-pump-diagnostics`, `smoke:preview-click-focus`                                                                                    | Electron's present-pump and click-focus probes                                                                                        |
+| `smoke:layout-source-loop`, `smoke:preview-scene-commit`, `smoke:freeform-editor`                                                                | `select-layout-preset`, `select-camera-device`, `select-camera-shape`, `preview-surface-scene-state`; the editor needs clicks (gap 1) |
+| `smoke:preview-check-invisible`, `smoke:system-audio`, `smoke:smart-scenes`                                                                      | `select-screen-device`, the `studio-scene-*` commands, a Node-side tone for System audio                                              |
+| `smoke:recording-native-preview`, `smoke:preview-surface`, `probe:preview-lifecycle`, `probe:preview-window`, `smoke:preview-interaction-stress` | Electron's native-surface and window commands; they need GPUI-specific probes, not a port                                             |
+| `smoke:screen-recording-real`, `smoke:notes-window-invisible`, `smoke:comment-highlight-stream`, `probe:comments-window`                         | the Notes and Comments window commands                                                                                                |

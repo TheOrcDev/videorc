@@ -34,6 +34,9 @@
  * Scripts never write through `window.__videorcUiSettings` directly (the
  * guard in `smoke-command-callers.test.mjs`).
  */
+
+import { requestSmokeCommand } from './smoke-command-client.mjs'
+
 export const CAPTURE_CONFIG_STORAGE_KEY = 'videorc.captureConfig'
 export const WORKING_SCENE_STORAGE_KEY = 'videorc.working-scene.v1'
 export const SCENES_STORAGE_KEY = 'videorc.scenes.v2'
@@ -170,3 +173,61 @@ export function reloadKeepingSeedJs({
 
 /** The default seed reload: forget the working scene, reload after 50 ms. */
 export const RELOAD_KEEPING_SEED_JS = reloadKeepingSeedJs()
+
+/**
+ * Seeds `patch` over the capture config, in either app. Objects merge key by
+ * key; anything else replaces.
+ *
+ * - `app: 'electron'`: writes `videorc.captureConfig` through the window's
+ *   store and reloads keeping the seed (`reloadKeepingSeedJs`), then waits
+ *   `settleMs` for the new renderer.
+ * - `app: 'gpui'`: the Studio smoke handler's `studio-capture-configure`
+ *   (plan 260 Phase 3); no reload is needed. `forgetWorkingScene` does not
+ *   apply there: the GPUI Studio keeps no separate working scene.
+ */
+export async function seedCaptureConfig(
+  smoke,
+  patch,
+  {
+    app = 'electron',
+    timeoutMs = 30_000,
+    forgetWorkingScene = true,
+    settleMs = 2500,
+    request = requestSmokeCommand,
+    sleep = (ms) => new Promise((done) => setTimeout(done, ms))
+  } = {}
+) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    throw new Error(`Not a capture config patch: ${JSON.stringify(patch)}`)
+  }
+  if (app === 'gpui') {
+    return request(smoke, 'studio-capture-configure', { config: patch }, { timeoutMs })
+  }
+  if (app !== 'electron') throw new Error(`Not a smoke app: ${app}`)
+  await request(
+    smoke,
+    'eval-js',
+    {
+      code: `
+        const settings = await ${UI_SETTINGS_READY_JS};
+        const key = ${JSON.stringify(CAPTURE_CONFIG_STORAGE_KEY)};
+        let current = {};
+        try { current = JSON.parse(settings.getItem(key) ?? '{}') ?? {}; } catch {}
+        const merge = (target, next) => {
+          if (!next || typeof next !== 'object' || Array.isArray(next)) return next;
+          const base = target && typeof target === 'object' && !Array.isArray(target) ? target : {};
+          const out = { ...base };
+          for (const [name, value] of Object.entries(next)) out[name] = merge(base[name], value);
+          return out;
+        };
+        settings.setItem(key, JSON.stringify(merge(current, params.patch)));
+        ${reloadKeepingSeedJs({ forgetWorkingScene })}
+        return true;
+      `,
+      patch
+    },
+    { timeoutMs }
+  )
+  await sleep(settleMs)
+  return { configured: true }
+}

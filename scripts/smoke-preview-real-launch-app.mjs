@@ -24,7 +24,7 @@ import { request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { devAppSpawnSpec, smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { devAppSpawnSpec, smokeAppEnv, smokeAppIsGpui, stopProcess } from './lib/app-launcher.mjs'
 import { assertSmokeCommandConnection } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -38,6 +38,11 @@ const outputDirectory = resolve(
 )
 
 let appProcess = null
+// Plan 260 Phase 3: on the GPUI app the main side of the chain is the
+// preview element itself (`inspect-native-preview-runtime`: native ready and
+// presenting), not Electron main's surface record; the backend's surface and
+// compositor checks are the same.
+const gpuiApp = smokeAppIsGpui()
 let stopping = false
 
 try {
@@ -85,7 +90,10 @@ async function runRealLaunchContract(connection, smoke) {
       const [surface, compositor, mainSurface] = await Promise.all([
         request(ws, timeoutMs, 'preview.surface.status'),
         request(ws, timeoutMs, 'compositor.status'),
-        smokeCommand(smoke, 'native-preview-surface-status')
+        smokeCommand(
+          smoke,
+          gpuiApp ? 'inspect-native-preview-runtime' : 'native-preview-surface-status'
+        )
       ])
       last = { surface, compositor, mainSurface }
       if (baseline.compositorFrames < 0) {
@@ -123,14 +131,18 @@ function contractMet(last, baseline) {
     surface.state === 'live' &&
     surface.transport === 'native-surface' &&
     surface.backing === 'cametal-layer' &&
-    mainSurface.transport === 'native-surface' &&
-    mainSurface.backing === 'cametal-layer' &&
+    mainSurfaceReady(mainSurface) &&
     compositor.sceneRevision != null &&
     compositor.sceneRevision === compositor.frameSceneRevision &&
     Boolean(compositor.metalTargetIosurfaceId) &&
     (compositor.framesRendered ?? 0) > baseline.compositorFrames &&
     (surface.framesRendered ?? 0) > baseline.surfaceFrames
   )
+}
+
+function mainSurfaceReady(mainSurface) {
+  if (gpuiApp) return mainSurface.nativeReady === true && mainSurface.phase === 'presenting'
+  return mainSurface.transport === 'native-surface' && mainSurface.backing === 'cametal-layer'
 }
 
 function assertDiagnosticsAgree(diagnostics) {
@@ -150,7 +162,10 @@ async function failWithChainDump(ws, smoke, last, baseline) {
   const diagnostics = await request(ws, timeoutMs, 'diagnostics.stats').catch((error) => ({
     unavailable: String(error?.message ?? error)
   }))
-  const badges = await smokeCommand(smoke, 'inspect-preview-stage-badges').catch((error) => ({
+  const badges = await smokeCommand(
+    smoke,
+    gpuiApp ? 'inspect-native-preview-runtime' : 'inspect-preview-stage-badges'
+  ).catch((error) => ({
     unavailable: String(error?.message ?? error)
   }))
 

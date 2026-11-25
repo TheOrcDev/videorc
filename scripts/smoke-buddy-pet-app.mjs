@@ -454,7 +454,7 @@ async function runBubble(ws, smoke, { settings, packId }) {
       streaming: { enabled: false },
       video: { preset: 'custom', ...video }
     },
-    { app: 'electron', timeoutMs, forgetWorkingScene: false }
+    { app: smokeAppKind(), timeoutMs, forgetWorkingScene: false }
   )
   const streamKey = `buddy-bubble-${Date.now()}`
   const target = {
