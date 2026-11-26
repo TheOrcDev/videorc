@@ -20,7 +20,7 @@
 import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import {
   connectRemote as connectRemoteClient,
   remoteRequest as remoteRequestClient,
@@ -42,6 +42,11 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
+// Plan 260: VIDEORC_APP=gpui drives the GPUI app. It has no eval-js; its
+// Studio smoke commands (crates/videorc-app-core/src/smoke/studio.rs) stand
+// in for the renderer's scene-preset, clip-buffer and UI-settings hooks, as
+// in smoke-smart-scenes-app.mjs.
+const gpuiApp = smokeAppIsGpui()
 const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-remote-control-user-data-'))
 
 function fail(message) {
@@ -52,6 +57,38 @@ const connectRemote = (host, port, token) => connectRemoteClient(host, port, tok
 const remoteRequest = (ws, method, params) => remoteRequestClient(ws, method, params, { timeoutMs })
 const waitForRemoteEvent = (ws, event, predicate) =>
   waitForRemoteEventClient(ws, event, predicate, { timeoutMs })
+
+/**
+ * A GPUI Studio smoke command. The Studio refuses a change while a layout
+ * switch is still in flight ("The scene is changing."); a person tries again
+ * a moment later, and so does the smoke (up to 20 s).
+ */
+async function gpuiCommand(smoke, name, params = {}) {
+  const until = Date.now() + 20_000
+  for (;;) {
+    try {
+      return await requestSmokeCommand(smoke, name, params, { timeoutMs })
+    } catch (error) {
+      if (!/The scene is changing/.test(error?.message ?? '') || Date.now() > until) throw error
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 250))
+    }
+  }
+}
+
+/** GPUI's Output switch for the Clips ring; `{result: true}` like the hook. */
+async function gpuiSetReplayBuffer(smoke, armed) {
+  const answer = await gpuiCommand(smoke, 'studio-replay-buffer', { armed })
+  if (answer?.armed !== armed) {
+    fail(`studio-replay-buffer ${armed} answered ${JSON.stringify(answer)}`)
+  }
+  return { result: true }
+}
+
+/** GPUI's stored v2 scene whose 16:9 layout is `preset`, from the library. */
+async function gpuiLibraryScene(smoke, preset) {
+  const scenes = await gpuiCommand(smoke, 'studio-scenes-state')
+  return (scenes.library ?? []).find((entry) => entry.layouts?.horizontal?.layoutPreset === preset)
+}
 
 async function waitForBackendState(connection, method, predicate, label) {
   const deadline = Date.now() + timeoutMs
@@ -90,39 +127,62 @@ try {
   // frames here (no source preview), so the ring was refused three times and
   // gave up before 4's sceneApply removed the camera; Camera off holds the
   // ring on its blocked reason instead, and screen-only clears it.
-  await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
-  await requestSmokeCommand(
-    smoke,
-    'eval-js',
-    {
-      code: `
-        const settings = await ${UI_SETTINGS_READY_JS};
-        const key = ${JSON.stringify(CAPTURE_CONFIG_STORAGE_KEY)};
-        let current = {};
-        try { current = JSON.parse(settings.getItem(key) ?? '{}') ?? {}; } catch {}
-        // Camera None on purpose: no id (capture.ts drops cameraOff beside one).
-        const sources = { ...(current.sources ?? {}), cameraId: undefined, cameraName: undefined, cameraOff: true };
-        settings.setItem(key, JSON.stringify({ ...current, sources }));
-        window.__remoteSmokeBeforeReload = true;
-        ${RELOAD_KEEPING_SEED_JS}
-        return true;
-      `
-    },
-    { timeoutMs }
-  )
-  const reloadDeadline = Date.now() + timeoutMs
-  for (;;) {
-    const reloaded = await requestSmokeCommand(
+  if (gpuiApp) {
+    // GPUI: no renderer to reload. The Studio's own Camera None (as
+    // smoke:smart-scenes' chooseCameraOff), once the scene library and
+    // settings have loaded, then wait until the capture config holds it.
+    const cameraDeadline = Date.now() + timeoutMs
+    let working = null
+    for (;;) {
+      const scenes = await gpuiCommand(smoke, 'studio-scenes-state').catch(() => null)
+      if (scenes?.loaded === true) break
+      if (Date.now() > cameraDeadline) fail('the GPUI Studio never loaded its scene library')
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 250))
+    }
+    await gpuiCommand(smoke, 'select-camera-device', { off: true, settleMs: 0 })
+    for (;;) {
+      working = (await gpuiCommand(smoke, 'studio-scenes-state')).working?.sources ?? null
+      if (working?.cameraOff === true && !working.cameraId) break
+      if (Date.now() > cameraDeadline) {
+        fail(`the GPUI Studio did not take Camera None: ${JSON.stringify(working)}`)
+      }
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 250))
+    }
+  } else {
+    await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
+    await requestSmokeCommand(
       smoke,
       'eval-js',
       {
-        code: 'return !window.__remoteSmokeBeforeReload && typeof window.__videorcSmokeSetReplayBuffer === "function"'
+        code: `
+          const settings = await ${UI_SETTINGS_READY_JS};
+          const key = ${JSON.stringify(CAPTURE_CONFIG_STORAGE_KEY)};
+          let current = {};
+          try { current = JSON.parse(settings.getItem(key) ?? '{}') ?? {}; } catch {}
+          // Camera None on purpose: no id (capture.ts drops cameraOff beside one).
+          const sources = { ...(current.sources ?? {}), cameraId: undefined, cameraName: undefined, cameraOff: true };
+          settings.setItem(key, JSON.stringify({ ...current, sources }));
+          window.__remoteSmokeBeforeReload = true;
+          ${RELOAD_KEEPING_SEED_JS}
+          return true;
+        `
       },
-      { timeoutMs: 5000 }
-    ).catch(() => null)
-    if (reloaded?.result === true) break
-    if (Date.now() > reloadDeadline) fail('the renderer did not reload its camera-free profile')
-    await new Promise((resolveSleep) => setTimeout(resolveSleep, 250))
+      { timeoutMs }
+    )
+    const reloadDeadline = Date.now() + timeoutMs
+    for (;;) {
+      const reloaded = await requestSmokeCommand(
+        smoke,
+        'eval-js',
+        {
+          code: 'return !window.__remoteSmokeBeforeReload && typeof window.__videorcSmokeSetReplayBuffer === "function"'
+        },
+        { timeoutMs: 5000 }
+      ).catch(() => null)
+      if (reloaded?.result === true) break
+      if (Date.now() > reloadDeadline) fail('the renderer did not reload its camera-free profile')
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 250))
+    }
   }
 
   // 1. Enable + discovery file contract.
@@ -213,20 +273,29 @@ try {
     'synthetic compositor readiness'
   )
 
-  const prepared = await requestSmokeCommand(
-    smoke,
-    'eval-js',
-    {
-      code: `
+  const prepared = gpuiApp
+    ? await (async () => {
+        const scene = await gpuiLibraryScene(smoke, 'screen-only')
+        if (!scene) fail('GPUI: no stored scene with a Screen only 16:9 layout to prepare')
+        scene.shows = { kind: 'test-pattern' }
+        await gpuiCommand(smoke, 'studio-scene-edit', { scene })
+        const scenes = await gpuiCommand(smoke, 'studio-scenes-state')
+        return { result: { scenes: scenes.scenes ?? [] } }
+      })()
+    : await requestSmokeCommand(
+        smoke,
+        'eval-js',
+        {
+          code: `
         const library = JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2'));
         const scene = library.scenes.find((entry) => entry.layouts.horizontal.layoutPreset === 'screen-only');
         scene.shows = {kind: 'test-pattern'};
         if (!await window.__videorcSmokeScenePresets.edit(scene)) throw new Error('Synthetic fixture scene edit refused');
         return window.__videorcSmokeScenePresets.state();
       `
-    },
-    { timeoutMs }
-  )
+        },
+        { timeoutMs }
+      )
   const mappedScreenOnly = prepared.result.scenes.find(
     (scene) => scene.visual.layout.layoutPreset === 'screen-only'
   )?.id
@@ -283,12 +352,14 @@ try {
     console.log(
       `remote-control smoke: SKIP ring on by default (software encoder guard): ${defaultVerdict.reason}`
     )
-    const armed = await requestSmokeCommand(
-      smoke,
-      'eval-js',
-      { code: 'return window.__videorcSmokeSetReplayBuffer?.(true) ?? null' },
-      { timeoutMs }
-    )
+    const armed = gpuiApp
+      ? await gpuiSetReplayBuffer(smoke, true)
+      : await requestSmokeCommand(
+          smoke,
+          'eval-js',
+          { code: 'return window.__videorcSmokeSetReplayBuffer?.(true) ?? null' },
+          { timeoutMs }
+        )
     if (armed?.result !== true) fail('the renderer has no clip buffer smoke hook')
     const ringOn = await waitForBackendState(
       renderer,
@@ -306,13 +377,15 @@ try {
     fail(`clipMark with the ring on was not acknowledged: ${JSON.stringify(clipOnAck)}`)
   }
   console.log('remote-control smoke: clipMark relay with the ring on OK')
-  await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
-  const switched = await requestSmokeCommand(
-    smoke,
-    'eval-js',
-    { code: 'return window.__videorcSmokeSetReplayBuffer?.(false) ?? null' },
-    { timeoutMs }
-  )
+  if (!gpuiApp) await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
+  const switched = gpuiApp
+    ? await gpuiSetReplayBuffer(smoke, false)
+    : await requestSmokeCommand(
+        smoke,
+        'eval-js',
+        { code: 'return window.__videorcSmokeSetReplayBuffer?.(false) ?? null' },
+        { timeoutMs }
+      )
   if (switched?.result !== true) fail('the renderer has no clip buffer smoke hook')
   await waitForBackendState(
     renderer,
@@ -596,14 +669,19 @@ try {
   }
 
   // Plan 210 S6: a saved-scene key uses only the projected id and name.
-  const saved = await requestSmokeCommand(
-    smoke,
-    'eval-js',
-    {
-      code: `return window.__videorcSmokeScenePresets.save('Figma');`
-    },
-    { timeoutMs }
-  )
+  const saved = gpuiApp
+    ? await gpuiCommand(smoke, 'studio-scene-save', { name: 'Figma' }).then(
+        (answer) => (answer?.saved === true ? { result: true } : answer),
+        (error) => ({ error: error?.message ?? String(error) })
+      )
+    : await requestSmokeCommand(
+        smoke,
+        'eval-js',
+        {
+          code: `return window.__videorcSmokeScenePresets.save('Figma');`
+        },
+        { timeoutMs }
+      )
   if (saved?.result !== true) fail(`could not save the Figma fixture: ${JSON.stringify(saved)}`)
   const catalog = await waitForBackendState(
     renderer,
@@ -614,14 +692,23 @@ try {
   const savedScene = catalog.state.savedScenes.find((scene) => scene.name === 'Figma')
   if (Object.keys(savedScene).sort().join(',') !== 'id,name')
     fail('saved scene projection leaked extra fields')
-  await requestSmokeCommand(
-    smoke,
-    'eval-js',
-    {
-      code: `window.__videorcSmokeScenePresets.layout({ layoutPreset: 'screen-only' }); return true;`
-    },
-    { timeoutMs }
-  )
+  if (gpuiApp) {
+    // Electron's layout() hook answers true whatever the Studio does; the
+    // remote.describe wait below is the check. A refusal is logged, not hidden.
+    await gpuiCommand(smoke, 'studio-scene-layout', {
+      patch: { layoutPreset: 'screen-only' }
+    }).catch((error) =>
+      console.log(`remote-control smoke: GPUI studio-scene-layout refused: ${error?.message}`)
+    )
+  } else
+    await requestSmokeCommand(
+      smoke,
+      'eval-js',
+      {
+        code: `window.__videorcSmokeScenePresets.layout({ layoutPreset: 'screen-only' }); return true;`
+      },
+      { timeoutMs }
+    )
   await waitForBackendState(
     renderer,
     'remote.describe',
@@ -632,14 +719,19 @@ try {
   )
   // Layout edits no longer leave Figma. Switch away explicitly so the
   // remote key proves a real confirmed-state edge rather than a no-op.
-  const away = await requestSmokeCommand(
-    smoke,
-    'eval-js',
-    {
-      code: `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(mappedScreenOnly)})`
-    },
-    { timeoutMs }
-  )
+  const away = gpuiApp
+    ? await gpuiCommand(smoke, 'studio-scene-apply', { id: mappedScreenOnly }).then(
+        (answer) => ({ result: answer?.applied === true }),
+        (error) => fail(`could not switch away before the saved-scene key: ${error?.message}`)
+      )
+    : await requestSmokeCommand(
+        smoke,
+        'eval-js',
+        {
+          code: `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(mappedScreenOnly)})`
+        },
+        { timeoutMs }
+      )
   if (away.result !== true) fail('could not switch away before the saved-scene key')
   await waitForBackendState(
     renderer,
@@ -682,14 +774,22 @@ try {
     const confirmedBy = Date.now() + timeoutMs
     let confirmed = null
     do {
-      const snapshot = await requestSmokeCommand(
-        smoke,
-        'eval-js',
-        {
-          code: `const state = window.__videorcSmokeScenePresets.state(); const library = JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2')); return {activeId: state.activeId, sources: state.visual.sources, shows: library.scenes.find((scene) => scene.id === state.activeId)?.shows}`
-        },
-        { timeoutMs }
-      )
+      const snapshot = gpuiApp
+        ? await gpuiCommand(smoke, 'studio-scenes-state').then((scenes) => ({
+            result: {
+              activeId: scenes.onStreamId ?? null,
+              sources: scenes.working?.sources ?? {},
+              shows: (scenes.library ?? []).find((scene) => scene.id === scenes.onStreamId)?.shows
+            }
+          }))
+        : await requestSmokeCommand(
+            smoke,
+            'eval-js',
+            {
+              code: `const state = window.__videorcSmokeScenePresets.state(); const library = JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2')); return {activeId: state.activeId, sources: state.visual.sources, shows: library.scenes.find((scene) => scene.id === state.activeId)?.shows}`
+            },
+            { timeoutMs }
+          )
       confirmed = snapshot.result
       if (
         confirmed.activeId === savedScene.id &&
@@ -712,14 +812,22 @@ try {
       'remote-control smoke: screenId SKIP: no available display / Screen Recording grant'
     )
 
-  const removed = await requestSmokeCommand(
-    smoke,
-    'eval-js',
-    {
-      code: `const scene = JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2')).scenes.find((scene) => scene.layouts.horizontal.layoutPreset === 'side-by-side'); if (!scene) throw new Error('No Side by side scene to prepare'); scene.layouts.horizontal.layoutPreset = 'screen-only'; return window.__videorcSmokeScenePresets.edit(scene)`
-    },
-    { timeoutMs }
-  )
+  const removed = gpuiApp
+    ? await (async () => {
+        const scene = await gpuiLibraryScene(smoke, 'side-by-side')
+        if (!scene) fail('GPUI: no Side by side scene to prepare')
+        scene.layouts.horizontal.layoutPreset = 'screen-only'
+        const answer = await gpuiCommand(smoke, 'studio-scene-edit', { scene })
+        return { result: answer?.edited === true }
+      })()
+    : await requestSmokeCommand(
+        smoke,
+        'eval-js',
+        {
+          code: `const scene = JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2')).scenes.find((scene) => scene.layouts.horizontal.layoutPreset === 'side-by-side'); if (!scene) throw new Error('No Side by side scene to prepare'); scene.layouts.horizontal.layoutPreset = 'screen-only'; return window.__videorcSmokeScenePresets.edit(scene)`
+        },
+        { timeoutMs }
+      )
   if (removed.result !== true) fail('could not prepare the legacy layout refusal')
   await new Promise((resolve) => setTimeout(resolve, 400))
   const refusedPromise = waitForRemoteEvent(remote, 'remote.ack')
