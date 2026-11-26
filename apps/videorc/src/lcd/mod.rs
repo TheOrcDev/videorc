@@ -20,10 +20,11 @@ use videorc_kit::chrome::box_shadow;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::select::SelectTriggerState;
 use videorc_kit::slider::Slider;
-use videorc_kit::theme::{hsla, is_dark, with_alpha};
+use videorc_kit::theme::{faded_over, hsla, is_dark, with_alpha};
 use videorc_kit::tokens::{Shadow, Theme, radius};
 use videorc_kit::tooltip::tooltip;
 use videorc_kit::tracking::TrackedText;
+use videorc_kit::{LcdGlassColors, LcdScreen};
 
 /// The screen's face: `--font-mono` in Electron, the kit's loadable mono
 /// (Menlo / Consolas / DejaVu Sans Mono).
@@ -51,12 +52,13 @@ const KEY_TRACKING_EM: f32 = 0.04;
 /// For the short words only (titles, row labels, On/Off): tracked text
 /// never truncates, so a value that may be cut ("…") stays [`caps`].
 pub fn tracked(words: impl Into<SharedString>) -> TrackedText {
-    TrackedText::new(caps(words), SCREEN_TEXT_PX, SCREEN_TRACKING_EM)
+    // The ink's halo (`drop-shadow(0 0 3px var(--lcd-display-glow))`).
+    TrackedText::new(caps(words), SCREEN_TEXT_PX, SCREEN_TRACKING_EM).glow(true)
 }
 
 /// A key's words, in capitals with the keys' tracking.
 pub fn key_tracked(words: impl Into<SharedString>) -> TrackedText {
-    TrackedText::new(caps(words), KEY_TEXT_PX, KEY_TRACKING_EM)
+    TrackedText::new(caps(words), KEY_TEXT_PX, KEY_TRACKING_EM).glow(true)
 }
 
 /// Lit pixel ink on the screen.
@@ -167,6 +169,14 @@ pub fn panel(
     } else {
         theme.border
     };
+    // The opaque colour the glass shows under the ink, for the dots' holes:
+    // the glass over the middle of the chip bezel's fill.
+    let bezel = faded_over(
+        faded_over(theme.chip_fill_top, theme.glass_solid, 1.0),
+        faded_over(theme.chip_fill_bottom, theme.glass_solid, 1.0),
+        0.5,
+    );
+    let screen_ground = faded_over(glass, bezel, 1.0);
     let (recess_blur, recess_ring) = if dark {
         (theme.chip_drop, theme.chip_drop)
     } else {
@@ -234,14 +244,21 @@ pub fn panel(
                         color: recess_ring,
                     }),
                 ])
-                .px(px(12.))
-                .py(px(4.))
+                .relative()
+                .overflow_hidden()
                 .font_family(SCREEN_FONT)
                 .text_size(px(SCREEN_TEXT_PX))
                 .line_height(px(SCREEN_TEXT_PX))
                 .font_weight(gpui::FontWeight::NORMAL)
                 .text_color(lit(theme))
-                .child(child),
+                // `LcdScreen`: the unlit dots behind, the ink in dots and
+                // the sheen and scanlines in front, over the whole glass;
+                // the content keeps the screen's `px-3 py-1`.
+                .child(
+                    LcdScreen::new(LcdGlassColors::new(dark, theme.primary, screen_ground))
+                        .radius(radius::ROW)
+                        .child(div().px(px(12.)).py(px(4.)).child(child)),
+                ),
         )
 }
 
