@@ -1571,7 +1571,10 @@ fn look_body(
     };
     let reasons: Vec<&str> = camera_gap.into_iter().chain(screen_gap).collect();
     let grant_reason = reasons.iter().any(|reason| reason.starts_with("Allow "));
-    let has_sources = camera_gap.is_none() || screen_gap.is_none();
+    // `look-picture.tsx`: the picture places only a camera, screen or
+    // window (PICTURE_KINDS). A test pattern isn't one, so with nothing
+    // else chosen the picture says what it waits for, as Electron.
+    let has_sources = chosen(&sources.camera_id) || base_chosen;
 
     // The picture: the layout's boxes with the camera in its shape, the
     // chosen live background behind them.
