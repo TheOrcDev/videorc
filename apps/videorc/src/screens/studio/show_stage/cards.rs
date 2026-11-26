@@ -154,7 +154,9 @@ pub fn stage_layout_thumb(layout: DrawnStageLayout, t: &Theme) -> AnyElement {
     let other = hsla(with_alpha(t.foreground, 0.15));
     // `inset-1` / `top-1` etc.: 4 px from the frame's inside edge.
     const IN: f32 = 4.;
-    let boxed = |color| div().absolute().rounded(px(2.)).bg(color);
+    // `rounded-[2px]`, on the chip tier as the Scenes diagrams draw their
+    // tight corners (a third of the chip).
+    let boxed = |color| div().absolute().rounded(px(radius::CHIP / 3.)).bg(color);
     let boxes: Vec<gpui::Div> = match layout {
         DrawnStageLayout::Solo => vec![
             boxed(person)
