@@ -164,6 +164,39 @@ impl StreamManagerFrame {
         }
     }
 
+    pub fn last_frame(&self) -> Option<Rect> {
+        let inner = self.inner.borrow();
+        inner.last.or_else(|| migrate(&inner.prefs.load()).0)
+    }
+
+    /// Electron's per-screen frame map, kept local in comments-window.json.
+    pub fn on_screen(&self, id: &str) -> Option<Rect> {
+        self.inner
+            .borrow()
+            .prefs
+            .load()
+            .get("screenFrames")?
+            .get(id)
+            .and_then(Rect::from_json)
+    }
+
+    pub fn remember_screen(&self, id: &str, frame: Rect) {
+        let mut screens = self
+            .inner
+            .borrow()
+            .prefs
+            .load()
+            .get("screenFrames")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        screens.insert(id.to_string(), frame.to_json());
+        let mut patch = Map::new();
+        patch.insert("screenFrames".into(), Value::Object(screens));
+        self.write(patch);
+        self.inner.borrow_mut().last = Some(frame);
+    }
+
     /// Saves the last frame, and `open: false` unless the quit closed it.
     pub fn closed(&self, app_quitting: bool) {
         let last = self.inner.borrow().last;

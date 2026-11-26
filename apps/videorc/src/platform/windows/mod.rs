@@ -130,6 +130,47 @@ impl Platform for WindowsOs {
         Ok(())
     }
 
+    fn window_shown(&self, window: &Window) -> bool {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible};
+        hwnd(window).is_ok_and(|hwnd| unsafe { IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0 })
+    }
+
+    fn show_window(&self, window: &Window, focus: bool) -> OsResult<()> {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SW_RESTORE, SW_SHOWNOACTIVATE, ShowWindow,
+        };
+        let hwnd = hwnd(window)?;
+        unsafe {
+            ShowWindow(hwnd, if focus { SW_RESTORE } else { SW_SHOWNOACTIVATE });
+        }
+        Ok(())
+    }
+
+    fn return_screen_key_focus(&self, window: &Window) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GW_HWNDNEXT, GetWindow, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow,
+        };
+        let Ok(own) = hwnd(window) else {
+            return;
+        };
+        // Skip our own windows, just as Electron's bounded blur loop does.
+        unsafe {
+            let mut next = GetWindow(own, GW_HWNDNEXT);
+            for _ in 0..128 {
+                if next.is_null() {
+                    break;
+                }
+                let mut pid = 0;
+                GetWindowThreadProcessId(next, &mut pid);
+                if pid != std::process::id() && IsWindowVisible(next) != 0 {
+                    SetForegroundWindow(next);
+                    break;
+                }
+                next = GetWindow(next, GW_HWNDNEXT);
+            }
+        }
+    }
+
     /// Smoke `raise-window`: topmost (floating / screen-saver) without focus.
     fn raise_window(&self, window: &Window, level: SmokeWindowLevel) -> OsResult<()> {
         let hwnd = hwnd(window)?;

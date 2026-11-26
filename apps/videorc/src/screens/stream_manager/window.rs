@@ -68,6 +68,7 @@ struct Open {
     /// Viewers really don't see the open window (the remotes' Hidden
     /// title, `streamManagerHiddenFromViewers`).
     hidden_from_viewers: bool,
+    place: RemoteStreamManager,
 }
 
 impl Global for Open {}
@@ -98,6 +99,7 @@ pub fn install(
         window: None,
         quitting: false,
         hidden_from_viewers: false,
+        place: RemoteStreamManager::default(),
     });
     cx.on_action(|_: &ToggleStreamManager, cx| toggle(cx));
     cx.on_window_closed(|cx, id| {
@@ -148,9 +150,17 @@ pub fn toggle(cx: &mut App) {
 
 /// Brings the window forward, opening it first when it is closed.
 pub fn show(cx: &mut App) {
+    show_at(None, true, cx);
+}
+
+fn show_at(target: Option<gpui::Bounds<gpui::Pixels>>, focus: bool, cx: &mut App) {
     let open = cx.global::<Open>().window;
     if let Some(window) = open {
-        let _ = window.update(cx, |_, window, _| window.activate_window());
+        let _ = window.update(cx, |_, window, _| {
+            if focus {
+                window.activate_window();
+            }
+        });
         return;
     }
     let (frame, app_id, dashboard, studio, runtime) = {
@@ -163,7 +173,8 @@ pub fn show(cx: &mut App) {
             open.runtime.clone(),
         )
     };
-    let bounds = frame.opening(cx).unwrap_or_else(|| {
+    let saved = frame.opening(cx);
+    let bounds = target.or(saved).unwrap_or_else(|| {
         Bounds::centered(
             None,
             size(px(DEFAULT_WIDTH as f32), px(DEFAULT_HEIGHT as f32)),
@@ -171,6 +182,8 @@ pub fn show(cx: &mut App) {
         )
     });
     let mut options = window::options(TITLE, bounds);
+    options.focus = focus;
+    options.show = target.is_none();
     options.window_min_size = Some(size(px(MIN_WIDTH), px(MIN_HEIGHT)));
     options.app_id = Some(app_id.into());
     let opened = cx.open_window(options, move |window, cx| {
@@ -180,6 +193,7 @@ pub fn show(cx: &mut App) {
         Ok(window) => cx.global_mut::<Open>().window = Some(window),
         Err(error) => eprintln!("[videorc-app] the Stream Manager did not open: {error:#}"),
     }
+    refresh_remote_place(cx);
     crate::app::remote_keys::report(cx);
 }
 
@@ -206,18 +220,160 @@ pub fn front_or_close(cx: &mut App) -> bool {
     true
 }
 
-/// Where the remotes see the Stream Manager (plan 230 D5): open reads as
-/// showing (GPUI can't tell a minimized window), and Hidden only while
-/// viewers really don't see it. No screen: this app can't move it yet.
+/// Where the remotes see the Stream Manager. Updated on placement and native
+/// window events; geometry and application identifiers never leave the app.
 pub fn remote_place(cx: &App) -> RemoteStreamManager {
     let Some(open) = cx.try_global::<Open>() else {
         return RemoteStreamManager::default();
     };
-    let shown = open.window.is_some();
-    RemoteStreamManager {
-        screen_id: None,
-        visible: shown,
-        hidden_from_stream: shown && open.hidden_from_viewers,
+    if open.window.is_none() {
+        return RemoteStreamManager::default();
+    }
+    let mut place = open.place.clone();
+    place.hidden_from_stream = place.visible && open.hidden_from_viewers;
+    place
+}
+
+fn note_place(window: &Window, cx: &mut App) {
+    let place = RemoteStreamManager {
+        screen_id: platform::current()
+            .window_frame(window)
+            .ok()
+            .and_then(|frame| {
+                videorc_app_core::studio::remote_screens::screen_for_frame(
+                    frame,
+                    &crate::app::frames::remote_displays(cx),
+                )
+                .map(str::to_owned)
+            }),
+        visible: platform::current().window_shown(window),
+        hidden_from_stream: false,
+    };
+    cx.global_mut::<Open>().place = place;
+    cx.defer(|cx| crate::app::remote_keys::report(cx));
+}
+
+fn refresh_remote_place(cx: &mut App) {
+    if let Some(handle) = handle(cx) {
+        let _ = handle.update(cx, |_, window, cx| note_place(window, cx));
+    }
+}
+
+/// Electron's tap: revalidate live displays, place before showing, and only
+/// acknowledge when the native frame is on the chosen display.
+pub fn screen_swap(
+    presenting: &str,
+    monitor: &str,
+    cx: &mut App,
+) -> videorc_app_core::studio::remote::IntentOutcome {
+    use crate::app::frames::{bounds_of, remote_displays};
+    use videorc_app_core::studio::remote::{accepted, copy, refused};
+    use videorc_app_core::studio::remote_app::screen_swap_refusal;
+    use videorc_app_core::studio::remote_screens::{destination, frame_on_screen, screen_options};
+    let displays = remote_displays(cx);
+    if let Some(reason) = screen_swap_refusal(
+        &json!({"presentingScreen": presenting, "monitorScreen": monitor}),
+        &screen_options(&displays),
+        crate::app::remote_keys::screen_moves(),
+    ) {
+        return refused(reason);
+    }
+    if !cx.has_global::<Open>() {
+        return refused(copy::WINDOW_MISSING);
+    }
+    refresh_remote_place(cx);
+    let (id, focus) = destination(&remote_place(cx), presenting, monitor);
+    let Some(display) = displays.iter().find(|d| d.id == id) else {
+        return refused(copy::SCREEN_MISSING);
+    };
+    let frame_store = cx.global::<Open>().frame.clone();
+    let current = handle(cx)
+        .and_then(|handle| {
+            handle
+                .update(cx, |_, window, _| platform::current().window_frame(window))
+                .ok()
+                .and_then(Result::ok)
+        })
+        .or_else(|| frame_store.last_frame())
+        .unwrap_or_else(|| {
+            videorc_app_core::desktop::window_frames::Rect::new(
+                0.,
+                0.,
+                DEFAULT_WIDTH,
+                DEFAULT_HEIGHT,
+            )
+        });
+    if let Some(previous) = remote_place(cx).screen_id {
+        frame_store.remember_screen(&previous, current);
+    }
+    let frame = frame_on_screen(current, frame_store.on_screen(id), display.work_area);
+    let existing = handle(cx);
+    let own_before = cx
+        .active_window()
+        .filter(|active| existing.is_some_and(|own| own.window_id() != active.window_id()));
+    let restore_focus = existing
+        .and_then(|handle| {
+            handle
+                .update(cx, |_, window, _| {
+                    window.is_window_active() || !platform::current().window_shown(window)
+                })
+                .ok()
+        })
+        .unwrap_or(false);
+    show_at(Some(bounds_of(frame)), false, cx);
+    let Some(handle) = handle(cx) else {
+        return refused(copy::WINDOW_MISSING);
+    };
+    let moved = handle.update(cx, |_, window, cx| {
+        window.resize(size(px(frame.width as f32), px(frame.height as f32)));
+        let target = platform::ScreenFrame {
+            x: frame.x,
+            y: frame.y,
+            width: frame.width,
+            height: frame.height,
+        };
+        platform::current().set_window_frame(window, target)?;
+        platform::current().show_window(window, focus)?;
+        if focus {
+            window.activate_window();
+        }
+        // Native bounds are synchronous, unlike GPUI's cached display ID.
+        let actual = platform::current().window_frame(window)?;
+        let center_x = actual.x + actual.width / 2.;
+        let center_y = actual.y + actual.height / 2.;
+        let bounds = display.bounds;
+        if center_x < bounds.x
+            || center_x >= bounds.x + bounds.width
+            || center_y < bounds.y
+            || center_y >= bounds.y + bounds.height
+        {
+            return Err(copy::STREAM_MANAGER_NOT_MOVED.to_string());
+        }
+        cx.global_mut::<Open>().place = RemoteStreamManager {
+            screen_id: Some(id.to_string()),
+            visible: true,
+            hidden_from_stream: false,
+        };
+        frame_store.remember_screen(id, actual);
+        Ok(())
+    });
+    match moved {
+        Ok(Ok(())) => {
+            if !focus && restore_focus {
+                if let Some(own) = own_before {
+                    let _ = own.update(cx, |_, window, _| window.activate_window());
+                } else {
+                    let _ = handle.update(cx, |_, window, _| {
+                        platform::current().return_screen_key_focus(window)
+                    });
+                }
+            }
+            accepted()
+        }
+        error => {
+            eprintln!("[remote-control] Stream Manager placement failed: {error:?}");
+            refused(copy::STREAM_MANAGER_NOT_MOVED)
+        }
     }
 }
 
@@ -325,8 +481,17 @@ impl StreamManager {
         frame.moved(window);
         let bounds = cx.observe_window_bounds(window, {
             let frame = frame.clone();
-            move |_, window, _| frame.moved(window)
+            move |_, window, cx| {
+                frame.moved(window);
+                note_place(window, cx);
+            }
         });
+        window
+            .observe_window_visibility(|_, window, cx| note_place(window, cx))
+            .detach();
+        window
+            .observe_window_display(|window, cx| note_place(window, cx))
+            .detach();
         let pinned = frame.always_on_top();
         let hidden = frame.hidden_from_stream();
         let hide_method = stream_manager_hide_method(PermissionPlatform::current().as_str());

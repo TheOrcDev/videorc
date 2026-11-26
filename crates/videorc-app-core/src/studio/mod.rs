@@ -112,6 +112,7 @@ pub mod remote;
 mod remote_actions;
 pub mod remote_app;
 pub mod remote_lists;
+pub mod remote_screens;
 pub mod room_background;
 pub mod room_frames;
 pub mod room_media;

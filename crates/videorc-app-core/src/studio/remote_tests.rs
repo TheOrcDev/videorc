@@ -320,7 +320,7 @@ async fn the_app_answers_its_keys_through_the_listener() {
     let app = tokio::spawn(async move {
         let mut asked = Vec::new();
         while let Some(key) = keys.recv().await {
-            asked.push(key.action);
+            asked.push(key.action.clone());
             let outcome = match key.action {
                 AppRemoteAction::WindowFront(RemoteWindow::Preview) => {
                     refused(copy::WINDOW_MISSING)
@@ -423,7 +423,7 @@ async fn a_screen_tap_is_refused_with_its_reason_and_never_an_update() {
     let both =
         json!({"kind": "streamManagerScreenSwap", "presentingScreen": "1", "monitorScreen": "2"});
     assert_eq!(tap(both.clone()).await, no(copy::SCREEN_MISSING));
-    // The app reports both screens: it still can't move the window.
+    // Connected screens hand the key to the app and preserve its confirmed answer.
     studio.set_remote_app_facts(RemoteAppFacts {
         screens: vec![
             RemoteNamed {
@@ -437,7 +437,21 @@ async fn a_screen_tap_is_refused_with_its_reason_and_never_an_update() {
         ],
         ..RemoteAppFacts::default()
     });
-    assert_eq!(tap(both).await, no(copy::WINDOW_MISSING));
+    let (listener, mut keys) = tokio::sync::mpsc::unbounded_channel();
+    studio.set_remote_app_listener(Some(listener));
+    let app = tokio::spawn(async move {
+        let key = keys.recv().await.unwrap();
+        assert_eq!(
+            key.action,
+            super::super::remote_app::AppRemoteAction::StreamManagerScreenSwap {
+                presenting: "1".into(),
+                monitor: "2".into()
+            }
+        );
+        key.answer(accepted());
+    });
+    assert_eq!(tap(both).await, accepted());
+    app.await.unwrap();
 }
 
 #[tokio::test]
@@ -717,4 +731,31 @@ fn nothing_is_published_before_the_bootstrap() {
     snapshot.bootstrapped = true;
     studio.note_remote_surface(&snapshot);
     assert!(studio.remote_lock().due().is_some());
+}
+
+#[test]
+fn app_display_facts_publish_one_screen_without_leaking_geometry_and_follow_disconnects() {
+    use crate::desktop::window_frames::Rect;
+    use crate::studio::remote_screens::{RemoteDisplay, screen_options};
+    let studio = silent_studio();
+    let screens = screen_options(&[RemoteDisplay {
+        id: "17".into(),
+        name: String::new(),
+        bounds: Rect::new(0., 0., 1440., 900.),
+        work_area: Rect::new(0., 25., 1440., 875.),
+        primary: true,
+    }]);
+    studio.set_remote_app_facts(RemoteAppFacts {
+        screens,
+        ..RemoteAppFacts::default()
+    });
+    assert_eq!(
+        wire(&studio.remote_surface())["describe"]["screens"],
+        json!([{"id":"17", "name":"Screen 1"}])
+    );
+    studio.set_remote_app_facts(RemoteAppFacts::default());
+    assert_eq!(
+        wire(&studio.remote_surface())["describe"]["screens"],
+        json!([])
+    );
 }
