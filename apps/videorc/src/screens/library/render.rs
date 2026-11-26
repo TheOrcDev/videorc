@@ -106,6 +106,7 @@ impl LibraryScreen {
                 self.ask_delete(self.ui.selection.selected.clone(), window, cx)
             }
         }
+        self.keyboard_focus = true;
         cx.stop_propagation();
         cx.notify();
     }
@@ -934,13 +935,20 @@ impl LibraryScreen {
                     .busy(row.menu_busy || self.busy.contains(&id)),
             );
 
-        let highlight = row.selected || row.revealed || (row.active && focused);
+        // Electron's LIBRARY_ROW_CLASS: a picked or revealed row is tinted;
+        // the active row only shows the inset focus ring, and only while the
+        // list has focus from a key (`focus-visible`), not on opening.
+        let highlight = row.selected || row.revealed;
+        let ring = row.active && focused && self.keyboard_focus;
         let line = div()
             .id(SharedString::from(format!("session-{id}")))
             .w_full()
             .py(px(8.))
             .when(!last, |line| line.border_b_1().border_color(hsla(t.border)))
             .when(highlight, |line| line.bg(hsla(t.accent)))
+            .when(ring, |line| {
+                line.shadow(vec![videorc_kit::chrome::focus_ring(t)])
+            })
             .hover(|style| style.bg(hsla(t.accent)))
             .child(columns(
                 actions_width,
@@ -969,6 +977,7 @@ impl LibraryScreen {
                         ),
                         cx,
                     );
+                    this.keyboard_focus = !matches!(event, gpui::ClickEvent::Mouse(_));
                     this.focus.focus(window, cx);
                     if matches!(event,gpui::ClickEvent::Mouse(event) if event.up.click_count==2) {
                         this.external_recording(id.clone(), cx);
