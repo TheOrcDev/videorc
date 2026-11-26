@@ -1146,13 +1146,17 @@ impl ShowStage {
             );
         }
 
+        // Electron (`show-stage.tsx` ProgramMonitor): beside Layout/Screens/
+        // People at ~36% width (`w-[36%] shrink-0`), aspect-video frame — not
+        // a full-width stack above them (that made the Program well far taller).
         div()
             .id("show-stage-program")
             .flex()
             .flex_col()
-            .gap(px(8.))
-            .min_w(px(200.))
-            .flex_1()
+            .gap(px(6.))
+            .w(relative(0.36))
+            .min_w(px(192.))
+            .flex_shrink_0()
             .child(header)
             .child(
                 div()
@@ -1481,6 +1485,9 @@ impl Render for ShowStage {
             section = section.child(requests);
         }
 
+        // Electron: Layout / Screens / People on the left (`flex-1`); Program
+        // on the right at 36% (`@min-[44rem]/show-stage:flex-row`). Gallery
+        // shots are that wide layout.
         let controls = div()
             .flex()
             .flex_col()
@@ -1493,11 +1500,13 @@ impl Render for ShowStage {
 
         let row = div()
             .flex()
-            .flex_col()
+            .flex_row()
+            .items_start()
             .gap(px(16.))
             .min_w_0()
-            .child(self.program_monitor(&t, cx))
-            .child(controls);
+            .w_full()
+            .child(controls)
+            .child(self.program_monitor(&t, cx));
 
         section = section.child(row);
 
