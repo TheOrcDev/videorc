@@ -938,26 +938,26 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P626 | "Caption preview" panel + "Sample" / "Latest caption" badge | Renders the chosen style at the canvas aspect | `renderer/components/captions/caption-preview.tsx:52-82` | [ ] | [ ] | [ ] |
-| P627 | Preview info line (resolution · "Top"/"Bottom") | Shows size and position | `renderer/components/captions/caption-preview.tsx:84-91` | [ ] | [ ] | [ ] |
-| P628 | "Preview background" "Dark" / "Light" / "Mixed" | Preview backdrop only | `renderer/components/captions/caption-preview.tsx:92-108` | [ ] | [ ] | [ ] |
-| P629 | Upload lock alert (entitlement) + unlock action | Captions locked by plan | `renderer/components/captions/captions-controls.tsx:213-215` | [ ] | [ ] | [ ] |
-| P630 | "Live captions" switch + status dot / off hint | Turns captions on or off *(disabled on Linux (lib/captions-preflight.ts:141-143))* | `renderer/components/captions/captions-controls.tsx:219-254` | [ ] | [ ] | [ ] |
-| P631 | "Retry" | Restarts captions after a block or error | `renderer/components/captions/captions-controls.tsx:237-247` | [ ] | [ ] | [ ] |
-| P632 | Alert "Host microphone only" | Shown while a cloud room is open | `renderer/components/captions/captions-controls.tsx:256-265` | [ ] | [ ] | [ ] |
+| P626 | "Caption preview" panel + "Sample" / "Latest caption" badge | Renders the chosen style at the canvas aspect | `renderer/components/captions/caption-preview.tsx:52-82` | [x] | [ ] | [ ] |
+| P627 | Preview info line (resolution · "Top"/"Bottom") | Shows size and position | `renderer/components/captions/caption-preview.tsx:84-91` | [x] | [ ] | [ ] |
+| P628 | "Preview background" "Dark" / "Light" / "Mixed" | Preview backdrop only | `renderer/components/captions/caption-preview.tsx:92-108` | [x] | [ ] | [ ] |
+| P629 | Upload lock alert (entitlement) + unlock action | Captions locked by plan | `renderer/components/captions/captions-controls.tsx:213-215` | [x] | [ ] | [ ] |
+| P630 | "Live captions" switch + status dot / off hint | Turns captions on or off *(disabled on Linux (lib/captions-preflight.ts:141-143))* | `renderer/components/captions/captions-controls.tsx:219-254` | [x] | [ ] | [ ] |
+| P631 | "Retry" | Restarts captions after a block or error | `renderer/components/captions/captions-controls.tsx:237-247` | [x] | [ ] | [ ] |
+| P632 | Alert "Host microphone only" | Shown while a cloud room is open | `renderer/components/captions/captions-controls.tsx:256-265` | [x] | [ ] | [ ] |
 | P633 | Alert "Live captions aren't available on Linux yet" | Explains the Linux limit *(Linux only)* | `renderer/components/captions/captions-controls.tsx:266-271` | n/a | n/a | [ ] |
-| P634 | Alert "Captions can't go out on your next livestream" | Livestream blocker (fps, quality) | `renderer/components/captions/captions-controls.tsx:272-277` | [ ] | [ ] | [ ] |
-| P635 | "Show captions on" "Live stream only" / "Live stream and recording" | Captions output; locked during a session | `renderer/components/captions/captions-controls.tsx:282-296; renderer/lib/captions-page-view.ts:20-23` | [ ] | [ ] | [ ] |
-| P636 | "Microphone" row → Sources | Shows the mic captions hear | `renderer/components/captions/captions-controls.tsx:301-306` | [ ] | [ ] | [ ] |
-| P637 | "Placement" row → Scene | Shows the bar position, opens Scene | `renderer/components/captions/captions-controls.tsx:307-315` | [ ] | [ ] | [ ] |
-| P638 | "Allowance" row | Remaining caption minutes | `renderer/components/captions/captions-controls.tsx:316-318` | [ ] | [ ] | [ ] |
-| P639 | "Style" "Classic" / "Glass" / "Lower third" / "High contrast" | Caption look, applied live | `renderer/components/captions/captions-controls.tsx:320-359; renderer/lib/caption-overlay.ts:78-128` | [ ] | [ ] | [ ] |
-| P640 | "Text size" "Small" / "Medium" / "Large" | Caption size | `renderer/components/captions/captions-controls.tsx:365-375` | [ ] | [ ] | [ ] |
-| P641 | "Spoken language" select | Language or Auto-detect; locked during a session | `renderer/components/captions/captions-controls.tsx:378-408` | [ ] | [ ] | [ ] |
-| P642 | Live strip ("Listening…" / lines) | Recent partial and final captions | `renderer/components/captions/captions-controls.tsx:410-431` | [ ] | [ ] | [ ] |
-| P643 | "Open/Close Captions reader" (⌘⇧C / Ctrl+Shift+C) | Toggles the reader window | `renderer/components/captions/captions-controls.tsx:438-452; renderer/lib/shortcuts.ts:96-99` | [ ] | [ ] | [ ] |
-| P644 | "Host transcript" + "Refresh transcript" + list | Loads the saved host transcript | `renderer/components/captions/host-transcript.tsx:8-61` | [ ] | [ ] | [ ] |
-| P645 | Alert "The host transcript is unavailable for this room." | Transcript load failed | `renderer/components/captions/host-transcript.tsx:44-48` | [ ] | [ ] | [ ] |
+| P634 | Alert "Captions can't go out on your next livestream" | Livestream blocker (fps, quality) | `renderer/components/captions/captions-controls.tsx:272-277` | [x] | [ ] | [ ] |
+| P635 | "Show captions on" "Live stream only" / "Live stream and recording" | Captions output; locked during a session | `renderer/components/captions/captions-controls.tsx:282-296; renderer/lib/captions-page-view.ts:20-23` | [x] | [ ] | [ ] |
+| P636 | "Microphone" row → Sources | Shows the mic captions hear | `renderer/components/captions/captions-controls.tsx:301-306` | [x] | [ ] | [ ] |
+| P637 | "Placement" row → Scene | Shows the bar position, opens Scene | `renderer/components/captions/captions-controls.tsx:307-315` | [x] | [ ] | [ ] |
+| P638 | "Allowance" row | Remaining caption minutes | `renderer/components/captions/captions-controls.tsx:316-318` | [x] | [ ] | [ ] |
+| P639 | "Style" "Classic" / "Glass" / "Lower third" / "High contrast" | Caption look, applied live | `renderer/components/captions/captions-controls.tsx:320-359; renderer/lib/caption-overlay.ts:78-128` | [x] | [ ] | [ ] |
+| P640 | "Text size" "Small" / "Medium" / "Large" | Caption size | `renderer/components/captions/captions-controls.tsx:365-375` | [x] | [ ] | [ ] |
+| P641 | "Spoken language" select | Language or Auto-detect; locked during a session | `renderer/components/captions/captions-controls.tsx:378-408` | [x] | [ ] | [ ] |
+| P642 | Live strip ("Listening…" / lines) | Recent partial and final captions | `renderer/components/captions/captions-controls.tsx:410-431` | [x] | [ ] | [ ] |
+| P643 | "Open/Close Captions reader" (⌘⇧C / Ctrl+Shift+C) | Toggles the reader window | `renderer/components/captions/captions-controls.tsx:438-452; renderer/lib/shortcuts.ts:96-99` | [x] | [ ] | [ ] |
+| P644 | "Host transcript" + "Refresh transcript" + list | Loads the saved host transcript | `renderer/components/captions/host-transcript.tsx:8-61` | [x] | [ ] | [ ] |
+| P645 | Alert "The host transcript is unavailable for this room." | Transcript load failed | `renderer/components/captions/host-transcript.tsx:44-48` | [x] | [ ] | [ ] |
 
 ### Captions reader window (components/captions-reader.tsx)
 
