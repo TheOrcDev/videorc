@@ -110,6 +110,8 @@ pub mod recordings_folder;
 mod recordings_folder_actions;
 pub mod remote;
 mod remote_actions;
+pub mod remote_app;
+pub mod remote_lists;
 pub mod room_background;
 pub mod room_frames;
 pub mod room_media;
@@ -236,7 +238,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 46] = [
+pub const STUDIO_EVENTS: [&str; 51] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -250,6 +252,13 @@ pub const STUDIO_EVENTS: [&str; 46] = [
     crate::chat::overlay::LAYOUT_EVENT,
     // The takeover on air mutes the microphone (`takeover_mute`).
     takeover_mute::ACTIVE_CHANGED_EVENT,
+    // The remotes' lists: the takeovers, the banners, the sounds and Hide
+    // screen (`remote_lists`).
+    remote_lists::TAKEOVERS_CHANGED_EVENT,
+    remote_lists::BANNERS_CHANGED_EVENT,
+    remote_lists::SOUNDS_CHANGED_EVENT,
+    remote_lists::SOUNDS_PLAYBACK_EVENT,
+    scene_on_stream::SCREEN_PRIVACY_CHANGED_EVENT,
     // The toasts' news.
     crate::client::names::STREAM_TARGETS,
     crate::client::names::REPLAY_STATE,
@@ -1004,6 +1013,8 @@ pub struct Studio<B: StudioBackend> {
     remote_publish_kick: Notify,
     /// A remote intent waits; the driver runs it.
     remote_intent_kick: Notify,
+    /// The remotes' lists want reading on this connection (`remote_lists`).
+    remote_lists_kick: Notify,
     /// The takeover on air, for its microphone mute (`takeover_mute`).
     takeover_pending: Mutex<takeover_mute::TakeoverPending>,
     /// The takeover changed or wants reading; the driver commits it.
@@ -1126,6 +1137,7 @@ impl<B: StudioBackend> Studio<B> {
             remote: Mutex::new(remote::RemotePublisher::default()),
             remote_publish_kick: Notify::new(),
             remote_intent_kick: Notify::new(),
+            remote_lists_kick: Notify::new(),
             takeover_pending: Mutex::new(takeover_mute::TakeoverPending::default()),
             takeover_kick: Notify::new(),
             chat_overlay: Mutex::new(chat_overlay::ChatOverlayState::default()),
@@ -1186,6 +1198,7 @@ impl<B: StudioBackend> Studio<B> {
             () = self.drain_vertical_leg_when_kicked() => {}
             () = self.publish_remote_surface_when_kicked() => {}
             () = self.run_remote_intents_when_kicked() => {}
+            () = self.read_remote_lists_when_kicked() => {}
             () = self.drive_takeover_mute() => {}
             () = self.drive_chat_overlay() => {}
         }
@@ -1298,6 +1311,9 @@ impl<B: StudioBackend> Studio<B> {
                 // The takeover on air on this backend: a relaunch reads none
                 // and releases a mute the last run left (`takeover_mute`).
                 self.read_takeover_after_bootstrap();
+                // The remotes' lists on this backend, read once beside the
+                // events (`remote_lists`).
+                self.kick_remote_lists(false);
                 // S1.6b part 5d: a session that runs on this connection.
                 self.follow_live_audio().await;
                 // The talk show's room an earlier connection held: back in
@@ -1396,6 +1412,7 @@ impl<B: StudioBackend> Studio<B> {
                     self.handle_dashboard_event(crate::client::names::EVENTS_LAGGED, &Value::Null);
                 self.resync().await;
                 self.follow_live_audio().await;
+                self.kick_remote_lists(true);
             }
             BackendEvent::ConnectionClosed { reason } => {
                 {
@@ -1465,7 +1482,12 @@ impl<B: StudioBackend> Studio<B> {
             BackendEvent::Untyped { event, payload }
                 if event == takeover_mute::ACTIVE_CHANGED_EVENT =>
             {
+                self.follow_remote_takeover(&payload);
                 self.takeover_changed(!payload.is_null());
+            }
+            // The remotes' lists (`remote_lists`).
+            BackendEvent::Untyped { event, payload } if remote_lists::follows(&event) => {
+                self.follow_remote_list(&event, &payload);
             }
             // S1.6b part 5b: the Captions row's word.
             BackendEvent::Untyped { event, payload }

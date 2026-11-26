@@ -261,6 +261,18 @@ pub trait StudioBackend: Send + Sync + 'static {
         let _ = params;
         async move { Err(RpcError::not_connected(method)) }
     }
+    /// Sidekick Live's requests by name (`cohost.settings.get`, `.set`) and
+    /// the plan it needs (`entitlements.get`), as the backend's JSON: a
+    /// remote's Sidekick key and the surface's Sidekick Live read them. A
+    /// backend without them (a test fake) answers nothing.
+    fn buddy_request(
+        &self,
+        method: &'static str,
+        params: Value,
+    ) -> impl Future<Output = Result<Value, RpcError>> + Send {
+        let _ = params;
+        async move { Err(RpcError::not_connected(method)) }
+    }
 }
 
 impl StudioBackend for BackendClient {
@@ -463,6 +475,10 @@ impl StudioBackend for BackendClient {
     }
 
     async fn clips_request(&self, method: &'static str, params: Value) -> Result<Value, RpcError> {
+        self.request(method, params).await
+    }
+
+    async fn buddy_request(&self, method: &'static str, params: Value) -> Result<Value, RpcError> {
         self.request(method, params).await
     }
 }

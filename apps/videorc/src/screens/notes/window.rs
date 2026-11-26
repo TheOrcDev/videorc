@@ -123,6 +123,7 @@ pub fn show(cx: &mut App) {
         Ok(window) => cx.global_mut::<Open>().window = Some(window),
         Err(error) => eprintln!("[videorc-app] Notes did not open: {error:#}"),
     }
+    crate::app::remote_keys::report(cx);
 }
 
 pub struct Notes {
