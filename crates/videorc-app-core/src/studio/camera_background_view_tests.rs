@@ -453,3 +453,32 @@ fn the_background_section_shows_the_pick_its_tuning_and_its_hint() {
         json!({"similarityPct": 40, "smoothnessPct": 8, "spillPct": 30})
     );
 }
+
+#[test]
+fn shipped_camera_images_reach_the_full_picker_and_keep_the_selected_image_first() {
+    let root = tempfile::tempdir().unwrap();
+    assert!(bundled_images(root.path()).is_empty());
+    for (_, file) in crate::scenes::background::BUNDLED_BACKGROUNDS {
+        std::fs::write(root.path().join(file), b"fixture").unwrap();
+    }
+    let images = bundled_images(root.path());
+    assert_eq!(images.len(), 10);
+    assert_eq!(images[5].asset_id, "builtin-bg-06");
+    assert_eq!(images[5].name, "Podcast");
+    let all = choices(&input(&images, true, false, "darwin"));
+    assert!(all.iter().any(
+        |choice| choice.id == ChoiceId::Image("builtin-bg-06".into())
+            && choice.disabled_reason.is_none()
+    ));
+    let chosen = background_for_choice(&off(), &ChoiceId::Image("builtin-bg-06".into()));
+    assert_eq!(value_label(&chosen, &images), "Podcast");
+    let shown = images_picked_first(&images, Some("builtin-bg-06"));
+    assert_eq!(shown[0].asset_id, "builtin-bg-06");
+    assert_eq!(shown[1].asset_id, "builtin-bg-01");
+    std::fs::remove_file(root.path().join("podcast.webp")).unwrap();
+    assert!(
+        !bundled_images(root.path())
+            .iter()
+            .any(|image| image.asset_id == "builtin-bg-06")
+    );
+}

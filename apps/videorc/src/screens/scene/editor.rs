@@ -30,7 +30,7 @@ use videorc_app_core::editor::stage_copy;
 use videorc_app_core::livestream::plan;
 use videorc_app_core::studio::Connection;
 use videorc_app_core::studio::camera_background_view::{
-    BackgroundDraft, BackgroundSectionView, background_section_view,
+    BackgroundDraft, BackgroundSectionView, background_section_view, bundled_images,
 };
 use videorc_app_core::studio::capture_config::simulcast_armed;
 use videorc_app_core::studio::transport::transport_active;
@@ -471,9 +471,8 @@ impl EditorModel {
         });
 
         // The camera's Background (plan 258 S5): the shown background is
-        // the draft mid-drag, else the one stored for this camera. The
-        // Images library's background pictures are not read by the app
-        // yet, so no picture tiles show (P577).
+        // the draft mid-drag, else the one stored for this camera.
+        // Share the bundled Images catalogue with Studio's Background picker.
         let camera_id = capture_sources
             .get("cameraId")
             .and_then(Value::as_str)
@@ -486,7 +485,7 @@ impl EditorModel {
         let background_view = (inspector.kind == InspectorKind::Camera).then(|| {
             background_section_view(
                 &camera_background,
-                &[],
+                &bundled_images(&videorc_app_core::bundled::current().backgrounds),
                 camera_id.is_some(),
                 room_open,
                 platform,

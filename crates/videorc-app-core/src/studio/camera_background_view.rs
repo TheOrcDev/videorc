@@ -109,6 +109,23 @@ pub struct Image {
     pub picture: Option<String>,
 }
 
+/// Pictures shipped in the Images library, in the same order and with the
+/// same names. Missing packaged files must not produce selectable tiles.
+pub fn bundled_images(root: &std::path::Path) -> Vec<Image> {
+    crate::scenes::background::BUNDLED_BACKGROUNDS
+        .iter()
+        .filter_map(|(id, file)| {
+            let path = root.join(file);
+            let name = crate::scenes::background::bundled_background_name(id)?;
+            path.is_file().then(|| Image {
+                asset_id: (*id).to_string(),
+                name: name.to_string(),
+                picture: Some(path.to_string_lossy().into_owned()),
+            })
+        })
+        .collect()
+}
+
 /// `CameraBackgroundChoice`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Choice {
