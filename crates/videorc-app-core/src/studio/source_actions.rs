@@ -318,6 +318,11 @@ impl<B: StudioBackend> Studio<B> {
             Err(error) if super::settings_write_kept(&error) => Ok(()),
             Err(error) => Err(error.message),
         };
+        // `ensureNativePreviewScreen`: the screen capture follows the pick,
+        // or the preview keeps the screen captured before it.
+        if kind == SourceKind::Capture {
+            self.start_picked_screen_capture().await;
+        }
         // Part 5e (`switchSourceDeviceLive`): the scene editor holds the idle
         // reload, so a screen or camera pick made while it is open loads the
         // scene with the pick (`loadScene`, failures reported).
