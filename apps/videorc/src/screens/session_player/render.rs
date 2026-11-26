@@ -158,7 +158,10 @@ impl Render for Player {
             .gap(px(10.))
             .type_scale(text::LABEL)
             .text_color(hsla(t.foreground));
-        if self.active {
+        // `session-markers-dialog.tsx`: a recording that can't play (still
+        // recording, or no video file) shows its line, not the player.
+        let no_player = marker_view.as_ref().and_then(|v| v.line);
+        if self.active && no_player.is_none() {
             let slot = self.slot(cx);
             body = body.child(
                 div()
@@ -174,8 +177,13 @@ impl Render for Player {
                     .child(slot),
             );
         }
-        if let Some(line) = marker_view.as_ref().and_then(|v| v.line) {
-            body = body.child(Alert::new("player-no-video").title(line));
+        if let Some(line) = no_player {
+            body = body.child(
+                div()
+                    .type_scale(text::META)
+                    .text_color(hsla(t.muted_foreground))
+                    .child(line),
+            );
         } else if let Some(error) = &self.error {
             body = body.child(
                 Alert::new("player-error").title(error.clone()).action(
@@ -243,7 +251,9 @@ impl Render for Player {
                     .on_click(cx.listener(|this, _, window, cx| this.retry(window, cx))),
             );
         }
-        body = body.child(controls);
+        if no_player.is_none() {
+            body = body.child(controls);
+        }
         // Embedded: the host's layout holds the player; no markers, no dialog.
         if self.mode == Mode::Embedded {
             return body.into_any_element();
@@ -338,7 +348,7 @@ impl Render for Player {
             }
         }
         let weak = cx.entity().downgrade();
-        Dialog::new("recording-player", &self.dialog, title)
+        let dialog = Dialog::new("recording-player", &self.dialog, title)
             .description(copy::MARKERS_DESCRIPTION)
             .size(DialogSize::Xl)
             .on_open_change(move |open, _, _, cx| {
@@ -349,7 +359,13 @@ impl Render for Player {
                     });
                 }
             })
-            .child(body)
+            .child(body);
+        // The player's own actions; Electron's markers dialog has none while
+        // the recording can't play.
+        if no_player.is_some() {
+            return dialog.into_any_element();
+        }
+        dialog
             .footer(
                 Button::new("player-external")
                     .label(p::OPEN_IN_DEFAULT_PLAYER)
