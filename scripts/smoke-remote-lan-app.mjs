@@ -21,10 +21,10 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import WebSocket from 'ws'
+import { WebSocket } from 'ws'
 
 import { RemoteClient, parseFragment } from '../crates/videorc-backend/remote_web/remote-client.js'
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { connectRemote, remoteRequest } from './lib/remote-control-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { removeProfileDir } from './lib/profile-dir-removal.mjs'
@@ -70,19 +70,31 @@ async function waitFor(predicate, label, deadlineMs = 15000) {
 
 let stopApp = async () => {}
 try {
+  console.log('remote-lan smoke: waiting for app admission + backend readiness')
   const launch = await launchDevApp({
-    env: { VIDEORC_USER_DATA_DIR: userDataDir },
+    env: {
+      VIDEORC_USER_DATA_DIR: userDataDir,
+      // The GPUI app prints its `backend-ready` marker from the smoke
+      // command server's start (Electron prints it on its own).
+      ...(smokeAppIsGpui() ? { VIDEORC_SMOKE_COMMAND_SERVER: '1' } : {})
+    },
     timeoutMs,
     requiredMarkers: ['backend-ready'],
     onLine: (line) => {
-      if (process.env.VIDEORC_REMOTE_SMOKE_DEBUG === '1') console.log('[app]', line)
+      // Admission precedes the launch timeout and may wait with no app PID.
+      // Keep those waits visible without printing credential-bearing markers.
+      if (/^\[(?:smoke:(?:host-lock|memory|build-slot|prebuild)|host:live)\]/.test(line)) {
+        console.log(line)
+      } else if (process.env.VIDEORC_REMOTE_SMOKE_DEBUG === '1') console.log('[app]', line)
     }
   })
   stopApp = launch.stop
+  console.log('remote-lan smoke: backend ready; connecting renderer socket')
   const backend = launch.connections['backend-ready']
   const renderer = await connectBackend(backend, timeoutMs)
 
   // 1. Enable.
+  console.log('remote-lan smoke: enabling LAN listener')
   const status = await request(renderer, timeoutMs, 'remote.lan.enable')
   if (!status.enabled) fail('remote.lan.enable did not enable')
   if (status.bindError) fail(`listener did not bind: ${status.bindError}`)
@@ -106,6 +118,7 @@ try {
     fail('pairing URL must use the LAN address')
   }
   const origin = pairUrl.origin
+  console.log('remote-lan smoke: checking page + router isolation over LAN')
   const page = await fetch(`${origin}/`)
   const csp = page.headers.get('content-security-policy') ?? ''
   if (page.status !== 200 || !csp.includes("default-src 'self'")) {

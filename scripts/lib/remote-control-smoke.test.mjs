@@ -8,7 +8,9 @@ import { syntheticCompositorReady } from './remote-control-smoke-gates.mjs'
 const smoke = readFileSync(join(process.cwd(), 'scripts', 'smoke-remote-control-app.mjs'), 'utf8')
 
 test('remote-control scene proof establishes a deterministic backend-rendered source', () => {
-  assert.match(smoke, /VIDEORC_SMOKE_PREVIEW_MOTION: '1'/)
+  // GPUI follows the actual working scene; the explicit synthetic source
+  // below, not a fixed preview override, must satisfy the compositor gate.
+  assert.match(smoke, /VIDEORC_SMOKE_PREVIEW_MOTION: gpuiApp \? '0' : '1'/)
   assert.match(smoke, /requestSmokeCommand/)
   assert.match(smoke, /'enable-synthetic-source'/)
   assert.match(smoke, /'compositor\.status'/)
