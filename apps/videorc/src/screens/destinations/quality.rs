@@ -31,15 +31,15 @@ impl DestinationsPanel {
                 entity.update(cx, |this, _| this.set_page_quality(preset));
             }
         });
-        // `StreamQualityControl`: a Field with its label, the full-size
-        // control, and the description under it.
+        // `StreamQualityControl`: a Field (`gap-3`, 12 px) with its label,
+        // the full-size control, and the description under it.
         PanelSection::new("destinations-output-quality")
             .title(page_copy::OUTPUT_QUALITY)
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(8.))
+                    .gap(px(12.))
                     .child(Label::new(STREAM_QUALITY).disabled(!enabled))
                     .child(control.small(false))
                     .child(
