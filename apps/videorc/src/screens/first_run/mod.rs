@@ -820,10 +820,11 @@ fn media_card(
     selected: bool,
     disabled: bool,
     focus: Option<&FocusHandle>,
+    dim_frame: bool,
     t: &Theme,
 ) -> gpui_base::Button {
     let faded = faded_theme(t);
-    let t = if disabled { &faded } else { t };
+    let t = if disabled && dim_frame { &faded } else { t };
     let accent = hsla(t.accent);
     let ring = focus_ring(t);
     let plate = vec![
@@ -1553,7 +1554,10 @@ fn look_body(
     } else {
         Some("No camera found.")
     };
-    let screen_gap = if chosen(&sources.screen_id) || chosen(&sources.window_id) {
+    // `sceneSourceGaps`: a test pattern stands in for no screen, so it is
+    // no screen gap.
+    let base_chosen = chosen(&sources.screen_id) || chosen(&sources.window_id);
+    let screen_gap = if base_chosen || sources.test_pattern {
         None
     } else if grant_missing(&media.screen) {
         Some("Allow Screen Recording first.")
@@ -1739,10 +1743,18 @@ fn look_body(
                 .child(label),
         };
         let focus = (index == 0).then_some(&screen.look_focus);
-        let mut tile = media_card(("first-run-bg", index), label, selected, locked, focus, t)
-            .p(px(4.))
-            .tooltip(tooltip(label))
-            .child(well);
+        let mut tile = media_card(
+            ("first-run-bg", index),
+            label,
+            selected,
+            locked,
+            focus,
+            true,
+            t,
+        )
+        .p(px(4.))
+        .tooltip(tooltip(label))
+        .child(well);
         if !locked {
             tile = tile.on_click({
                 let entity = entity.clone();
@@ -1775,12 +1787,13 @@ fn look_body(
         let disabled = locked
             || (needs_camera(layout) && camera_gap.is_some())
             || (needs_screen(layout) && screen_gap.is_some());
-        // A disabled card draws its diagram and name in pre-blended colours.
-        let t = if disabled { &faded } else { t };
+        // `SceneCard`: a disabled card dims only its thumb (the well's
+        // `opacity-50`, pre-blended here); its frame and name stay whole.
+        let thumb_t = if disabled { &faded } else { t };
         let well = div()
             .relative()
             .rounded(px(radius::CHIP))
-            .child(layout_thumb(layout, vertical, inner, t))
+            .child(layout_thumb(layout, vertical, inner, thumb_t))
             .when(selected, |well| {
                 well.child(
                     div()
@@ -1802,6 +1815,7 @@ fn look_body(
             selected,
             disabled,
             None,
+            false,
             t,
         )
         .p(px(8.))
