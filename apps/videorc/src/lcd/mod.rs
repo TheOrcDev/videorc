@@ -513,6 +513,9 @@ pub fn nav_row(
         .justify_between()
         .gap(px(16.))
         .rounded(px(radius::CHIP))
+        // `ROW_BUTTON`'s `-mx-1 px-1`: the hover plate reaches 4 px past
+        // the screen's content edge, the words stay on it.
+        .mx(px(-4.))
         .px(px(4.))
         .py(px(8.))
         .hover(|style| style.bg(unlit(theme)))
@@ -556,6 +559,8 @@ pub fn press_row(
         .justify_between()
         .gap(px(16.))
         .rounded(px(radius::CHIP))
+        // `ROW_BUTTON`'s `-mx-1 px-1`, as `nav_row`.
+        .mx(px(-4.))
         .px(px(4.))
         .py(px(8.))
         .text_color(ink);

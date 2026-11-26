@@ -541,7 +541,8 @@ impl SessionSection {
                 .items_center()
                 .justify_between()
                 .gap(px(16.))
-                .px(px(4.))
+                // `LcdPanelRow` (`gap-4 py-2`): no side padding, so the
+                // words line up with the nav rows' (`-mx-1 px-1`).
                 .py(px(8.))
                 .child(
                     div()
