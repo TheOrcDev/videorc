@@ -249,7 +249,9 @@ pub fn gallery_room_media(kind: GalleryShowStage) -> Option<RoomMedia> {
         GalleryShowStage::None | GalleryShowStage::Closed => None,
         GalleryShowStage::Open => Some(RoomMedia {
             camera: true,
-            microphone: true,
+            // The gallery profile has no microphone, so the room sends none
+            // and the host's row reads muted, as Electron's does.
+            microphone: false,
             screen: None,
             people: vec![
                 person("g_ada", "Ada", true, false, false),
@@ -259,7 +261,9 @@ pub fn gallery_room_media(kind: GalleryShowStage) -> Option<RoomMedia> {
         }),
         GalleryShowStage::Screens => Some(RoomMedia {
             camera: true,
-            microphone: true,
+            // The gallery profile has no microphone, so the room sends none
+            // and the host's row reads muted, as Electron's does.
+            microphone: false,
             screen: Some(RoomScreen {
                 source_id: "screen:gallery:1".into(),
                 hidden: false,
@@ -271,7 +275,9 @@ pub fn gallery_room_media(kind: GalleryShowStage) -> Option<RoomMedia> {
         }),
         GalleryShowStage::HostCameraOff => Some(RoomMedia {
             camera: false,
-            microphone: true,
+            // The gallery profile has no microphone, so the room sends none
+            // and the host's row reads muted, as Electron's does.
+            microphone: false,
             screen: None,
             people: vec![
                 person("g_ada", "Ada", true, false, false),
