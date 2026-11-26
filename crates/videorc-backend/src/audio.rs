@@ -324,6 +324,43 @@ fn caption_contract_test_audio_enabled() -> bool {
     std::env::var("VIDEORC_CAPTION_CONTRACT_TEST").as_deref() == Ok("1")
 }
 
+/// Plan 260 L1: the backend-host talk-show smoke's room microphone. With it
+/// set (and smoke RPC on), the synthetic microphone
+/// (`CAPTION_CONTRACT_TEST_DEVICE_ID`) plays tone bursts at this many Hz
+/// between injections: the smoke's own host tone, so the backend's room
+/// microphone (bridge, tap, processing, publish) carries a tone the mix gates
+/// know. Debug builds only, like the synthetic microphone itself.
+#[cfg(debug_assertions)]
+pub(crate) const ROOM_MICROPHONE_FIXTURE_HZ_ENV: &str = "VIDEORC_ROOM_MICROPHONE_FIXTURE_HZ";
+
+#[cfg(debug_assertions)]
+fn room_microphone_fixture_hz() -> Option<f32> {
+    if std::env::var("VIDEORC_ENABLE_SMOKE_RPC").as_deref() != Ok("1") {
+        return None;
+    }
+    parse_room_microphone_fixture_hz(&std::env::var(ROOM_MICROPHONE_FIXTURE_HZ_ENV).ok()?)
+}
+
+/// A tone in Hz, audible and under Nyquist at 48 kHz.
+#[cfg(debug_assertions)]
+fn parse_room_microphone_fixture_hz(value: &str) -> Option<f32> {
+    let hz = value.trim().parse::<f32>().ok()?;
+    (hz.is_finite() && (20.0..=20_000.0).contains(&hz)).then_some(hz)
+}
+
+/// One sample of the smoke's host tone at 48 kHz frame `frame`:
+/// `0.5 sin(2 pi f t)` for the first 250 ms of every 500 ms, silent between
+/// (`aevalsrc=if(lt(mod(t,0.5),0.25),0.5*sin(2*PI*f*t),0)`, the smoke's wav).
+#[cfg(debug_assertions)]
+fn room_microphone_fixture_sample(frame: u64, hz: f32) -> f32 {
+    let rate = u64::from(NATIVE_AUDIO_SAMPLE_RATE);
+    if frame % (rate / 2) >= rate / 4 {
+        return 0.0;
+    }
+    let seconds = frame as f64 / rate as f64;
+    (0.5 * (std::f64::consts::TAU * f64::from(hz) * seconds).sin()) as f32
+}
+
 #[derive(Debug, Default)]
 pub struct AudioCaptureStats {
     captured_frames: AtomicU64,
@@ -1274,6 +1311,7 @@ fn start_contract_test_audio_source(
     continuous_tone: bool,
 ) -> Result<NativeAudioSource> {
     let fixture_pcm = fixture_pcm::load_from_env()?;
+    let room_fixture_hz = room_microphone_fixture_hz();
     let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_PACKETS);
     let stats = Arc::new(AudioCaptureStats::default());
     let processing_settings = AudioProcessingSettingsHandle::new(settings);
@@ -1351,6 +1389,8 @@ fn start_contract_test_audio_source(
                     / NATIVE_AUDIO_SAMPLE_RATE as f32;
                 let sample = if let Some(pcm) = fixture_pcm.as_ref().filter(|_| inject_tone) {
                     pcm[(fixture_offset + sample_index) % pcm.len()] * raw_peak
+                } else if let Some(hz) = room_fixture_hz.filter(|_| !inject_tone) {
+                    room_microphone_fixture_sample(absolute as u64, hz)
                 } else {
                     phase.sin() * raw_peak
                 };
@@ -2537,6 +2577,44 @@ mod tests {
         );
         assert!(gained.samples[0] > 0.1);
         assert_eq!(gained.samples[0], gained.samples[1]);
+    }
+
+    #[test]
+    fn room_microphone_fixture_hz_is_an_audible_tone_or_nothing() {
+        assert_eq!(parse_room_microphone_fixture_hz("440"), Some(440.0));
+        assert_eq!(parse_room_microphone_fixture_hz(" 1100.5 "), Some(1100.5));
+        for refused in ["", "0", "-440", "19", "20001", "NaN", "inf", "440hz"] {
+            assert_eq!(parse_room_microphone_fixture_hz(refused), None, "{refused}");
+        }
+    }
+
+    #[test]
+    fn room_microphone_fixture_is_the_smokes_host_tone_bursts() {
+        let rate = u64::from(NATIVE_AUDIO_SAMPLE_RATE);
+        // 250 ms of 0.5 sin(2 pi f t), then 250 ms of silence, every 500 ms.
+        for frame in [
+            0,
+            1,
+            100,
+            rate / 4 - 1,
+            rate / 2,
+            rate / 2 + 7,
+            10 * rate + 3,
+        ] {
+            let seconds = frame as f64 / rate as f64;
+            let want = 0.5 * (std::f64::consts::TAU * 440.0 * seconds).sin();
+            let got = f64::from(room_microphone_fixture_sample(frame, 440.0));
+            assert!((got - want).abs() < 1e-5, "frame {frame}: {got} vs {want}");
+        }
+        for frame in [rate / 4, rate / 4 + 1, rate / 2 - 1, rate + rate / 4 + 9] {
+            assert_eq!(room_microphone_fixture_sample(frame, 440.0), 0.0, "{frame}");
+        }
+        // The bursts carry the tone at its level: a quarter second's peak is
+        // close to 0.5, never over.
+        let peak = (0..rate / 4)
+            .map(|frame| room_microphone_fixture_sample(frame, 440.0).abs())
+            .fold(0.0f32, f32::max);
+        assert!((0.49..=0.5).contains(&peak), "{peak}");
     }
 
     #[test]
