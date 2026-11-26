@@ -91,9 +91,9 @@ struct KeyParams {
     // side_tap_weight, reserved, reserved).
     float4 chroma_key_neighbourhood;
     float4 camera_look; // brightness, contrast, saturation, enabled
-    // Plan 233 D1 a: despill near the edge, mirroring scene_geometry's
-    // CHROMA_KEY_EDGE_DESPILL_*: (fade_rad, proximity_gain, reserved,
-    // reserved).
+    // Despill near the edge, mirroring scene_geometry's
+    // CHROMA_KEY_EDGE_DESPILL_PROXIMITY_GAIN and chroma_key_spill_cell:
+    // (proximity_gain, spill cell in keyed texels, reserved, reserved).
     float4 edge_despill;
     // The speck cleanup, mirroring scene_geometry's CHROMA_KEY_SPECK_*:
     // (cell in keyed texels, ring in cells, kept_alpha, reserved).
@@ -363,70 +363,88 @@ kernel void k_speck_drop(texture2d<float, access::read> enclosed [[texture(0)]],
     }
     dropped.write(float4(drop ? 1.0 : 0.0), gid);
 }
-// scene_geometry::chroma_key_nearness in f32 (plan 233 D1 a): how close a
-// colour is to the key, 1 inside the cone and its band, fading to 0 over
-// edge_despill.x past the band, times the key's saturation eligibility.
-static float key_nearness(float3 color, constant KeyParams& p) {
-    float r = color.r * 255.0, g = color.g * 255.0, b = color.b * 255.0;
-    float vcb = (-43.0 * r - 85.0 * g + 128.0 * b) / 256.0;
-    float vcr = (128.0 * r - 107.0 * g - 21.0 * b) / 256.0;
-    float saturation = sqrt(vcb * vcb + vcr * vcr);
-    float luma = (77.0 * r + 150.0 * g + 29.0 * b) / 256.0;
-    float floor_value = clamp(p.chroma_key_floor.y * luma,
-        p.chroma_key_floor.x, p.chroma_key_floor.z);
-    if (saturation <= floor_value) {
-        return 0.0;
+// The spill zone (scene_geometry::ChromaKeySpillZone) between the passes, one
+// thread per cell of edge_despill.y x edge_despill.y keyed texels. Step 1: a
+// cell's mean alpha over its texels in the frame.
+kernel void k_spill_cover(texture2d<float, access::read> reduced [[texture(0)]],
+                          texture2d<float, access::write> cells [[texture(1)]],
+                          constant KeyParams& p [[buffer(0)]],
+                          uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= cells.get_width() || gid.y >= cells.get_height()) {
+        return;
     }
-    float ramp = max(floor_value * p.chroma_key_floor.w, 1e-4);
-    float cos_theta = clamp(
-        (vcb * p.chroma_key.y + vcr * p.chroma_key.z) / saturation, -1.0, 1.0);
-    float theta = acos(cos_theta);
-    float outer = p.chroma_key.w + p.chroma_key2.x;
-    float fade = max(p.edge_despill.x, 1e-4);
-    float nearness = clamp((outer + fade - theta) / fade, 0.0, 1.0);
-    return nearness * clamp((saturation - floor_value) / ramp, 0.0, 1.0);
+    int cell = max(int(p.edge_despill.y + 0.5), 1);
+    int2 size = int2(reduced.get_width(), reduced.get_height());
+    int2 origin = int2(gid) * cell;
+    float sum = 0.0;
+    float count = 0.0;
+    for (int j = 0; j < cell && origin.y + j < size.y; ++j) {
+        for (int i = 0; i < cell && origin.x + i < size.x; ++i) {
+            sum += reduced.read(uint2(origin + int2(i, j))).a;
+            count += 1.0;
+        }
+    }
+    cells.write(float4(count > 0.0 ? sum / count : 1.0), gid);
+}
+// Step 2: the cell means over [1 2 1]^2 / 16, cells past the grid repeating
+// the edge.
+kernel void k_spill_blur(texture2d<float, access::read> means [[texture(0)]],
+                         texture2d<float, access::write> smoothed [[texture(1)]],
+                         constant KeyParams& p [[buffer(0)]],
+                         uint2 gid [[thread_position_in_grid]]) {
+    int2 size = int2(means.get_width(), means.get_height());
+    if (int(gid.x) >= size.x || int(gid.y) >= size.y) {
+        return;
+    }
+    float sum = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            int2 at = clamp(int2(gid) + int2(dx, dy), int2(0), size - 1);
+            sum += float((2 - abs(dx)) * (2 - abs(dy))) * means.read(uint2(at)).r;
+        }
+    }
+    smoothed.write(float4(sum / 16.0), gid);
 }
 // Plan 233 pass 2: the colour treatment on each keyed texel's average
-// colour, as one bilinear tap of the camera got it before: despill (the key
-// channel comes down toward the other two's max where it dominates them),
-// then the camera look. The despill is Spill removal, or more next to the
-// keyed-out area (D1 a): nearness to the key times how keyed-out the picture
-// around the texel is, the alpha over the 5x5 binomial at the keyed
-// texture's spacing (plan 229's nine taps), gained. A texel in a dropped
-// speck cell (k_speck_drop) is keyed out. Premultiplied in and out.
+// colour, as one bilinear tap of the camera got it before: despill, then
+// the camera look. The despill (scene_geometry::chroma_key_edge_despill_rgb)
+// is the larger of Spill removal (the key channel toward the other two's
+// max) and the edge despill (toward max(other, (red + other) / 2), by the
+// texel's proximity to the keyed-out area: the smoothed spill cells read
+// bilinearly at the texel's centre, gained). A texel in a dropped speck cell
+// (k_speck_drop) is keyed out. Premultiplied in and out.
 fragment float4 f_key_finish(VOut in [[stage_in]],
                              texture2d<float> keyed [[texture(0)]],
                              texture2d<float> specks [[texture(1)]],
+                             texture2d<float> spill [[texture(2)]],
                              constant KeyParams& p [[buffer(0)]]) {
-    constexpr sampler edge_samp(coord::normalized, address::clamp_to_edge, filter::linear);
     float4 texel = keyed.read(uint2(in.pos.xy));
     uint cell = uint(max(int(p.speck.x + 0.5), 1));
     if (texel.a <= 0.0 || specks.read(uint2(in.pos.xy) / cell).r > 0.5) {
         return float4(0.0);
     }
     float3 color = texel.rgb / texel.a;
-    float2 size = float2(keyed.get_width(), keyed.get_height());
-    float2 uv = in.pos.xy / size;
-    float2 step = p.chroma_key_neighbourhood.x / size;
-    float side = p.chroma_key_neighbourhood.y;
-    float3 weights = float3(side, 1.0 - 2.0 * side, side);
-    float blurred = 0.0;
-    for (int j = 0; j < 3; ++j) {
-        for (int i = 0; i < 3; ++i) {
-            float2 at = uv + float2(float(i - 1), float(j - 1)) * step;
-            blurred += weights[i] * weights[j] * keyed.sample(edge_samp, at, level(0.0)).a;
-        }
-    }
-    float proximity = clamp((1.0 - blurred) * p.edge_despill.y, 0.0, 1.0);
-    float strength = max(p.chroma_key2.y, key_nearness(color, p) * proximity);
-    if (strength > 0.0) {
-        if (p.chroma_key2.z > 0.5) {
-            float limit = max(color.r, color.g);
-            color.b = (color.b > limit) ? color.b - strength * (color.b - limit) : color.b;
-        } else {
-            float limit = max(color.r, color.b);
-            color.g = (color.g > limit) ? color.g - strength * (color.g - limit) : color.g;
-        }
+    float spill_cell = max(floor(p.edge_despill.y + 0.5), 1.0);
+    float2 cells = float2(spill.get_width(), spill.get_height());
+    float2 at = clamp((floor(in.pos.xy) + 0.5) / spill_cell - 0.5, float2(0.0), cells - 1.0);
+    uint2 first = uint2(floor(at));
+    uint2 second = min(first + 1, uint2(cells) - 1);
+    float2 w = at - float2(first);
+    float top = mix(spill.read(first).r, spill.read(uint2(second.x, first.y)).r, w.x);
+    float bottom = mix(spill.read(uint2(first.x, second.y)).r, spill.read(second).r, w.x);
+    float proximity = clamp((1.0 - mix(top, bottom, w.y)) * p.edge_despill.x, 0.0, 1.0);
+    bool blue = p.chroma_key2.z > 0.5;
+    float key = blue ? color.b : color.g;
+    float other = blue ? color.g : color.b;
+    float floor_limit = max(color.r, other);
+    float floor_cut = (key > floor_limit) ? max(p.chroma_key2.y, 0.0) * (key - floor_limit) : 0.0;
+    float edge_limit = max(other, (color.r + other) * 0.5);
+    float edge_cut = (key > edge_limit) ? proximity * (key - edge_limit) : 0.0;
+    key -= max(floor_cut, edge_cut);
+    if (blue) {
+        color.b = key;
+    } else {
+        color.g = key;
     }
     if (p.camera_look.w > 0.5) {
         float y = dot(color, float3(0.2126, 0.7152, 0.0722));
@@ -472,7 +490,8 @@ struct KeyParams {
     chroma_key_neighbourhood: [f32; 4],
     /// Brightness, contrast, saturation, enabled.
     camera_look: [f32; 4],
-    /// Plan 233 D1 a: (fade_rad, proximity_gain, reserved, reserved).
+    /// Despill near the edge: (proximity_gain, spill cell in keyed texels,
+    /// reserved, reserved).
     edge_despill: [f32; 4],
     /// The speck cleanup: (cell in keyed texels, ring in cells, kept_alpha,
     /// reserved).
@@ -515,12 +534,14 @@ pub(crate) const CHROMA_KEY_NEIGHBOURHOOD_PARAMS: [f32; 4] = [1.2, 5.0 / 16.0, 0
 
 impl GpuChromaKey {
     /// The key pass's parameters for a camera keyed at a `block` × `block`
-    /// reduction (plan 233) with speck cells of `speck_cell` keyed texels,
-    /// with the camera look the pass applies after the despill.
+    /// reduction (plan 233) with speck cells of `speck_cell` and spill cells
+    /// of `spill_cell` keyed texels, with the camera look the pass applies
+    /// after the despill.
     fn key_params(
         &self,
         block: u32,
         speck_cell: usize,
+        spill_cell: usize,
         camera_look: Option<[f32; 3]>,
     ) -> KeyParams {
         KeyParams {
@@ -535,7 +556,7 @@ impl GpuChromaKey {
             chroma_key_edges: self.kept_uv,
             chroma_key_neighbourhood: CHROMA_KEY_NEIGHBOURHOOD_PARAMS,
             camera_look: camera_look_params(camera_look),
-            edge_despill: CHROMA_KEY_EDGE_DESPILL_PARAMS,
+            edge_despill: [CHROMA_KEY_EDGE_DESPILL_GAIN, spill_cell as f32, 0.0, 0.0],
             speck: [
                 speck_cell as f32,
                 CHROMA_KEY_SPECK_PARAMS[0],
@@ -546,11 +567,22 @@ impl GpuChromaKey {
     }
 }
 
-/// Mirrors scene_geometry's CHROMA_KEY_EDGE_DESPILL_PARAMS (plan 233 D1 a) as
-/// `(fade_rad, proximity_gain, reserved, reserved)`: mirrored for the same
-/// reason as the floor, and pinned equal by the same compositor test.
-pub(crate) const CHROMA_KEY_EDGE_DESPILL_PARAMS: [f32; 4] =
-    [30.0 * std::f32::consts::PI / 180.0, 6.0, 0.0, 0.0];
+/// Mirrors scene_geometry's CHROMA_KEY_EDGE_DESPILL_PROXIMITY_GAIN: mirrored
+/// for the same reason as the floor, and pinned equal by the same compositor
+/// test.
+pub(crate) const CHROMA_KEY_EDGE_DESPILL_GAIN: f32 = 6.0;
+
+/// Mirrors `scene_geometry::chroma_key_spill_cell`: the spill zone's cell in
+/// keyed texels, 1/72 of the camera's short side over the block, rounded, at
+/// least 1. Pinned equal by the same compositor test.
+pub(crate) fn gpu_chroma_key_spill_cell(
+    source_width: usize,
+    source_height: usize,
+    block: usize,
+) -> usize {
+    let camera_texels = source_width.min(source_height) as f64 * (1.0 / 72.0);
+    ((camera_texels / block.max(1) as f64).round() as usize).max(1)
+}
 
 /// Mirrors scene_geometry's CHROMA_KEY_SPECK_RING and
 /// CHROMA_KEY_SPECK_KEPT_ALPHA as `(ring_cells, kept_alpha)`: mirrored for the
@@ -1278,6 +1310,9 @@ pub struct MetalSceneCompositor {
     /// The speck cleanup's three kernels between the two passes:
     /// `k_speck_cover`, `k_speck_ring`, `k_speck_drop`.
     speck_pipelines: [Retained<ProtocolObject<dyn MTLComputePipelineState>>; 3],
+    /// The spill zone's two kernels between the two passes: `k_spill_cover`,
+    /// `k_spill_blur`.
+    spill_pipelines: [Retained<ProtocolObject<dyn MTLComputePipelineState>>; 2],
     /// Plan 233: the keyed cameras' textures, per source slot.
     keyed_cameras: Vec<Option<KeyedCameraTexture>>,
     sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
@@ -1361,6 +1396,10 @@ struct KeyedCameraTexture {
     /// kept cells, enclosed windows, dropped cells (R8, one texel a cell).
     speck_cell: usize,
     speck_cells: [Retained<MetalTexture>; 3],
+    /// The spill zone's cell (keyed texels) and its two cell grids: mean
+    /// alpha, smoothed (R32Float, one texel a cell).
+    spill_cell: usize,
+    spill_cells: [Retained<MetalTexture>; 2],
 }
 
 impl KeyedCameraTexture {
@@ -1795,6 +1834,10 @@ impl MetalSceneCompositor {
             build_compute_pipeline(&device, &library, "k_speck_ring")?,
             build_compute_pipeline(&device, &library, "k_speck_drop")?,
         ];
+        let spill_pipelines = [
+            build_compute_pipeline(&device, &library, "k_spill_cover")?,
+            build_compute_pipeline(&device, &library, "k_spill_blur")?,
+        ];
         let key_finish_pipeline = build_pipeline_from(
             &device,
             &library,
@@ -1822,6 +1865,7 @@ impl MetalSceneCompositor {
             key_reduce_pipeline,
             key_finish_pipeline,
             speck_pipelines,
+            spill_pipelines,
             keyed_cameras: Vec::new(),
             sampler,
             linear_sampler,
@@ -2402,6 +2446,7 @@ impl MetalSceneCompositor {
         let width = source.width.div_ceil(block).max(1);
         let height = source.height.div_ceil(block).max(1);
         let speck_cell = gpu_chroma_key_speck_cell(source.width, source.height, block);
+        let spill_cell = gpu_chroma_key_spill_cell(source.width, source.height, block);
         // Pass 1 is a compute kernel writing `reduced`; the speck kernels
         // write their cell grids; pass 2 renders into `finished`; the quad
         // samples `finished`.
@@ -2418,8 +2463,21 @@ impl MetalSceneCompositor {
             )
             .ok_or(())
         };
+        let make_spill_cells = || {
+            make_texture_with_format(
+                &self.device,
+                width.div_ceil(spill_cell),
+                height.div_ceil(spill_cell),
+                MTLPixelFormat::R32Float,
+                MTLTextureUsage::ShaderRead | MTLTextureUsage::ShaderWrite,
+            )
+            .ok_or(())
+        };
         let mut slot = match self.keyed_cameras[index].take().filter(|cached| {
-            cached.width == width && cached.height == height && cached.speck_cell == speck_cell
+            cached.width == width
+                && cached.height == height
+                && cached.speck_cell == speck_cell
+                && cached.spill_cell == spill_cell
         }) {
             Some(slot) => slot,
             None => KeyedCameraTexture {
@@ -2453,6 +2511,8 @@ impl MetalSceneCompositor {
                     make_speck_cells()?,
                     make_speck_cells()?,
                 ],
+                spill_cell,
+                spill_cells: [make_spill_cells()?, make_spill_cells()?],
             },
         };
         let camera = match keyed_slot_id(source) {
@@ -2464,7 +2524,7 @@ impl MetalSceneCompositor {
                 .map(|cached| &*cached.texture),
         }
         .ok_or(())?;
-        let params = key.key_params(block as u32, speck_cell, source.camera_look);
+        let params = key.key_params(block as u32, speck_cell, spill_cell, source.camera_look);
         encode_key_reduce(
             command_buffer,
             &self.key_reduce_pipeline,
@@ -2473,18 +2533,25 @@ impl MetalSceneCompositor {
             &params,
             block,
         )?;
-        encode_speck_passes(
+        encode_cell_passes(
             command_buffer,
             &self.speck_pipelines,
             &slot.reduced,
             &slot.speck_cells,
             &params,
         )?;
+        encode_cell_passes(
+            command_buffer,
+            &self.spill_pipelines,
+            &slot.reduced,
+            &slot.spill_cells,
+            &params,
+        )?;
         encode_key_pass(
             &self.device,
             command_buffer,
             &self.key_finish_pipeline,
-            &[&slot.reduced, &slot.speck_cells[2]],
+            &[&slot.reduced, &slot.speck_cells[2], &slot.spill_cells[1]],
             &slot.finished,
             &params,
         )?;
@@ -3536,25 +3603,31 @@ fn encode_key_reduce(
     encoded
 }
 
-/// The speck cleanup between the passes: `k_speck_cover` (pass 1's `reduced`
-/// into the kept cells), `k_speck_ring` (into the enclosed windows) and
-/// `k_speck_drop` (into the dropped cells), one thread per cell. One serial
-/// compute encoder, so each dispatch sees the one before it.
-fn encode_speck_passes(
+/// A chain of cell kernels between the passes, one thread per cell: each
+/// pipeline reads the texture before it (the first reads pass 1's `reduced`)
+/// and writes its own cell grid. The speck cleanup is `k_speck_cover` (into
+/// the kept cells), `k_speck_ring` (into the enclosed windows) and
+/// `k_speck_drop` (into the dropped cells); the spill zone is `k_spill_cover`
+/// (into the cell means) and `k_spill_blur` (into the smoothed means). One
+/// serial compute encoder, so each dispatch sees the one before it.
+fn encode_cell_passes(
     command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
-    pipelines: &[Retained<ProtocolObject<dyn MTLComputePipelineState>>; 3],
+    pipelines: &[Retained<ProtocolObject<dyn MTLComputePipelineState>>],
     reduced: &MetalTexture,
-    cells: &[Retained<MetalTexture>; 3],
+    cells: &[Retained<MetalTexture>],
     params: &KeyParams,
 ) -> Result<(), ()> {
     let Some(params_ptr) = NonNull::new(std::ptr::from_ref(params) as *mut c_void) else {
         return Err(());
     };
+    let (Some(first_cells), true) = (cells.first(), pipelines.len() == cells.len()) else {
+        return Err(());
+    };
     let encoder = command_buffer.computeCommandEncoder().ok_or(())?;
-    let inputs: [&MetalTexture; 3] = [reduced, &cells[0], &cells[1]];
+    let inputs = std::iter::once(reduced).chain(cells.iter().map(|cell| &**cell));
     let grid = MTLSize {
-        width: cells[0].width().div_ceil(8),
-        height: cells[0].height().div_ceil(8),
+        width: first_cells.width().div_ceil(8),
+        height: first_cells.height().div_ceil(8),
         depth: 1,
     };
     for ((pipeline, input), output) in pipelines.iter().zip(inputs).zip(cells.iter()) {

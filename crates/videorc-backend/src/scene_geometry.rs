@@ -1122,78 +1122,175 @@ pub fn chroma_key_despill(spec: &ChromaKeySpec, r: u8, g: u8, b: u8) -> (u8, u8,
     (r, g, b)
 }
 
-/// Plan 233 D1 a: despill near the edge.
+/// Despill near the edge (plan 233 D1 a, reworked 2026-11-26).
 ///
-/// Once the snow is gone, the green light the screen throws on the hair and
-/// the ears survives the key as a thin, steady green rim, and Spill removal
-/// 10 takes only a tenth of it off. So the despill is stronger next to the
-/// keyed-out area: its strength is the larger of Spill removal and
-/// `nearness × proximity`. Nearness ([`chroma_key_nearness`]) is how close
-/// the colour is to the key: 1 up to the cone's outer edge (max angle plus
-/// band), fading to 0 over [`CHROMA_KEY_EDGE_DESPILL_FADE_DEG`] past it,
-/// times the saturation eligibility the key uses. Proximity
-/// ([`chroma_key_edge_proximity`]) is how much of the keyed picture around
-/// the texel is keyed out, `clamp((1 − blurred alpha) × GAIN, 0, 1)`, with
-/// the alpha smoothed over the 5×5 binomial at the keyed texture's spacing
-/// (plan 229's kernel), so the reach is about two keyed texels: about two
-/// output pixels. Spill removal stays the floor everywhere, so a green or
-/// teal thing on the subject (a shirt logo, a mic's light ring) keeps its
-/// colour away from the edge. The Metal shader mirrors both constants.
-pub const CHROMA_KEY_EDGE_DESPILL_FADE_DEG: f64 = 30.0;
+/// The screen throws green light on the subject's outline: hair, ears, the
+/// side of the head nearest a lit screen. Spill removal 10 takes only a tenth
+/// of it off, so next to the keyed-out area the despill is stronger.
+///
+/// The owner's recording of 2026-11-26 (a 4K camera drawn full frame) showed
+/// a green-olive band along the left of the hair, from the temple to the top
+/// of the ear, over a dark background too. Two things let it through:
+///
+/// - Reach. The proximity was the alpha over a 5×5 binomial at the keyed
+///   texture's spacing, about two keyed texels. Drawn full frame a keyed
+///   texel is a camera texel, and the spill reached 20–45 camera texels into
+///   the hair. Spill is light on the subject, so its reach is a share of the
+///   camera frame: the proximity now comes from the alpha of the
+///   [`ChromaKeySpillZone`], cells of [`CHROMA_KEY_SPILL_CELL_SHARE`] of the
+///   camera's short side, the same at every draw size.
+/// - The rule. Green light on brown hair makes it olive: green rises toward
+///   red but stays under it (`(71,66,49)` against `(55,38,20)` on the clean
+///   side), so the "green above both others" despill never touched it, and
+///   the edge strength was gated by the colour's nearness to the key, which
+///   is about 0 for olive. Next to the edge, green now comes down toward
+///   `max(blue, (red + blue) / 2)` ([`chroma_key_edge_despill_rgb`]): the
+///   average of the other two for a warm colour (red at or above blue), blue
+///   otherwise, so teal and cyan keep their colour exactly as before.
+///
+/// Spill removal stays the floor everywhere. A yellow or blond tone within
+/// the spill zone warms a little; that is the trade every average despill
+/// makes, and only next to the screen. The Metal shader mirrors the gain and
+/// the cell.
 pub const CHROMA_KEY_EDGE_DESPILL_PROXIMITY_GAIN: f64 = 6.0;
 
-/// The edge despill constants in shader order: `(fade_rad, proximity_gain)`,
-/// what the compositor test pins the Metal mirror to.
-#[cfg(test)]
-pub const CHROMA_KEY_EDGE_DESPILL_PARAMS: [f64; 2] = [
-    CHROMA_KEY_EDGE_DESPILL_FADE_DEG * std::f64::consts::PI / 180.0,
-    CHROMA_KEY_EDGE_DESPILL_PROXIMITY_GAIN,
-];
+/// The spill zone's cell as a share of the camera's short side (30 camera
+/// texels of a 4K frame, 15 of a 1080p one).
+pub const CHROMA_KEY_SPILL_CELL_SHARE: f64 = 1.0 / 72.0;
 
-/// How close a colour (0..=255 units, maybe fractional) is to the key, 0..=1
-/// (plan 233 D1 a): 1 inside the cone and its band, fading to 0 over
-/// [`CHROMA_KEY_EDGE_DESPILL_FADE_DEG`] past the band, times the saturation
-/// eligibility the key uses, so a grey is never near.
-pub fn chroma_key_nearness(spec: &ChromaKeySpec, rgb: [f64; 3]) -> f64 {
-    let Some((dir_cb, dir_cr)) = spec.key_direction() else {
-        return 0.0;
-    };
-    let (cb, cr, luma) = key_chroma_and_luma(rgb);
-    let saturation = (cb * cb + cr * cr).sqrt();
-    let (floor, ramp) = chroma_key_saturation_floor(luma);
-    if saturation <= floor {
-        return 0.0;
+/// The spill zone's cell side in keyed texels for a `source_width` ×
+/// `source_height` camera keyed at `block` × `block` reduction: the share of
+/// the short side in camera texels over the block, rounded, at least 1.
+pub fn chroma_key_spill_cell(source_width: u32, source_height: u32, block: u32) -> usize {
+    let short_side = f64::from(source_width.min(source_height));
+    let camera_texels = short_side * CHROMA_KEY_SPILL_CELL_SHARE;
+    ((camera_texels / f64::from(block.max(1))).round() as usize).max(1)
+}
+
+/// How close to the keyed-out area each keyed texel is, from the keyed
+/// picture's alpha. The mean alpha of each `cell` × `cell` cell (texels in
+/// the frame only), smoothed over the cell grid by `[1 2 1]² / 16` (cells
+/// past the grid repeat the edge), read bilinearly at the texel's centre in
+/// cell units (clamped to the grid), then
+/// `clamp((1 − that) × GAIN, 0, 1)`: full for about two thirds of a cell
+/// into the subject, gone by a cell and a half. A one-texel cell (a tiny
+/// camera) still reaches the texel next to the edge. The CPU keyed plane uses it as is; the Metal key pass mirrors it
+/// (`k_spill_cover`, `k_spill_blur` and the read in `f_key_finish`).
+pub struct ChromaKeySpillZone {
+    cell: usize,
+    cells_width: usize,
+    cells_height: usize,
+    smoothed: Vec<f32>,
+}
+
+impl ChromaKeySpillZone {
+    pub fn find(
+        width: usize,
+        height: usize,
+        cell: usize,
+        alpha_at: impl Fn(usize, usize) -> f32,
+    ) -> Self {
+        let cell = cell.max(1);
+        let (cells_width, cells_height) =
+            (width.div_ceil(cell).max(1), height.div_ceil(cell).max(1));
+        let mut means = vec![0.0f32; cells_width * cells_height];
+        for (index, mean) in means.iter_mut().enumerate() {
+            let (cx, cy) = (index % cells_width, index / cells_width);
+            let (x_end, y_end) = (((cx + 1) * cell).min(width), ((cy + 1) * cell).min(height));
+            let mut sum = 0.0f32;
+            for y in cy * cell..y_end {
+                for x in cx * cell..x_end {
+                    sum += alpha_at(x, y);
+                }
+            }
+            let count = (x_end.saturating_sub(cx * cell) * y_end.saturating_sub(cy * cell)) as f32;
+            *mean = if count > 0.0 { sum / count } else { 1.0 };
+        }
+        let at = |x: isize, y: isize| -> f32 {
+            let x = x.clamp(0, cells_width as isize - 1) as usize;
+            let y = y.clamp(0, cells_height as isize - 1) as usize;
+            means[y * cells_width + x]
+        };
+        const WEIGHTS: [f32; 3] = [1.0, 2.0, 1.0];
+        let mut smoothed = vec![0.0f32; cells_width * cells_height];
+        for (index, out) in smoothed.iter_mut().enumerate() {
+            let (cx, cy) = (
+                (index % cells_width) as isize,
+                (index / cells_width) as isize,
+            );
+            let mut sum = 0.0f32;
+            for (dy, wy) in (-1..=1).zip(WEIGHTS) {
+                for (dx, wx) in (-1..=1).zip(WEIGHTS) {
+                    sum += wx * wy * at(cx + dx, cy + dy);
+                }
+            }
+            *out = sum / 16.0;
+        }
+        Self {
+            cell,
+            cells_width,
+            cells_height,
+            smoothed,
+        }
     }
-    let cos_theta = ((cb * dir_cb + cr * dir_cr) / saturation).clamp(-1.0, 1.0);
-    let theta_deg = cos_theta.acos().to_degrees();
-    let outer_deg = spec.max_angle_deg + spec.band_deg;
-    let nearness = ((outer_deg + CHROMA_KEY_EDGE_DESPILL_FADE_DEG - theta_deg)
-        / CHROMA_KEY_EDGE_DESPILL_FADE_DEG)
-        .clamp(0.0, 1.0);
-    nearness * ((saturation - floor) / ramp).clamp(0.0, 1.0)
+
+    /// Keyed texel (`x`, `y`)'s proximity to the keyed-out area, 0..=1.
+    pub fn proximity(&self, x: usize, y: usize) -> f32 {
+        let cell = self.cell as f32;
+        let axis = |texel: usize, cells: usize| -> (usize, usize, f32) {
+            let at = ((texel as f32 + 0.5) / cell - 0.5).clamp(0.0, (cells - 1) as f32);
+            let first = at.floor() as usize;
+            (first, (first + 1).min(cells - 1), at - first as f32)
+        };
+        let (x0, x1, wx) = axis(x, self.cells_width);
+        let (y0, y1, wy) = axis(y, self.cells_height);
+        let value = |cx: usize, cy: usize| self.smoothed[cy * self.cells_width + cx];
+        let top = value(x0, y0) * (1.0 - wx) + value(x1, y0) * wx;
+        let bottom = value(x0, y1) * (1.0 - wx) + value(x1, y1) * wx;
+        let alpha = top * (1.0 - wy) + bottom * wy;
+        ((1.0 - alpha) * CHROMA_KEY_EDGE_DESPILL_PROXIMITY_GAIN as f32).clamp(0.0, 1.0)
+    }
 }
 
-/// How close to the keyed-out area a keyed texel is, 0..=1, from the alpha
-/// around it (plan 233 D1 a): 0 where the picture around it is fully kept,
-/// 1 once a sixth of it is keyed out.
-pub fn chroma_key_edge_proximity(blurred_alpha: f64) -> f64 {
-    ((1.0 - blurred_alpha) * CHROMA_KEY_EDGE_DESPILL_PROXIMITY_GAIN).clamp(0.0, 1.0)
-}
-
-/// The despill strength of a kept colour (plan 233 D1 a): Spill removal as
-/// the floor, and nearness to the key times proximity to the keyed-out area.
-pub fn chroma_key_edge_despill_strength(
-    spec: &ChromaKeySpec,
-    rgb: [f64; 3],
+/// The colour treatment's despill for a kept colour (0..=255 units, maybe
+/// fractional) at `proximity` to the keyed-out area: the larger of Spill
+/// removal (`spill`, the key channel toward the other two's max,
+/// [`chroma_key_despill_rgb`]) and the edge despill (the key channel toward
+/// `max(other, (red + other) / 2)` by `proximity`, where `other` is blue for
+/// a green screen and green for a blue one). The Metal shader mirrors it.
+pub fn chroma_key_edge_despill_rgb(
+    spill_is_blue: bool,
+    spill: f64,
     proximity: f64,
-) -> f64 {
-    spec.spill.max(chroma_key_nearness(spec, rgb) * proximity)
+    rgb: [f64; 3],
+) -> [f64; 3] {
+    let [r, g, b] = rgb;
+    let (key, other) = if spill_is_blue { (b, g) } else { (g, b) };
+    let floor_cut = if key > r.max(other) {
+        spill.max(0.0) * (key - r.max(other))
+    } else {
+        0.0
+    };
+    let edge_limit = other.max((r + other) / 2.0);
+    let edge_cut = if key > edge_limit {
+        proximity.clamp(0.0, 1.0) * (key - edge_limit)
+    } else {
+        0.0
+    };
+    let key = key - floor_cut.max(edge_cut);
+    if spill_is_blue {
+        [r, g, key]
+    } else {
+        [r, key, b]
+    }
 }
 
 /// [`chroma_key_despill`] for a colour in 0..=255 units that may be
 /// fractional (a level texel's average, plan 233) at `strength` in 0..=1:
 /// the key channel comes down toward the other two's max by that share,
-/// only where it dominates them. The Metal and D3D11 shaders mirror it.
+/// only where it dominates them. The D3D11 shader mirrors it; the keyed
+/// plane and the Metal key pass run it inside [`chroma_key_edge_despill_rgb`].
+#[cfg(test)]
 pub fn chroma_key_despill_rgb(spill_is_blue: bool, strength: f64, rgb: [f64; 3]) -> [f64; 3] {
     if strength <= 0.0 {
         return rgb;
@@ -2374,51 +2471,92 @@ mod tests {
         assert_eq!(dropped_in(&tiny.specks(1), 0..6, 0..6), 0);
     }
 
-    /// Plan 233 D1 a: nearness is 1 inside the cone and its band, fades out
-    /// over 30° past it and is 0 for a grey; proximity is 0 where the
-    /// picture around a texel is kept and 1 once a sixth is keyed out; the
-    /// strength never drops under Spill removal and reaches the nearness
-    /// only next to keyed-out texels.
+    /// 2026-11-26: away from the edge only Spill removal acts; next to it
+    /// the olive the screen makes of brown hair comes back to brown, while
+    /// skin, teal, cyan and a grey keep their colour at any proximity.
     #[test]
-    fn chroma_key_edge_despill_is_spill_removal_inside_and_nearness_at_the_edge() {
-        let spec = default_green_spec();
-        let screen = [30.0, 150.0, 40.0];
-        assert!(
-            (chroma_key_nearness(&spec, screen) - 1.0).abs() < 1e-9,
-            "the screen"
-        );
-        // The green-tinted subject tone of the compositor tests, 41° from
-        // the key: 12° past the cone's outer edge, about 0.6.
-        let tinted = [100.0, 115.0, 70.0];
-        let near = chroma_key_nearness(&spec, tinted);
-        assert!((0.5..0.7).contains(&near), "tinted subject: {near}");
-        // The teal logo, 57° from the key, has nearly faded out; a grey is
-        // never near.
-        assert!(
-            chroma_key_nearness(&spec, [0.0, 150.0, 150.0]) < 0.1,
-            "teal"
-        );
+    fn chroma_key_edge_despill_is_spill_removal_inside_and_warms_olive_at_the_edge() {
+        let spill = 0.1;
+        let despill = |proximity: f64, rgb: [f64; 3]| {
+            chroma_key_edge_despill_rgb(false, spill, proximity, rgb)
+        };
+        // Inside (proximity 0) it is exactly Spill removal.
+        for rgb in [
+            [100.0, 200.0, 80.0],
+            [71.0, 66.0, 49.0],
+            [0.0, 150.0, 150.0],
+            [206.0, 148.0, 116.0],
+        ] {
+            assert_eq!(
+                despill(0.0, rgb),
+                chroma_key_despill_rgb(false, spill, rgb),
+                "{rgb:?}"
+            );
+        }
+        // The owner's olive hair (2026-11-26 recording): Spill removal never
+        // touches it (green is under red); next to the edge green comes down
+        // to the average of red and blue.
+        let olive = [71.0, 66.0, 49.0];
+        assert_eq!(despill(0.0, olive), olive);
+        assert_eq!(despill(1.0, olive), [71.0, 60.0, 49.0]);
+        assert_eq!(despill(0.5, olive), [71.0, 63.0, 49.0]);
+        // A green-dominant rim goes further than Spill removal's limit.
+        assert_eq!(despill(1.0, [100.0, 115.0, 70.0]), [100.0, 85.0, 70.0]);
+        // Never more than the larger cut: Spill removal at 100 % on a
+        // green-dominant colour still stops at the other channels' max.
         assert_eq!(
-            chroma_key_nearness(&spec, [128.0, 128.0, 128.0]),
-            0.0,
-            "grey"
+            chroma_key_edge_despill_rgb(false, 1.0, 0.0, [100.0, 200.0, 80.0]),
+            [100.0, 100.0, 80.0]
         );
-        assert_eq!(chroma_key_edge_proximity(1.0), 0.0);
-        assert!((chroma_key_edge_proximity(11.0 / 16.0) - 1.0).abs() < 1e-9);
-        assert!((chroma_key_edge_proximity(15.0 / 16.0) - 0.375).abs() < 1e-9);
+        // Untouched at full proximity: skin, brown hair, teal, cyan, grey.
+        for rgb in [
+            [206.0, 148.0, 116.0],
+            [55.0, 36.0, 20.0],
+            [0.0, 150.0, 150.0],
+            [0.0, 200.0, 200.0],
+            [128.0, 128.0, 128.0],
+        ] {
+            assert_eq!(despill(1.0, rgb), rgb, "{rgb:?}");
+        }
+        // A blue screen mirrors it on blue, with green as the other channel.
         assert_eq!(
-            chroma_key_edge_despill_strength(&spec, tinted, 0.0),
-            spec.spill,
-            "inside: Spill removal"
+            chroma_key_edge_despill_rgb(true, spill, 1.0, [71.0, 49.0, 66.0]),
+            [71.0, 49.0, 60.0]
         );
-        assert!(
-            (chroma_key_edge_despill_strength(&spec, tinted, 1.0) - near).abs() < 1e-9,
-            "at the edge: the nearness"
-        );
-        assert_eq!(
-            CHROMA_KEY_EDGE_DESPILL_PARAMS,
-            [CHROMA_KEY_EDGE_DESPILL_FADE_DEG.to_radians(), 6.0]
-        );
+    }
+
+    /// The spill zone: 0 deep in a kept picture, 1 next to a keyed-out one,
+    /// fading over about two cells, and a one-texel cell still reaches the
+    /// texel next to the edge.
+    #[test]
+    fn chroma_key_spill_zone_reaches_a_share_of_the_camera_into_the_subject() {
+        assert_eq!(chroma_key_spill_cell(3840, 2160, 1), 30, "4K at 1:1");
+        assert_eq!(chroma_key_spill_cell(3840, 2160, 4), 8, "4K in a slot");
+        assert_eq!(chroma_key_spill_cell(1920, 1080, 1), 15, "1080p at 1:1");
+        assert_eq!(chroma_key_spill_cell(1080, 1920, 1), 15, "portrait");
+        assert_eq!(chroma_key_spill_cell(64, 8, 1), 1);
+        assert_eq!(chroma_key_spill_cell(0, 0, 0), 1);
+        // A 4K camera at 1:1: the screen left of column 1200, the subject
+        // from it. The edge despill acts fully across the band the owner's
+        // spill reached and fades out by a cell and a half in (an edge on a
+        // cell boundary; off the grid it reaches a little further).
+        let (width, height, cell) = (1800usize, 300usize, 30usize);
+        let zone =
+            ChromaKeySpillZone::find(width, height, cell, |x, _| if x < 1200 { 0.0 } else { 1.0 });
+        for depth in [0usize, 10, 20] {
+            assert_eq!(zone.proximity(1200 + depth, 150), 1.0, "depth {depth}");
+        }
+        assert!(zone.proximity(1200 + 30, 150) > 0.5, "depth 30");
+        assert_eq!(zone.proximity(1200 + 45, 150), 0.0, "depth 45");
+        assert_eq!(zone.proximity(1200 + 120, 150), 0.0, "depth 120");
+        assert_eq!(zone.proximity(1799, 150), 0.0, "the far side");
+        // Kept everywhere: nothing near.
+        let kept = ChromaKeySpillZone::find(90, 60, 30, |_, _| 1.0);
+        assert_eq!(kept.proximity(45, 30), 0.0);
+        // A one-texel cell (a tiny camera, or a deep reduction).
+        let tiny = ChromaKeySpillZone::find(64, 8, 1, |x, _| if x < 24 { 0.0 } else { 1.0 });
+        assert_eq!(tiny.proximity(24, 4), 1.0, "next to the edge");
+        assert_eq!(tiny.proximity(44, 4), 0.0, "20 in");
     }
 
     /// Plan 233: the f64 despill is the 8-bit despill on whole colours and

@@ -72,13 +72,12 @@ use crate::protocol::{
     SceneSource, SceneSourceKind, SceneTransform, StreamScreen,
 };
 use crate::scene_geometry::{
-    BackgroundStage, CHROMA_KEY_NEIGHBOURHOOD_WEIGHTS, ChromaKeySpec, ChromaKeySpecks, PixelRect,
-    SceneCrop, SceneFit, SceneMask, SceneMaskTester, SignedPixelRect, background_stage_margin,
-    background_zoom_crop, camera_chroma_key, camera_mask, chroma_key_alpha_rgb,
-    chroma_key_despill_rgb, chroma_key_edge_despill_strength, chroma_key_edge_proximity,
-    chroma_key_reduction_level, chroma_key_speck_cell, contain_rect_pixels,
-    scene_crop_from_transform, scene_source_fit, scene_source_rect_pixels,
-    scene_source_render_transform,
+    BackgroundStage, CHROMA_KEY_NEIGHBOURHOOD_WEIGHTS, ChromaKeySpec, ChromaKeySpecks,
+    ChromaKeySpillZone, PixelRect, SceneCrop, SceneFit, SceneMask, SceneMaskTester,
+    SignedPixelRect, background_stage_margin, background_zoom_crop, camera_chroma_key, camera_mask,
+    chroma_key_alpha_rgb, chroma_key_edge_despill_rgb, chroma_key_reduction_level,
+    chroma_key_speck_cell, chroma_key_spill_cell, contain_rect_pixels, scene_crop_from_transform,
+    scene_source_fit, scene_source_rect_pixels, scene_source_render_transform,
 };
 #[cfg(target_os = "macos")]
 pub use crate::source_mask::SourceMask;
@@ -14053,7 +14052,10 @@ fn blit_linear_rgba_to_yuv420p(
 ///
 /// Before the colour treatment, the speck cleanup drops tiny kept patches
 /// that keyed-out screen surrounds (`scene_geometry::ChromaKeySpecks`, the
-/// owner's blue mark on the screen of 2026-11-14).
+/// owner's blue mark on the screen of 2026-11-14), and the spill zone
+/// (`scene_geometry::ChromaKeySpillZone`) measures how near the keyed-out
+/// area each texel is, in cells that are a share of the camera frame, for
+/// the edge despill (the olive hair of 2026-11-26).
 ///
 /// The Metal compositor's key pass is this on the GPU; tests pin the two.
 struct KeyedLevelPlane {
@@ -14114,48 +14116,6 @@ impl KeyedLevelPlane {
                     *out = sum.map(|channel| channel / count.max(1.0));
                 }
             });
-        // Plan 233 D1 a: how keyed-out the picture is around each level
-        // texel, its alpha over the 5×5 binomial at the level's spacing
-        // (plan 229's kernel, separable; texels past the edge repeat the
-        // edge). The despill is stronger where that is low.
-        let clamped = |centre: usize, offset: usize, len: usize| {
-            (centre + offset).saturating_sub(2).min(len.max(1) - 1)
-        };
-        let mut across = vec![0.0f32; level_width * level_height];
-        across
-            .par_chunks_mut(level_width.max(1))
-            .enumerate()
-            .for_each(|(y, row)| {
-                for (x, out) in row.iter_mut().enumerate() {
-                    *out = CHROMA_KEY_NEIGHBOURHOOD_WEIGHTS
-                        .iter()
-                        .enumerate()
-                        .map(|(offset, &weight)| {
-                            weight as f32
-                                * texels[y * level_width + clamped(x, offset, level_width)][3]
-                        })
-                        .sum::<f32>()
-                        / 16.0;
-                }
-            });
-        let mut blurred = vec![0.0f32; level_width * level_height];
-        blurred
-            .par_chunks_mut(level_width.max(1))
-            .enumerate()
-            .for_each(|(y, row)| {
-                for (x, out) in row.iter_mut().enumerate() {
-                    *out = CHROMA_KEY_NEIGHBOURHOOD_WEIGHTS
-                        .iter()
-                        .enumerate()
-                        .map(|(offset, &weight)| {
-                            weight as f32
-                                * across[clamped(y, offset, level_height) * level_width + x]
-                        })
-                        .sum::<f32>()
-                        / 16.0;
-                }
-            });
-        drop(across);
         // The speck cleanup, on pass 1's alpha (the Metal pass's three speck
         // kernels between its two passes).
         let specks = ChromaKeySpecks::find(
@@ -14164,30 +14124,37 @@ impl KeyedLevelPlane {
             chroma_key_speck_cell(source.width, source.height, block as u32),
             |x, y| texels[y * level_width + x][3],
         );
+        // How near the keyed-out area each level texel is: the spill zone's
+        // cells, a share of the camera frame (the Metal pass's two spill
+        // kernels). The despill is stronger where that is high.
+        let spill_zone = ChromaKeySpillZone::find(
+            level_width,
+            level_height,
+            chroma_key_spill_cell(source.width, source.height, block as u32),
+            |x, y| texels[y * level_width + x][3],
+        );
         // Pass 2: the colour treatment on each level texel's average colour:
         // despill (Spill removal, or more next to the keyed-out area), then
         // the camera look.
         let spill_is_blue = spec.spill_is_blue();
         texels
             .par_iter_mut()
-            .zip(blurred.par_iter())
             .enumerate()
-            .for_each(|(index, (texel, &blurred_alpha))| {
+            .for_each(|(index, texel)| {
                 let alpha = texel[3];
-                if alpha <= 0.0
-                    || specks.drops(index % level_width.max(1), index / level_width.max(1))
-                {
+                let (x, y) = (index % level_width.max(1), index / level_width.max(1));
+                if alpha <= 0.0 || specks.drops(x, y) {
                     *texel = [0.0; 4];
                     return;
                 }
                 let colour =
                     [texel[0], texel[1], texel[2]].map(|channel| f64::from(channel / alpha));
-                let strength = chroma_key_edge_despill_strength(
-                    spec,
+                let colour = chroma_key_edge_despill_rgb(
+                    spill_is_blue,
+                    spec.spill,
+                    f64::from(spill_zone.proximity(x, y)),
                     colour,
-                    chroma_key_edge_proximity(f64::from(blurred_alpha)),
                 );
-                let colour = chroma_key_despill_rgb(spill_is_blue, strength, colour);
                 let colour = camera_look_rgb_f64(colour, look);
                 *texel = [
                     colour[0] as f32 * alpha,
@@ -17265,8 +17232,8 @@ mod tests {
 
     /// Plan 233 D1 a, on both paths: a green-tinted subject texel next to
     /// keyed-out texels loses its green, the same colour 20 texels inside
-    /// keeps it (only Spill removal applies), and the teal logo's colour is
-    /// unchanged anywhere. A 64×8 camera drawn 1:1 over a blue canvas: the
+    /// keeps it (only Spill removal applies; the 8-texel-high camera's spill
+    /// cell is one texel), and the teal logo's colour is unchanged anywhere. A 64×8 camera drawn 1:1 over a blue canvas: the
     /// screen in columns 0..=22, the subject from column 23 (the key's
     /// neighbourhood keys that column with the screen, so column 24 is the
     /// first kept one, next to the keyed-out area).
@@ -17330,8 +17297,9 @@ mod tests {
         let tinted_frame = frame(tinted);
         let teal_frame = frame(teal);
         let (edge, inside) = (cpu_green(&tinted_frame, 24), cpu_green(&tinted_frame, 44));
-        // Nearness 0.6 at the edge: 115 − 0.6 × 15 ≈ 106; inside only Spill
-        // removal: 115 − 0.1 × 15 ≈ 113.5. The chroma round trip costs ±2.
+        // At the edge green comes down to (red + blue) / 2: 115 → 85; inside
+        // only Spill removal: 115 − 0.1 × 15 ≈ 113.5. The chroma round trip
+        // costs ±2 (and the edge texel shares its 2×2 chroma sample).
         assert!(edge <= 109, "CPU: the edge texel keeps its green ({edge})");
         assert!(inside >= 111, "CPU: the inside texel lost green ({inside})");
         for x in [24, 44] {
@@ -17399,6 +17367,160 @@ mod tests {
             for x in [24, 44] {
                 let g = gpu_green(&teal_frame, x);
                 assert!((148..=152).contains(&g), "Metal: teal at {x} moved to {g}");
+            }
+        }
+    }
+
+    /// The owner's recording of 2026-11-26, on both paths: the screen's
+    /// green light turned the brown hair next to it olive (`(71,66,49)`,
+    /// green under red), and the old edge despill touched neither its colour
+    /// (green never above red) nor anything past two keyed texels. A
+    /// 640×360 camera drawn 1:1 (the full-frame draw, reduction level 0,
+    /// spill cell 5 texels): the screen in columns 0..=199 (column 200 keys
+    /// with it through the judge's neighbourhood), olive hair to 399, skin
+    /// after. Next to the edge the olive comes back to brown (green to the
+    /// average of red and blue, 60); 60 texels in it keeps its colour (66);
+    /// the skin is never touched.
+    #[test]
+    fn edge_despill_warms_olive_hair_next_to_the_screen_on_both_paths() {
+        let spec = chroma_key_test_spec();
+        let (width, height) = (640u32, 360u32);
+        let screen = [30u8, 150, 40];
+        let olive = [71u8, 66, 49];
+        let skin = [206u8, 148, 116];
+        let frame: Vec<u8> = (0..width * height)
+            .flat_map(|index| {
+                let rgb = match index % width {
+                    0..=199 => screen,
+                    200..=399 => olive,
+                    _ => skin,
+                };
+                [rgb[0], rgb[1], rgb[2], 255]
+            })
+            .collect();
+        let mut bytes = blue_yuv_canvas(width, height);
+        assert!(blit_rgba_to_yuv420p(
+            &RgbaSource {
+                bytes: &frame,
+                width,
+                height,
+                format: SourcePixelFormat::Rgba,
+            },
+            &mut bytes,
+            width,
+            height,
+            PixelRect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+            SourceRenderOptions {
+                crop: SceneCrop::none(),
+                pan: (0.0, 0.0),
+                contain: false,
+                mirror_x: false,
+                mask: SceneMask::None,
+                chroma_key: Some(spec),
+                camera_look: crate::protocol::CameraLook::default(),
+                linear: true,
+            },
+        ));
+        // Canvas pixel (x, 180) on the CPU, read back through the chroma
+        // sample its 2×2 block wrote (x even, both texels in one zone).
+        let cpu_rgb = |x: u32| -> [u8; 3] {
+            let (w, h) = (width as usize, height as usize);
+            let row = 180usize;
+            let uv = w * h + (row / 2) * w.div_ceil(2) + (x as usize) / 2;
+            let (b, g, r) = crate::color::ycbcr_bt709_video_to_bgr(
+                bytes[row * w + x as usize],
+                bytes[uv],
+                bytes[uv + w.div_ceil(2) * h.div_ceil(2)],
+            );
+            [r, g, b]
+        };
+        let (edge, inside, skin_out) = (cpu_rgb(202), cpu_rgb(260), cpu_rgb(500));
+        assert!(
+            edge[1] <= 62,
+            "CPU: the olive next to the screen keeps its green {edge:?}"
+        );
+        assert!(
+            inside[1] >= 64,
+            "CPU: the olive 60 texels in lost green {inside:?}"
+        );
+        assert!(
+            skin_out[1].abs_diff(148) <= 2,
+            "CPU: the skin moved {skin_out:?}"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            use crate::metal_compositor::{
+                GpuSource, GpuSourceKind, MetalSceneCompositor, SourceMask,
+            };
+            let Some(mut gpu) = MetalSceneCompositor::new() else {
+                eprintln!("skipping the Metal half: no Metal device available");
+                return;
+            };
+            let bgra: Vec<u8> = frame
+                .chunks_exact(4)
+                .flat_map(|p| [p[2], p[1], p[0], p[3]])
+                .collect();
+            let px = gpu
+                .compose_bgra(
+                    width as usize,
+                    height as usize,
+                    [0.0, 0.0, 1.0, 1.0],
+                    &[GpuSource {
+                        kind: GpuSourceKind::Camera,
+                        bgra: &bgra,
+                        content_key: None,
+                        iosurface: None,
+                        pixel_buffer: None,
+                        texture: None,
+                        width: width as usize,
+                        height: height as usize,
+                        dest: [0.0, 0.0, 1.0, 1.0],
+                        crop: [0.0; 4],
+                        mirror: false,
+                        mask: SourceMask::None,
+                        blend: true,
+                        chroma_key: scene_chroma_key_into_metal(&spec),
+                        camera_look: None,
+                        corners: None,
+                        sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                        opacity: 1.0,
+                    }],
+                )
+                .expect("metal compose");
+            let gpu_rgb = |x: usize| -> [u8; 3] {
+                let at = (180 * width as usize + x) * 4;
+                [px[at + 2], px[at + 1], px[at]]
+            };
+            for x in [202usize, 203] {
+                let rgb = gpu_rgb(x);
+                assert!(
+                    rgb[1].abs_diff(60) <= 1,
+                    "Metal: the olive at {x} is {rgb:?}"
+                );
+            }
+            let olive_in = gpu_rgb(260);
+            assert!(
+                olive_in[1].abs_diff(66) <= 1,
+                "Metal: the olive 60 texels in is {olive_in:?}"
+            );
+            let skin_in = gpu_rgb(500);
+            assert!(
+                skin_in[1].abs_diff(148) <= 1,
+                "Metal: the skin is {skin_in:?}"
+            );
+            for (x, cpu) in [(202usize, edge), (260, inside), (500, skin_out)] {
+                let gpu = gpu_rgb(x);
+                for channel in 0..3 {
+                    assert!(
+                        gpu[channel].abs_diff(cpu[channel]) <= 4,
+                        "at {x}: CPU {cpu:?} vs Metal {gpu:?}"
+                    );
+                }
             }
         }
     }
@@ -17473,13 +17595,34 @@ mod tests {
             crate::windows_d3d11_compositor::windows_chroma_key_neighbourhood_params(),
             neighbourhood
         );
-        // Plan 233 D1 a: the edge despill's fade and gain.
+        // The edge despill's gain and spill cell.
         #[cfg(target_os = "macos")]
         {
-            let [fade, gain] = crate::scene_geometry::CHROMA_KEY_EDGE_DESPILL_PARAMS;
-            let mirrored = crate::metal_compositor::CHROMA_KEY_EDGE_DESPILL_PARAMS;
-            assert!((f64::from(mirrored[0]) - fade).abs() < 1e-6, "fade");
-            assert_eq!(mirrored[1..], [gain as f32, 0.0, 0.0], "gain");
+            assert_eq!(
+                crate::metal_compositor::CHROMA_KEY_EDGE_DESPILL_GAIN,
+                crate::scene_geometry::CHROMA_KEY_EDGE_DESPILL_PROXIMITY_GAIN as f32,
+                "gain"
+            );
+            for (width, height) in [
+                (3840, 2160),
+                (1920, 1080),
+                (1280, 720),
+                (1080, 1920),
+                (2160, 3840),
+                (2, 2),
+            ] {
+                for block in [1, 2, 4, 8, 32] {
+                    assert_eq!(
+                        crate::metal_compositor::gpu_chroma_key_spill_cell(width, height, block),
+                        crate::scene_geometry::chroma_key_spill_cell(
+                            width as u32,
+                            height as u32,
+                            block as u32
+                        ),
+                        "spill cell {width}x{height} at block {block}"
+                    );
+                }
+            }
         }
         // Plan 233: the reduction level, mirrored the same way.
         #[cfg(target_os = "macos")]
