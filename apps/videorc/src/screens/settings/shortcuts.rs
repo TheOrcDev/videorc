@@ -297,11 +297,12 @@ impl SettingsScreen {
             registered: &registration.registered,
         });
         // The actions, then the scenes in their own labelled group.
-        let mut globals = GroupedList::new();
+        // Electron's padded rows (divide-y): each divider adds its 1 px.
+        let mut globals = GroupedList::new().padded_rows(true);
         for row in model.action_rows {
             globals = globals.item(self.recorder_row(row, ink, cx));
         }
-        let mut scene_list = GroupedList::new().label("Scenes");
+        let mut scene_list = GroupedList::new().label("Scenes").padded_rows(true);
         for row in model.scene_rows {
             scene_list = scene_list.item(self.recorder_row(row, ink, cx));
         }
