@@ -1258,7 +1258,7 @@ impl Render for ChatPane {
             &names,
         );
         let send_to = (writable.len() > 1).then(|| {
-            let this = this.clone();
+            let this = cx.entity().downgrade();
             let picked = self.picked.clone();
             DropdownMenu::new("chat-send-to")
                 .trigger(
