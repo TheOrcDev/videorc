@@ -526,7 +526,9 @@ impl<B: StudioBackend> Studio<B> {
 
     /// `startReplayBuffer`'s request (`startBufferOnlySession`): the folder's
     /// capability, then the params from the capture config and the scene as
-    /// the request goes out (#1697), then the controller's answer. A
+    /// the request goes out (#1697), the screen's capture started for them
+    /// (`preview.screen.start`, as before a Record), then the controller's
+    /// answer. A
     /// transaction held for this start runs once it is answered.
     async fn start_ring(&self) -> Vec<ClipsCommand> {
         let answer: Result<RecordingStatus, (Option<String>, String)> =
@@ -553,11 +555,18 @@ impl<B: StudioBackend> Studio<B> {
                     };
                     match params {
                         Err(message) => Err((None, message)),
-                        Ok(params) => self
-                            .backend
-                            .session_start_into(params, folder)
-                            .await
-                            .map_err(|error| (Some(error.code), error.message)),
+                        Ok(params) => {
+                            // As a Record start does: the backend refuses a
+                            // session whose screen preview produced no
+                            // frames, and only Electron's renderer starts
+                            // that preview at idle.
+                            self.prepare_session_capture(&params.sources, &params.output.video)
+                                .await;
+                            self.backend
+                                .session_start_into(params, folder)
+                                .await
+                                .map_err(|error| (Some(error.code), error.message))
+                        }
                     }
                 }
             };
