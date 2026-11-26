@@ -1,5 +1,5 @@
 use super::*;
-use gpui::{AnyElement, ClipboardItem, Role, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, ClipboardItem, SharedString, Window, div, prelude::*, px};
 use videorc_app_core::desktop::{permissions::PermissionPlatform, system_access as access};
 use videorc_app_core::studio::cloud_program_health::{self as cloud_health, ProgramHealthTone};
 use videorc_app_core::studio::virtual_camera::camera_copy;
@@ -159,9 +159,10 @@ impl HealthScreen {
         let id = group.id;
         let muted = hsla(t.muted_foreground);
         let (accent, foreground) = (hsla(t.accent), hsla(t.foreground));
-        // Electron's `<h3>` wraps the trigger; the kit's header is the
-        // button, so the heading sits inside it and the button carries the
-        // name its text gives in Electron (a heading's text never names it).
+        // Electron's `<h3>` wraps the trigger (`heading_level`); the trigger
+        // isn't plain text, so the button and its heading carry the name its
+        // words give in Electron (the title, the sr-only ", needs a look",
+        // the meta).
         let mut name = group.title.clone();
         if group.attention {
             name.push_str(", needs a look");
@@ -171,9 +172,6 @@ impl HealthScreen {
             name.push_str(&group.meta);
         }
         let trigger = div()
-            .id(SharedString::from(format!("{id}-heading")))
-            .role(Role::Heading)
-            .aria_level(3)
             .flex()
             .items_center()
             .w_full()
@@ -205,6 +203,9 @@ impl HealthScreen {
         let entity = cx.entity();
         let mut disclosure = Collapsible::new(SharedString::from(format!("toggle-{id}")))
             .unstyled(true)
+            .heading_level(3)
+            // `rounded-row`: the focus ring follows the hover block.
+            .header_radius(radius::ROW)
             .open(expanded)
             .accessibility_label(name)
             .trigger(trigger)
@@ -485,9 +486,6 @@ impl Render for HealthScreen {
         let details_open = self.details;
         let accent = hsla(t.accent);
         let details_trigger = div()
-            .id("health-details-heading")
-            .role(Role::Heading)
-            .aria_level(2)
             .flex()
             .items_center()
             .w_full()
@@ -513,6 +511,8 @@ impl Render for HealthScreen {
         let details_page = cx.entity();
         let details = Collapsible::new("health-details-toggle")
             .unstyled(true)
+            // Square, the pane's width: `<h2>`, no `rounded-*`.
+            .heading_level(2)
             .open(details_open)
             .accessibility_label(h::copy::TECHNICAL_DETAILS)
             .trigger(details_trigger)

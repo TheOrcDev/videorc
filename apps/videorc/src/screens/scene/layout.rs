@@ -50,6 +50,7 @@ impl ScenePage {
             .accessibility_label(copy::ORIENTATION)
             .manual(true)
             .small(true)
+            .fit(true)
             .option(
                 Segment::new(HORIZONTAL, copy::HORIZONTAL_NAME)
                     .child(icon(
@@ -84,6 +85,7 @@ impl ScenePage {
         let mut presets = SegmentedControl::new("scene-layout-presets")
             .accessibility_label(copy::LAYOUT_TITLE)
             .manual(true)
+            .fit(true)
             .disabled(!view.presets_enabled)
             .value(
                 view.preset_index
@@ -225,6 +227,7 @@ impl ScenePage {
                     .child(
                         SegmentedControl::new("scene-screen-framing-control")
                             .accessibility_label(copy::SCREEN_FRAMING)
+                            .fit(true)
                             .option(Segment::new("fill", copy::FILL))
                             .option(Segment::new("fit", copy::FIT))
                             .value(Some(if fit { "fit" } else { "fill" }))

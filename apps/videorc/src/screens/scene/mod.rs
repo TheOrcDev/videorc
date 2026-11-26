@@ -42,8 +42,8 @@ use videorc_app_core::studio::Connection;
 use videorc_app_core::studio::screen_views::talk_show_room;
 use videorc_app_core::{BackendClient, Studio, StudioSnapshot};
 use videorc_kit::input::InputState;
+use videorc_kit::page::{ConfigGrid, SCENE_GRID};
 use videorc_kit::scroll_area::ScrollArea;
-use videorc_kit::theme::{self, hsla};
 
 use crate::preview::Preview;
 use crate::screens::avatar::pictures;
@@ -53,9 +53,6 @@ use controls::Controls;
 use dialogs::SceneDialogs;
 use editor::{EditorModel, EditorState, parse_banners};
 use model::SceneModel;
-
-/// `@min-[940px]/page`: the inspector beside the lead column from here.
-const SCENE_GRID_MIN_WIDTH: f32 = 940.;
 
 /// The page's key context: ⌘Z / Ctrl+Z undoes the last layout change
 /// (P536). A focused text field's own Undo binding is deeper, so it wins.
@@ -322,16 +319,6 @@ impl ScenePage {
         .detach();
     }
 
-    /// The page's width, for the two columns (X1).
-    fn measured(&mut self, width: f32, cx: &mut Context<Self>) {
-        let flips =
-            (width >= SCENE_GRID_MIN_WIDTH) != (self.controls.width >= SCENE_GRID_MIN_WIDTH);
-        self.controls.width = width;
-        if flips {
-            cx.notify();
-        }
-    }
-
     /// The switch status line shows 1.5 s after a switch starts (at once
     /// when it replaced another): draw again then.
     fn schedule_status_line(&mut self, snapshot: &StudioSnapshot, cx: &mut Context<Self>) {
@@ -384,26 +371,16 @@ impl Render for ScenePage {
             self.refresh_editor(cx);
         }
         self.sync_controls(window, cx);
-        let t = theme::resolve(None, window, cx);
         let list = self.scenes_section(window, cx);
         let layout = self.layout_section(window, cx);
         let canvas = self.canvas_section(window, cx);
         let hide = self.hide_screen_section(window, cx);
         let inspector = self.inspector_column(window, cx);
-        let page = cx.entity().downgrade();
-        let measure = gpui::canvas(
-            move |bounds, _, cx| {
-                let width = f32::from(bounds.size.width);
-                page.update(cx, |page, cx| page.measured(width, cx)).ok();
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full();
 
         // X1: the lead column (Layout, Canvas, Hide screen), and the
-        // inspector beside it from 940 px (`minmax(0,1.3fr) minmax(0,1fr)`,
-        // a border between), under it below.
+        // inspector beside it from 940 px of page (`SCENE_GRID`,
+        // `minmax(0,1.3fr) minmax(0,1fr)`, a hairline between), under it
+        // below.
         let lead = div()
             .id("scene-lead-column")
             .flex()
@@ -412,28 +389,10 @@ impl Render for ScenePage {
             .child(layout)
             .child(canvas)
             .child(hide);
-        let grid = if self.controls.width >= SCENE_GRID_MIN_WIDTH {
-            div()
-                .id("scene-grid")
-                .flex()
-                .items_start()
-                .w_full()
-                .child(
-                    lead.flex_1()
-                        .flex_grow(1.3)
-                        .border_r_1()
-                        .border_color(hsla(t.border)),
-                )
-                .child(div().flex_1().min_w_0().child(inspector))
-        } else {
-            div()
-                .id("scene-grid")
-                .flex()
-                .flex_col()
-                .w_full()
-                .child(lead)
-                .child(inspector)
-        };
+        let grid = ConfigGrid::new("scene-grid")
+            .tracks(SCENE_GRID)
+            .child(lead)
+            .child(div().min_w_0().child(inspector));
         div()
             .id("scene-page")
             .key_context(KEY_CONTEXT)
@@ -441,7 +400,6 @@ impl Render for ScenePage {
             .on_action(cx.listener(|page, _: &UndoLayout, _, cx| page.undo_key(cx)))
             .relative()
             .size_full()
-            .child(measure)
             .child(
                 ScrollArea::new("scene-scroll")
                     .handle(self.scroll.clone())

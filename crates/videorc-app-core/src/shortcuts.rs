@@ -477,6 +477,32 @@ mod tests {
     const MAC: Option<&str> = Some("darwin");
     const WIN: Option<&str> = Some("win32");
 
+    #[test]
+    fn a_lone_modifier_from_gpui_is_held_never_refused() {
+        // GPUI sends a lone modifier's press or release as its own keystroke
+        // (`key` shift/control/alt/platform/function); every recorder maps it
+        // through `code_for_gpui_key` (#2284), so the step holds it, never
+        // "That key can't be part of a shortcut".
+        for key in ["shift", "control", "alt", "platform", "function"] {
+            let code = crate::desktop::accelerator::code_for_gpui_key(key);
+            for held in [false, true] {
+                let input = KeyInput {
+                    key_up: false,
+                    code: code.clone(),
+                    meta: held && key == "platform",
+                    control: held && key == "control",
+                    alt: held && key == "alt",
+                    shift: held && key == "shift",
+                };
+                let step = shortcut_recorder_step(&input, MAC, |_| None);
+                assert!(
+                    matches!(step, RecorderStep::Held(_)),
+                    "{key} held={held}: {step:?}"
+                );
+            }
+        }
+    }
+
     fn press(code: &str, meta: bool, control: bool, alt: bool, shift: bool) -> KeyInput {
         KeyInput {
             key_up: false,

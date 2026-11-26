@@ -237,6 +237,7 @@ impl SceneDialogs {
         let mut control = SegmentedControl::new("scene-guests-placement")
             .accessibility_label(copy::LABEL)
             .small(true)
+            .fit(true)
             .value(Some(guesting.placement.value()))
             .on_change(move |value, _, cx| {
                 let _ = placement_page.update(cx, |page, cx| {
