@@ -55,6 +55,9 @@ mod words {
     pub const OPEN_PREVIEW: &str = "Open Preview";
     pub const CLOSE_PREVIEW: &str = "Close Preview";
     pub const EMPTY: &str = "No sources in the scene yet. Choose a screen or a camera in Sources.";
+    /// The stage's accessible name: a group node, so the tree (and the UI
+    /// driver's `scene-stage` id) carries its bounds.
+    pub const STAGE: &str = "Stage";
 }
 
 /// The canvas's height left for the page around it (`calc(100vh - 248px)`).
@@ -189,6 +192,8 @@ impl ScenePage {
         section = section.child(
             div()
                 .id("scene-stage")
+                .role(gpui::Role::Group)
+                .aria_label(words::STAGE)
                 .flex()
                 .flex_col()
                 .rounded(px(radius::ROW))

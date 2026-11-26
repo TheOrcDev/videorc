@@ -30,6 +30,7 @@ import { tmpdir } from 'node:os'
 import { join, relative, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { nodeWords, previewConverged } from './lib/gpui-studio-smoke.mjs'
 import { createUiDriver } from './lib/ui-driver.mjs'
@@ -140,6 +141,9 @@ async function main() {
         .catch(() => null)
     const before = await blockedReason()
     if (before) console.log(`gpui-studio: without a source Record says "${before}" ✓`)
+    await requestSmokeCommand(smoke, 'studio-replay-buffer', { armed: false }).catch(
+      () => undefined
+    )
     await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 500 })
     const state = await requestSmokeCommand(smoke, 'studio-state', {})
     if (state?.testPattern !== true) {
@@ -150,21 +154,46 @@ async function main() {
       throw new Error(`gpui-studio: FAIL — Record is blocked with the test pattern on: ${blocked}`)
     }
     console.log('gpui-studio: test pattern on, Record enabled ✓')
+    // The Record button's own name says the session (its node is a button,
+    // not a label). The Clips ring stays off: it would read as a session.
+    const waitRecordSays = async (words, timeoutMs) => {
+      const until = Date.now() + timeoutMs
+      let said = ''
+      while (Date.now() < until) {
+        said = nodeWords(await ui.waitFor(RECORD, { timeoutMs }))
+        if (words.test(said)) return said
+        await new Promise((done) => setTimeout(done, 100))
+      }
+      throw new Error(`gpui-studio: FAIL — Record says "${said}", expected ${words}.`)
+    }
     await ui.press('Space')
-    await ui.waitFor({ role: 'label', value: 'Stop recording' }, { timeoutMs: 15000 })
-    const started = await rpc('recording.status')
+    await waitRecordSays(/^Stop recording\b/, 15000)
+    // The button flips as the start is asked for; the backend follows.
+    const recordingState = async (holds, timeoutMs) => {
+      const until = Date.now() + timeoutMs
+      let seen = await rpc('recording.status')
+      while (!holds(seen) && Date.now() < until) {
+        await new Promise((done) => setTimeout(done, 250))
+        seen = await rpc('recording.status')
+      }
+      return seen
+    }
+    const started = await recordingState((seen) => seen?.state === 'recording', 15000)
     if (started?.state !== 'recording') {
       throw new Error(`gpui-studio: FAIL — Space did not start a take: ${JSON.stringify(started)}`)
     }
     console.log(`gpui-studio: Space started take ${started.sessionId} ✓`)
     await new Promise((done) => setTimeout(done, takeMs))
     await ui.press('Space')
-    await ui.waitFor({ role: 'label', value: 'Record' }, { timeoutMs: 30000 })
-    const stopped = await rpc('recording.status')
+    await waitRecordSays(/^Record\b/, 30000)
+    const stopped = await recordingState((seen) => seen?.state !== 'recording', 30000)
     if (stopped?.state === 'recording') {
       throw new Error(`gpui-studio: FAIL — Space did not stop the take: ${JSON.stringify(stopped)}`)
     }
-    const output = stopped?.outputPath ?? started?.outputPath
+    // The MKV is finalized into an MP4 after the stop.
+    const output = await resolveFinalRecordingPath({ started, stopped, timeoutMs: 60000 }).catch(
+      () => stopped?.outputPath ?? started?.outputPath
+    )
     if (!output || !existsSync(output)) {
       throw new Error(`gpui-studio: FAIL — the take's file is missing: ${output}`)
     }
