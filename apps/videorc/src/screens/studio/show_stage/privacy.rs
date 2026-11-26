@@ -190,7 +190,7 @@ impl ShowStage {
             .filter(|_| !view.hidden)
             .map(|accelerator| {
                 kbd_group(
-                    accelerator_display_keys(Some(accelerator), node_platform())
+                    accelerator_display_keys(Some(accelerator), Some(node_platform()))
                         .into_iter()
                         .map(Kbd::new),
                 )
