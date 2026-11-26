@@ -185,24 +185,24 @@ impl SettingsScreen {
                     .description(view::copy::NOTHING_TO_GRANT_DESCRIPTION),
             );
         } else {
+            // Electron's PanelSection stacks the list and this group with its
+            // own 12 px gap; no extra padding on top.
             section = section.child(list).child(
-                div().pt(px(12.)).child(
-                    GroupedList::new().item(
-                        SettingsRow::new("privacy-settings", view::copy::CHANGE_A_PERMISSION)
-                            .description(model.change_description)
-                            .child(
-                                Button::new("open-system-settings")
-                                    .label(model.open_settings)
-                                    .variant(ButtonVariant::Outline)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.permission_action(
-                                            SystemPermissionPane::Privacy,
-                                            SystemAccessAction::OpenSettings,
-                                            cx,
-                                        )
-                                    })),
-                            ),
-                    ),
+                GroupedList::new().item(
+                    SettingsRow::new("privacy-settings", view::copy::CHANGE_A_PERMISSION)
+                        .description(model.change_description)
+                        .child(
+                            Button::new("open-system-settings")
+                                .label(model.open_settings)
+                                .variant(ButtonVariant::Outline)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.permission_action(
+                                        SystemPermissionPane::Privacy,
+                                        SystemAccessAction::OpenSettings,
+                                        cx,
+                                    )
+                                })),
+                        ),
                 ),
             );
         }
