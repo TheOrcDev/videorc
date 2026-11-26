@@ -107,6 +107,19 @@ pub(super) struct ClipsCore {
     smoke_seconds: Option<u32>,
 }
 
+impl ClipsCore {
+    /// The replacement Record/Go Live session carries its own armed ring.
+    pub(super) fn session_replay_params(
+        &self,
+        explicit: bool,
+    ) -> Option<videorc_protocol::ReplayParams> {
+        self.ring.armed().then_some(videorc_protocol::ReplayParams {
+            seconds: self.smoke_seconds.unwrap_or(clips::REPLAY_RING_SECONDS),
+            auto: !explicit,
+        })
+    }
+}
+
 impl Default for ClipsCore {
     fn default() -> Self {
         Self {
