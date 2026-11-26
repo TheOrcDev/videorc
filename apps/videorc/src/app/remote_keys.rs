@@ -68,22 +68,34 @@ pub fn install(
         }
     })
     .detach();
+    cx.observe_displays(|_, cx| report(cx)).detach();
     studio.set_remote_app_listener(Some(listener));
     report(cx);
 }
 
 /// One key, answered.
 fn run(key: AppRemoteIntent, cx: &mut App) {
-    let done = match key.action {
-        AppRemoteAction::WindowFront(window) => window_front(window, cx),
-        AppRemoteAction::StreamManagerFrontOrClose => stream_manager::window::front_or_close(cx),
+    let outcome = match &key.action {
+        AppRemoteAction::StreamManagerScreenSwap {
+            presenting,
+            monitor,
+        } => stream_manager::window::screen_swap(presenting, monitor, cx),
+        action => {
+            let done = match action {
+                AppRemoteAction::WindowFront(window) => window_front(*window, cx),
+                AppRemoteAction::StreamManagerFrontOrClose => {
+                    stream_manager::window::front_or_close(cx)
+                }
+                AppRemoteAction::StreamManagerScreenSwap { .. } => unreachable!(),
+            };
+            if done {
+                accepted()
+            } else {
+                refused(copy::WINDOW_MISSING)
+            }
+        }
     };
-    // Electron's `windowMissing` for a window that isn't there.
-    key.answer(if done {
-        accepted()
-    } else {
-        refused(copy::WINDOW_MISSING)
-    });
+    key.answer(outcome);
     report(cx);
 }
 
@@ -112,9 +124,7 @@ fn window_front(window: RemoteWindow, cx: &mut App) -> bool {
     }
 }
 
-/// The app's windows as the remotes see them. The Screen key's screens
-/// stay empty: this app can't move the Stream Manager yet, so a tap is
-/// refused by the Studio with Electron's words.
+/// The app's windows and connected screens as the remotes see them.
 fn facts(keys: &RemoteKeys, cx: &App) -> RemoteAppFacts {
     let preview = keys.preview.borrow().as_ref().is_some_and(|preview| {
         let preview = preview.read(cx);
@@ -127,8 +137,10 @@ fn facts(keys: &RemoteKeys, cx: &App) -> RemoteAppFacts {
             preview,
         },
         stream_manager: stream_manager::window::remote_place(cx),
-        screens: Vec::new(),
-        screen_moves: ScreenMoves::Supported,
+        screens: videorc_app_core::studio::remote_screens::screen_options(
+            &super::frames::remote_displays(cx),
+        ),
+        screen_moves: screen_moves(),
     }
 }
 
@@ -144,4 +156,13 @@ pub fn report(cx: &App) {
     }
     keys.studio.set_remote_app_facts(next.clone());
     *keys.reported.borrow_mut() = Some(next);
+}
+
+/// Wayland refuses placement with Electron's words; X11 supports it.
+pub(crate) fn screen_moves() -> ScreenMoves {
+    if cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        ScreenMoves::Wayland
+    } else {
+        ScreenMoves::Supported
+    }
 }

@@ -233,6 +233,78 @@ impl Platform for Linux {
         x11_place(x11_window_id(window)?, frame)
     }
 
+    fn set_remote_window_frame(&self, window: &Window, frame: ScreenFrame) -> OsResult<()> {
+        let scale = f64::from(window.scale_factor());
+        self.set_window_frame(
+            window,
+            ScreenFrame {
+                x: frame.x * scale,
+                y: frame.y * scale,
+                width: frame.width * scale,
+                height: frame.height * scale,
+            },
+        )
+    }
+
+    fn show_window(&self, window: &Window, _focus: bool) -> OsResult<()> {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::ConnectionExt;
+        if wayland() {
+            return Err(PLACE_WAYLAND.into());
+        }
+        let (conn, _) = x11rb::connect(None).map_err(|e| e.to_string())?;
+        conn.map_window(x11_window_id(window)?)
+            .map_err(|e| e.to_string())?
+            .check()
+            .map_err(|e| e.to_string())?;
+        conn.flush().map_err(|e| e.to_string())
+    }
+
+    fn window_shown(&self, window: &Window) -> bool {
+        use x11rb::protocol::xproto::{ConnectionExt, MapState};
+        let shown = || -> OsResult<bool> {
+            let (conn, _) = x11rb::connect(None).map_err(|e| e.to_string())?;
+            let attributes = conn
+                .get_window_attributes(x11_window_id(window)?)
+                .map_err(|e| e.to_string())?
+                .reply()
+                .map_err(|e| e.to_string())?;
+            Ok(attributes.map_state == MapState::VIEWABLE)
+        };
+        if wayland() {
+            return window.visibility() != gpui::WindowVisibility::Hidden;
+        }
+        shown().unwrap_or(false)
+    }
+
+    fn window_frame(
+        &self,
+        window: &Window,
+    ) -> OsResult<videorc_app_core::desktop::window_frames::Rect> {
+        use x11rb::protocol::xproto::ConnectionExt;
+        if wayland() {
+            return Ok(crate::app::frames::rect_of(window.bounds()));
+        }
+        let (conn, _) = x11rb::connect(None).map_err(|e| e.to_string())?;
+        let id = x11_window_id(window)?;
+        let geometry = conn
+            .get_geometry(id)
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?;
+        let position = conn
+            .translate_coordinates(id, geometry.root, 0, 0)
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?;
+        Ok(videorc_app_core::desktop::window_frames::Rect::new(
+            f64::from(position.dst_x) / f64::from(window.scale_factor()),
+            f64::from(position.dst_y) / f64::from(window.scale_factor()),
+            f64::from(geometry.width) / f64::from(window.scale_factor()),
+            f64::from(geometry.height) / f64::from(window.scale_factor()),
+        ))
+    }
+
     fn raise_window(&self, window: &Window, level: SmokeWindowLevel) -> OsResult<()> {
         if wayland() {
             return Err(RAISE_WAYLAND.into());

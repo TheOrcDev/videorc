@@ -19,6 +19,7 @@ thread_local! {
     static OBSERVER: RefCell<Option<Retained<FrontAppObserver>>> = const { RefCell::new(None) };
     /// The last app sent, so an unchanged front app is not sent twice.
     static LAST: RefCell<Option<FrontApp>> = const { RefCell::new(None) };
+    static LAST_OTHER: RefCell<Option<FrontApp>> = const { RefCell::new(None) };
 }
 
 fn workspace() -> Option<Retained<AnyObject>> {
@@ -88,6 +89,12 @@ fn app_metadata(app: &AnyObject) -> Option<FrontApp> {
 
 /// Sends `app` unless it is the one sent last.
 fn publish(app: FrontApp) {
+    if app.pid != std::process::id() as i32
+        && app.bundle_id != crate::APP_ID
+        && self_bundle_id().as_deref() != Some(app.bundle_id.as_str())
+    {
+        LAST_OTHER.with_borrow_mut(|last| *last = Some(app.clone()));
+    }
     let fresh = LAST.with_borrow_mut(|last| {
         if last.as_ref() == Some(&app) {
             return false;
@@ -178,5 +185,31 @@ pub fn start(sender: UnboundedSender<FrontApp>) -> bool {
 pub fn poll() {
     if let Some(app) = frontmost() {
         publish(app);
+    }
+}
+
+/// Electron's Screen key focus return: verify both PID and bundle before
+/// activating the last non-Videorc app. Never launch an app or use a title.
+pub fn return_to_last_other() {
+    let Some(target) = LAST_OTHER.with_borrow(Clone::clone) else {
+        return;
+    };
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    unsafe {
+        let Some(class) = AnyClass::get(c"NSRunningApplication") else {
+            return;
+        };
+        let app: Option<Retained<AnyObject>> =
+            msg_send![class, runningApplicationWithProcessIdentifier: target.pid];
+        let Some(app) = app else {
+            return;
+        };
+        let bundle: Option<Retained<NSString>> = msg_send![&*app, bundleIdentifier];
+        if bundle.as_ref().map(|b| b.to_string()).as_deref() != Some(target.bundle_id.as_str()) {
+            return;
+        }
+        let _: bool = msg_send![&*app, activateWithOptions: 2usize];
     }
 }

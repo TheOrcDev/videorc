@@ -132,6 +132,54 @@ fn primary_screen_height() -> OsResult<f64> {
     }
 }
 
+fn global_rect(
+    frame: NSRect,
+    primary_height: f64,
+) -> videorc_app_core::desktop::window_frames::Rect {
+    videorc_app_core::desktop::window_frames::Rect::new(
+        frame.origin.x,
+        primary_height - frame.origin.y - frame.size.height,
+        frame.size.width,
+        frame.size.height,
+    )
+}
+
+/// GPUI 0.3.14 reports macOS display bounds relative to each screen. Remote
+/// placement needs global coordinates; retain GPUI IDs/order and resolve
+/// those IDs through NSScreen, in the same coordinate system as setWindowFrame.
+pub fn remote_display(id: u64) -> Option<videorc_app_core::studio::remote_screens::RemoteDisplay> {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    let height = primary_screen_height().ok()?;
+    unsafe {
+        let class = AnyClass::get(c"NSScreen")?;
+        let screens: Retained<AnyObject> = msg_send![class, screens];
+        let count: usize = msg_send![&*screens, count];
+        for index in 0..count {
+            let screen: Retained<AnyObject> = msg_send![&*screens, objectAtIndex: index];
+            let description: Retained<AnyObject> = msg_send![&*screen, deviceDescription];
+            let number: Option<Retained<AnyObject>> =
+                msg_send![&*description, objectForKey: &*NSString::from_str("NSScreenNumber")];
+            let number = number?;
+            let screen_id: u32 = msg_send![&*number, unsignedIntValue];
+            if u64::from(screen_id) != id {
+                continue;
+            }
+            let bounds: NSRect = msg_send![&*screen, frame];
+            let work: NSRect = msg_send![&*screen, visibleFrame];
+            let name: Option<Retained<NSString>> = msg_send![&*screen, localizedName];
+            return Some(videorc_app_core::studio::remote_screens::RemoteDisplay {
+                id: id.to_string(),
+                name: name.map(|s| s.to_string()).unwrap_or_default(),
+                bounds: global_rect(bounds, height),
+                work_area: global_rect(work, height),
+                primary: index == 0,
+            });
+        }
+    }
+    None
+}
+
 /// The work area (`visibleFrame`, without the menu bar and the Dock) of the
 /// display the window is on (the main display while it has none: a window
 /// that has not shown yet), in AppKit's bottom-left coordinates.
@@ -246,6 +294,33 @@ impl Platform for MacOs {
         ns.setFrame_display(rect, true);
         ns.orderFrontRegardless();
         Ok(())
+    }
+
+    fn window_frame(
+        &self,
+        window: &Window,
+    ) -> OsResult<videorc_app_core::desktop::window_frames::Rect> {
+        Ok(global_rect(
+            ns_window(window)?.frame(),
+            primary_screen_height()?,
+        ))
+    }
+
+    fn window_shown(&self, window: &Window) -> bool {
+        ns_window(window).is_ok_and(|ns| ns.isVisible() && !ns.isMiniaturized())
+    }
+
+    fn show_window(&self, window: &Window, _focus: bool) -> OsResult<()> {
+        let ns = ns_window(window)?;
+        if ns.isMiniaturized() {
+            ns.deminiaturize(None);
+        }
+        ns.orderFrontRegardless();
+        Ok(())
+    }
+
+    fn return_screen_key_focus(&self, _window: &Window) {
+        front_app::return_to_last_other();
     }
 
     /// `contentAspectRatio` and `contentMinSize`: AppKit keeps the user's

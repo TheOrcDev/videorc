@@ -65,6 +65,32 @@ pub trait Platform: Send + Sync {
         ))
     }
 
+    /// Screen-key placement in the coordinates returned by `window_frame`.
+    fn set_remote_window_frame(&self, window: &Window, frame: ScreenFrame) -> OsResult<()> {
+        self.set_window_frame(window, frame)
+    }
+
+    /// Global screen coordinates, matching the Screen key's placement API.
+    fn window_frame(
+        &self,
+        window: &Window,
+    ) -> OsResult<videorc_app_core::desktop::window_frames::Rect> {
+        Ok(crate::app::frames::rect_of(window.bounds()))
+    }
+
+    /// Shown and not minimized, independent of occlusion by other windows.
+    fn window_shown(&self, window: &Window) -> bool {
+        window.visibility() != gpui::WindowVisibility::Hidden
+    }
+
+    /// Restore/show after placement; Monitor never requests activation.
+    fn show_window(&self, _window: &Window, _focus: bool) -> OsResult<()> {
+        Ok(())
+    }
+
+    /// Monitor arrival hands focus back only when the Stream Manager had it.
+    fn return_screen_key_focus(&self, _window: &Window) {}
+
     /// Electron's `setAspectRatio` and `setMinimumSize` for the floating
     /// Preview: the user's drag-resizes keep the content at `aspect`
     /// (width, height), never smaller than `min` (points).

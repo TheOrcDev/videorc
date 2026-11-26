@@ -9,9 +9,8 @@
 //! While no app listens these keys answer "Update Videorc", as before.
 //!
 //! The Stream Manager Screen key's tap moves the window to its other screen
-//! in Electron; this app cannot move windows yet, so the tap is refused with
-//! Electron's sentence for the case (`SCREEN_REFUSAL_COPY`), never "Update
-//! Videorc". Its hold (front or close) runs.
+//! using the app's connected displays. Its hold fronts or closes it without
+//! moving it. The core validates the request; the app confirms placement.
 //!
 //! Sidekick Live needs no window: the Studio saves it as `set_buddy` does
 //! (`saveBuddy`), with Premium and the Cloud AI consent checked when it
@@ -75,7 +74,7 @@ impl RemoteWindow {
 }
 
 /// What the app is asked to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppRemoteAction {
     /// `windowFront`: the window to the front, opened when it is closed
     /// (`openWindow`).
@@ -83,6 +82,8 @@ pub enum AppRemoteAction {
     /// `streamManagerFrontOrClose`: the Screen key held
     /// ([`stream_manager_hold_action`]).
     StreamManagerFrontOrClose,
+    /// The Screen key tapped; revalidated against live displays by the app.
+    StreamManagerScreenSwap { presenting: String, monitor: String },
 }
 
 /// One key for the app, and where its answer goes. Answer it with
@@ -122,29 +123,28 @@ pub fn stream_manager_hold_action(open: bool, visible: bool, focused: bool) -> H
 
 /// `streamManagerScreenSwap`'s refusal (`planStreamManagerScreenSwap`, then
 /// `SCREEN_REFUSAL_COPY`): both screens named, two different ones, both
-/// connected, then the move this app cannot make yet (Wayland's own words
-/// where the app says so; else Electron's `unavailable`).
+/// connected, then whether the window system permits placement.
 pub fn screen_swap_refusal(
     intent: &Value,
     screens: &[RemoteNamed],
     moves: ScreenMoves,
-) -> &'static str {
+) -> Option<&'static str> {
     let (Some(presenting), Some(monitor)) = (
         text_field(intent, "presentingScreen"),
         text_field(intent, "monitorScreen"),
     ) else {
-        return copy::WINDOW_MISSING;
+        return Some(copy::WINDOW_MISSING);
     };
     if presenting == monitor {
-        return copy::SCREENS_SAME;
+        return Some(copy::SCREENS_SAME);
     }
     let connected = |id: &str| screens.iter().any(|screen| screen.id == id);
     if !connected(presenting) || !connected(monitor) {
-        return copy::SCREEN_MISSING;
+        return Some(copy::SCREEN_MISSING);
     }
     match moves {
-        ScreenMoves::Wayland => copy::STREAM_MANAGER_WAYLAND,
-        ScreenMoves::Supported => copy::WINDOW_MISSING,
+        ScreenMoves::Wayland => Some(copy::STREAM_MANAGER_WAYLAND),
+        ScreenMoves::Supported => None,
     }
 }
 
@@ -180,7 +180,13 @@ impl<B: StudioBackend> Studio<B> {
             return refused(copy::UNSUPPORTED);
         };
         let (reply, answer) = oneshot::channel();
-        if listener.send(AppRemoteIntent { action, reply }).is_err() {
+        if listener
+            .send(AppRemoteIntent {
+                action: action.clone(),
+                reply,
+            })
+            .is_err()
+        {
             return refused(copy::UNSUPPORTED);
         }
         match tokio::time::timeout(APP_ANSWER_TIMEOUT, answer).await {
@@ -214,14 +220,20 @@ impl<B: StudioBackend> Studio<B> {
             .await
     }
 
-    /// `streamManagerScreenSwap`: the Screen key tapped. Always refused
-    /// here, with the sentence for why (see the module's note).
-    pub(super) fn remote_screen_swap(&self, intent: &Value) -> IntentOutcome {
+    /// `streamManagerScreenSwap`: validate, then ask the app to move/open.
+    pub(super) async fn remote_screen_swap(&self, intent: &Value) -> IntentOutcome {
         let (screens, moves) = {
             let remote = self.remote_lock();
             (remote.extras.screens.clone(), remote.extras.screen_moves)
         };
-        refused(screen_swap_refusal(intent, &screens, moves))
+        if let Some(reason) = screen_swap_refusal(intent, &screens, moves) {
+            return refused(reason);
+        }
+        self.ask_app(AppRemoteAction::StreamManagerScreenSwap {
+            presenting: text_field(intent, "presentingScreen").unwrap().to_string(),
+            monitor: text_field(intent, "monitorScreen").unwrap().to_string(),
+        })
+        .await
     }
 
     /// `buddyLiveOn`, `buddyLiveOff`, `buddyLiveToggle` (`saveBuddy` with
@@ -342,35 +354,35 @@ mod tests {
         let tap = |fields: Value, moves| screen_swap_refusal(&fields, &screens, moves);
         assert_eq!(
             tap(json!({"presentingScreen": "1"}), ScreenMoves::Supported),
-            copy::WINDOW_MISSING
+            Some(copy::WINDOW_MISSING)
         );
         assert_eq!(
             tap(
                 json!({"presentingScreen": "1", "monitorScreen": "1"}),
                 ScreenMoves::Supported
             ),
-            copy::SCREENS_SAME
+            Some(copy::SCREENS_SAME)
         );
         assert_eq!(
             tap(
                 json!({"presentingScreen": "1", "monitorScreen": "9"}),
                 ScreenMoves::Supported
             ),
-            copy::SCREEN_MISSING
+            Some(copy::SCREEN_MISSING)
         );
         assert_eq!(
             tap(
                 json!({"presentingScreen": "1", "monitorScreen": "2"}),
                 ScreenMoves::Wayland
             ),
-            copy::STREAM_MANAGER_WAYLAND
+            Some(copy::STREAM_MANAGER_WAYLAND)
         );
         assert_eq!(
             tap(
                 json!({"presentingScreen": "1", "monitorScreen": "2"}),
                 ScreenMoves::Supported
             ),
-            copy::WINDOW_MISSING
+            None
         );
         // No screens reported: nothing is connected.
         assert_eq!(
@@ -379,7 +391,7 @@ mod tests {
                 &[],
                 ScreenMoves::Supported
             ),
-            copy::SCREEN_MISSING
+            Some(copy::SCREEN_MISSING)
         );
     }
 

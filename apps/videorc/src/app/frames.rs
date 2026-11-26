@@ -33,3 +33,33 @@ pub(crate) fn bounds_of(frame: Rect) -> Bounds<Pixels> {
         size: size(px(frame.width as f32), px(frame.height as f32)),
     }
 }
+
+/// Display metadata for the Screen key. GPUI exposes IDs and geometry, but
+/// no portable labels: the core uses Electron's "Screen N" fallback. macOS
+/// supplies native labels and global coordinates for the same GPUI IDs.
+pub(crate) fn remote_displays(
+    cx: &App,
+) -> Vec<videorc_app_core::studio::remote_screens::RemoteDisplay> {
+    let primary = cx.primary_display().map(|display| display.id());
+    cx.displays()
+        .iter()
+        .map(|display| {
+            #[cfg(target_os = "macos")]
+            if let Some(native) = crate::platform::macos::remote_display(u64::from(display.id())) {
+                return native;
+            }
+            #[cfg(target_os = "windows")]
+            if let Some(native) = crate::platform::windows::remote_display(u64::from(display.id()))
+            {
+                return native;
+            }
+            videorc_app_core::studio::remote_screens::RemoteDisplay {
+                id: u64::from(display.id()).to_string(),
+                name: String::new(),
+                bounds: rect_of(display.bounds()),
+                work_area: rect_of(display.visible_bounds()),
+                primary: primary == Some(display.id()),
+            }
+        })
+        .collect()
+}

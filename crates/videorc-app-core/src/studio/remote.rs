@@ -86,6 +86,7 @@ pub mod copy {
     pub const CLIPS_OFF: &str = crate::studio::clips::copy::CLIPS_OFF_INTENT;
     pub const WINDOW_MISSING: &str = "That window isn't available.";
     pub const SCREENS_SAME: &str = "Pick two different screens.";
+    pub const STREAM_MANAGER_NOT_MOVED: &str = "The Stream Manager didn't move. Try again.";
     pub const STREAM_MANAGER_WAYLAND: &str =
         "Wayland doesn't let Videorc move windows. Hold the key to bring the Stream Manager up.";
     pub const UNSUPPORTED: &str = "This version of Videorc can't do that. Update Videorc.";
@@ -734,7 +735,7 @@ impl<B: StudioBackend> Studio<B> {
             },
             "commentHighlightClear" => self.remote_comment_highlight_clear().await,
             "windowFront" => self.remote_window_front(intent).await,
-            "streamManagerScreenSwap" => self.remote_screen_swap(intent),
+            "streamManagerScreenSwap" => self.remote_screen_swap(intent).await,
             "streamManagerFrontOrClose" => self.remote_stream_manager_front_or_close().await,
             "buddyLiveOn" => self.remote_buddy_live(BuddyLiveVerb::On).await,
             "buddyLiveOff" => self.remote_buddy_live(BuddyLiveVerb::Off).await,
