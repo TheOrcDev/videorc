@@ -68,8 +68,16 @@ pub fn sync(
     now: Instant,
 ) {
     match (slot.as_mut(), spec) {
-        (_, None) => *slot = None,
+        (Some(runtime), None) => {
+            tracing::info!(
+                "live background {:?} stopped: the scene has none",
+                runtime.spec.id
+            );
+            *slot = None;
+        }
+        (None, None) => {}
         (None, Some(spec)) => {
+            tracing::info!("live background {:?} ({}) started", spec.id, spec.look);
             *slot = Some(LiveBackgroundRuntime {
                 spec: spec.clone(),
                 clock: LiveBackgroundClock::start(spec, now),

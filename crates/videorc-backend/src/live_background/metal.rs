@@ -1987,7 +1987,7 @@ impl LiveBackgroundMetalRenderer {
         self.last_frame = None;
         let gpu_ms = self.take_last_gpu_ms();
         self.guard.follow(input.spec.id);
-        self.guard.observe(&tick, gpu_ms);
+        self.guard.observe(&tick, gpu_ms, output);
         let p95 = self.guard.last_p95_ms();
         if let Some(reason) = preflight {
             // Forced (or any other preflight) still: hold nothing at all.
@@ -3072,9 +3072,10 @@ mod tests {
             LiveBackgroundTick::new(start, interval, false),
         );
         // 10 ms per frame is 60 % of a 60 fps frame: over the 20 % budget.
+        // Two windows over steps to Half (4 s), two more to Still (8 s).
         renderer.inject_gpu_ms(Some(10.0));
         let mut renderings = Vec::new();
-        for frame in 0..260_u32 {
+        for frame in 0..520_u32 {
             input.tick = LiveBackgroundTick::new(start + interval * frame, interval, false);
             let rendering = renderer
                 .render(&input, (640, 360), None)
@@ -3108,7 +3109,7 @@ mod tests {
         // one level and the renderer draws again: the targets it dropped at
         // Still are back and status says Half, with no reason.
         renderer.inject_gpu_ms(Some(0.5));
-        let quiet_from = start + Duration::from_secs(5);
+        let quiet_from = start + Duration::from_secs(9);
         let mut resumed = None;
         for second in 0..70_u32 {
             input.tick = LiveBackgroundTick::new(
