@@ -483,6 +483,15 @@ async function shootIdle({ ctx, only, sizes, failed, missing }) {
       await ctx.shoot('livestream-upcoming', 'default')
       await ctx.click('^Setup$', { selector: '[role=tab]' })
     })
+    // A destination's card open (the seeded, signed-out Twitch): its Stream
+    // quality control. The GPUI gallery's destinations-stream-quality.
+    await tryStep('livestream-setup', 'stream-quality', async () => {
+      await ctx.open('streaming')
+      await ctx.click('^Twitch$', { selector: '[aria-expanded]', how: 'click' })
+      await sleep(700)
+      await ctx.shoot('livestream-setup', 'stream-quality')
+      await ctx.click('^Twitch$', { selector: '[aria-expanded]', how: 'click' })
+    })
     for (const [label, screen] of SETTINGS_TABS) {
       await tryStep(screen, 'default', async () => {
         await ctx.open('settings')

@@ -395,6 +395,19 @@ export const SCREENS = Object.freeze([
     sections: ['Scene ⌘3: Layout section']
   },
   {
+    id: 'destinations-stream-quality',
+    title: 'Destinations ⌘6, Twitch open (Stream quality)',
+    deck: 'livestream',
+    open: page('live'),
+    // The row's title opens the card; the same press closes it after each
+    // look, since the page remembers an open card and the next look presses
+    // it again.
+    clicks: [{ names: ['Twitch'] }],
+    close: { click: { name: 'Twitch' } },
+    baseline: { screen: 'livestream-setup', state: 'stream-quality' },
+    sections: ['Destination card', 'Stream quality']
+  },
+  {
     id: 'library-kebab',
     title: 'Library ⌘0, a session ⋯ menu',
     deck: 'pages',
