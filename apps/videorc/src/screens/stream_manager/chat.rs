@@ -38,7 +38,8 @@ use videorc_app_core::stream_manager::removal::{
     remove_from_chat_available,
 };
 use videorc_app_core::stream_manager::send::{
-    CHAT_SEND_MAX_CHARS, draft_length, validate_chat_draft, writable_providers,
+    CHAT_SEND_MAX_CHARS, destination_notes, draft_length, pick_label, picked_send_providers,
+    target_platforms, validate_chat_draft, writable_providers,
 };
 use videorc_app_core::studio::screen_views::talk_show_room_in;
 use videorc_app_core::user_error::{Failure, REMOVE_THE_MESSAGE, toast_user_error};
@@ -47,7 +48,7 @@ use videorc_kit::{
     badge::{Badge, BadgeVariant},
     button::{Button, ButtonSize, ButtonVariant},
     command::{CommandItem, CommandList, InputEvent},
-    dropdown_menu::{DropdownMenu, Menu},
+    dropdown_menu::{DropdownMenu, Menu, MenuItem},
     empty::Empty,
     icon::{IconName, icon},
     input::{Input, InputState},
@@ -156,6 +157,9 @@ pub struct ChatPane {
     completion_index: usize,
     /// Follow the newest message (Electron's pinned follow).
     following: bool,
+    /// The composer's `To:` pick (provider ids); `None` = every writable
+    /// destination.
+    picked: Option<Vec<String>>,
     /// Whether the composer's placeholder is the writable one (`Message,
     /// /marker [title] or /clip…`) or the local-commands one.
     placeholder_writable: Option<bool>,
@@ -307,6 +311,7 @@ impl ChatPane {
             pending_draft: None,
             completion_index: 0,
             following: true,
+            picked: None,
             placeholder_writable: None,
             history: false,
             settle_scroll,
@@ -890,9 +895,16 @@ impl ChatPane {
         cx.notify();
         let studio = self.studio.clone();
         let runtime = self.runtime.clone();
+        // A pick sends to its writable destinations (`destinationIds`).
+        let destination_ids = self.picked.as_ref().map(|picked| {
+            picked_send_providers(&self.providers, Some(picked.as_slice()))
+                .into_iter()
+                .map(|provider| provider.id.clone())
+                .collect::<Vec<_>>()
+        });
         cx.spawn(async move |this, cx| {
             let sent = runtime
-                .spawn(async move { studio.send_chat(&text).await })
+                .spawn(async move { studio.send_chat_to(&text, destination_ids).await })
                 .await;
             let _ = this.update(cx, |pane, cx| {
                 pane.sending = false;
@@ -1229,6 +1241,82 @@ impl Render for ChatPane {
         let filtering = self.filter.filtering();
         let draft = self.draft.read(cx).value().to_string();
         let draft_len = draft_length(draft.trim());
+        // `To:` (`chat-pane.tsx`): with more than one writable destination,
+        // the picker names where a message goes; ticking one off narrows
+        // the send (`destinationIds`).
+        let writable: Vec<_> = writable_providers(&self.providers)
+            .into_iter()
+            .cloned()
+            .collect();
+        let targets = picked_send_providers(&self.providers, self.picked.as_deref());
+        let platforms = target_platforms(&targets);
+        let names: Vec<&str> = platforms.iter().map(|p| platform_label(p)).collect();
+        let to_label = pick_label(
+            self.picked.as_deref(),
+            targets.len(),
+            writable.len(),
+            &names,
+        );
+        let send_to = (writable.len() > 1).then(|| {
+            let this = this.clone();
+            let picked = self.picked.clone();
+            DropdownMenu::new("chat-send-to")
+                .trigger(
+                    Button::new("chat-send-to-trigger")
+                        .label(format!("To: {to_label}"))
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Xs)
+                        .accessibility_label(format!("Send to: {to_label}")),
+                )
+                .menu(move |_, _| {
+                    let mut menu = Menu::new().label("Send to");
+                    for provider in &writable {
+                        let id = provider.id.clone();
+                        let all: Vec<String> = writable.iter().map(|p| p.id.clone()).collect();
+                        let checked = picked.as_ref().is_none_or(|picked| picked.contains(&id));
+                        let label = match provider.account_label.as_deref() {
+                            Some(account) => {
+                                format!("{} · {account}", platform_label(&provider.platform))
+                            }
+                            None => platform_label(&provider.platform).to_string(),
+                        };
+                        let this = this.clone();
+                        menu = menu.checkbox(label, checked, move |on, _, app| {
+                            let id = id.clone();
+                            let all = all.clone();
+                            let _ = this.update(app, |pane, cx| {
+                                let mut next = pane.picked.clone().unwrap_or_else(|| all.clone());
+                                next.retain(|candidate| candidate != &id);
+                                if on {
+                                    next.push(id);
+                                }
+                                pane.picked = (next.len() != all.len()).then_some(next);
+                                cx.notify();
+                            });
+                        });
+                    }
+                    let this = this.clone();
+                    menu.separator()
+                        .item(MenuItem::new("Every writable destination").on_select(
+                            move |_, app| {
+                                let _ = this.update(app, |pane, cx| {
+                                    pane.picked = None;
+                                    cx.notify();
+                                });
+                            },
+                        ))
+                })
+        });
+        // `CommentsDestinationStatus` (composer): only the exceptions, such
+        // as "X read-only".
+        let notes = destination_notes(&self.providers, &platforms);
+        let notes_line = (!notes.is_empty()).then(|| {
+            div()
+                .text_size(px(11.))
+                .text_color(muted)
+                .truncate()
+                .child(notes)
+        });
         let completions = composer_completions(&draft);
         if !completions.is_empty() {
             self.completion_index = self.completion_index.min(completions.len() - 1);
@@ -1382,6 +1470,7 @@ impl Render for ChatPane {
                                 .flex()
                                 .items_center()
                                 .gap(px(6.))
+                                .children(send_to)
                                 .child(
                                     div().flex_1().min_w(px(0.)).child(
                                         Input::new("chat-draft", &self.draft)
@@ -1414,6 +1503,7 @@ impl Render for ChatPane {
                                         }),
                                 ),
                         )
+                        .children(notes_line)
                         .when(!completions.is_empty(), |composer| {
                             let this = this.clone();
                             let rows = completions.clone();

@@ -140,6 +140,17 @@ impl<B: StudioBackend> Studio<B> {
     /// Returns `None` when the draft is empty or over the cap, or when no
     /// livestream session is known yet.
     pub async fn send_chat(&self, text: &str) -> Result<Option<CommentsSendOperation>, RpcError> {
+        self.send_chat_to(text, None).await
+    }
+
+    /// `liveChat.send` to the composer's picked destinations
+    /// (`destinationIds`, as Electron's `To:` picker sends), or to every
+    /// writable one when nothing is picked.
+    pub async fn send_chat_to(
+        &self,
+        text: &str,
+        destination_ids: Option<Vec<String>>,
+    ) -> Result<Option<CommentsSendOperation>, RpcError> {
         let Some(text) = validate_chat_draft(text, CHAT_SEND_MAX_CHARS) else {
             return Ok(None);
         };
@@ -151,11 +162,14 @@ impl<B: StudioBackend> Studio<B> {
             return Ok(None);
         }
         let operation_id = uuid::Uuid::new_v4().to_string();
-        let params = json!({
+        let mut params = json!({
             "operationId": operation_id,
             "sessionId": session_id,
             "text": text,
         });
+        if let Some(ids) = destination_ids.filter(|ids| !ids.is_empty()) {
+            params["destinationIds"] = json!(ids);
+        }
         let value = self.backend.chat_request(SEND_METHOD, params).await?;
         match serde_json::from_value::<CommentsSendOperation>(value) {
             Ok(operation) => Ok(Some(operation)),
