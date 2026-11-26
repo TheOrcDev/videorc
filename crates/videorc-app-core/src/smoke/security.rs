@@ -131,8 +131,6 @@ pub const ELECTRON_SMOKE_COMMAND_NAMES: &[&str] = &[
     "open-backdrop-window",
     "open-layout-tab",
     "open-tab",
-    // Gallery: scroll Studio to the Vertical stream panel.
-    "studio-reveal-vertical-stream",
     "preview-lifecycle-allow-app-quit",
     "preview-lifecycle-attempt-app-quit",
     "preview-surface-sample",
@@ -357,7 +355,6 @@ pub const PACKAGED_SMOKE_COMMAND_NAMES: &[&str] = &[
     "notes-window-save-document",
     "notes-window-set-bounds",
     "open-tab",
-    "studio-reveal-vertical-stream",
     "preview-window-state",
     "preview-window-open",
     "resize-window",

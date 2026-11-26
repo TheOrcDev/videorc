@@ -258,9 +258,9 @@ export const SCREENS = Object.freeze([
     deck: 'shell-studio',
     open: page('studio'),
     seed: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
-    // Electron PNGs land with the next `--screens=show-stage` baseline run
-    // (`rust-ui-baseline.mjs` already shoots closed/open/screens/host-camera-off).
-    baseline: null,
+    // Electron PNGs from the sentinel fresh show-stage overlay
+    // (`~/videorc-gpui-baseline/2026-11-26-final/show-stage/`).
+    baseline: { screen: 'show-stage', state: 'closed' },
     sections: ['Preview stage', 'Show stage']
   },
   {
@@ -274,7 +274,7 @@ export const SCREENS = Object.freeze([
     scroll: { dy: 420 },
     // Clear the seed after the looks so later Studio shots stay Preview.
     after: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
-    baseline: null,
+    baseline: { screen: 'show-stage', state: 'open' },
     sections: ['Show stage']
   },
   {
@@ -285,7 +285,7 @@ export const SCREENS = Object.freeze([
     seed: { command: 'gallery-seed-show-stage', params: { kind: 'screens' } },
     scroll: { dy: 420 },
     after: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
-    baseline: null,
+    baseline: { screen: 'show-stage', state: 'screens' },
     sections: ['Show stage']
   },
   {
@@ -296,7 +296,7 @@ export const SCREENS = Object.freeze([
     seed: { command: 'gallery-seed-show-stage', params: { kind: 'host-camera-off' } },
     scroll: { dy: 420 },
     after: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
-    baseline: null,
+    baseline: { screen: 'show-stage', state: 'host-camera-off' },
     sections: ['Show stage', 'Talk-show room host']
   },
   {

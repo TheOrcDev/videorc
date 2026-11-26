@@ -78,10 +78,14 @@ test('a scrolled screen is its page shot again lower down, picked by the prefix'
     assert.ok(screen.scroll.dy > 0, `${screen.id} scrolls down`)
     assert.ok(screen.open && !screen.toast, `${screen.id} opens a page to scroll`)
     // Avatar below-the-fold shots pair with scroll-N; Vertical stream reuses
-    // the Electron baseline's vertical-leg state.
+    // the Electron baseline's vertical-leg state; Show stage scrolled kinds
+    // pair with the Electron show-stage/{open,screens,host-camera-off} shots.
     assert.ok(
-      /^scroll-\d+$/.test(screen.baseline.state) || screen.baseline.state === 'vertical-leg',
-      `${screen.id} pairs with a scrolled or vertical-leg shot`
+      screen.baseline &&
+        (/^scroll-\d+$/.test(screen.baseline.state) ||
+          screen.baseline.state === 'vertical-leg' ||
+          screen.baseline.screen === 'show-stage'),
+      `${screen.id} pairs with a scrolled, vertical-leg, or show-stage shot`
     )
   }
   assert.equal(
