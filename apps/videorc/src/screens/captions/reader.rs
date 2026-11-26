@@ -149,6 +149,20 @@ struct Open {
 
 impl Global for Open {}
 
+/// The open reader's window, for the smoke commands (bounds, raise).
+pub fn handle(cx: &App) -> Option<gpui::AnyWindowHandle> {
+    cx.try_global::<Open>()
+        .and_then(|open| open.window)
+        .map(Into::into)
+}
+
+/// Closes the reader if it is open (the smoke's `captions-window-close`).
+pub fn close(cx: &mut App) {
+    if let Some(window) = cx.try_global::<Open>().and_then(|open| open.window) {
+        let _ = window.update(cx, |_, window, _| window.remove_window());
+    }
+}
+
 /// Whether the reader is open, for the page's Open/Close button.
 pub fn is_open(cx: &App) -> bool {
     cx.try_global::<Open>()
