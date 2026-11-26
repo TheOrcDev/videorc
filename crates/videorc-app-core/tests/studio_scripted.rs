@@ -521,10 +521,16 @@ impl StudioBackend for Scripted {
                 }
                 script.scene_revision += 1;
                 script.backend_layout = Some(params["layout"].clone());
+                // The committed scene wears the request's background, as the
+                // backend's answer does.
+                let mut committed = serde_json::to_value(scene()).unwrap();
+                if let Some(background) = params.get("background").filter(|bg| bg.is_object()) {
+                    committed["background"] = background.clone();
+                }
                 Ok(json!({
                     "intentId": params["intentId"],
                     "sceneRevision": script.scene_revision,
-                    "scene": serde_json::to_value(scene()).unwrap(),
+                    "scene": committed,
                     "compositorStatus": {"sceneLayout": params["layout"]},
                 }))
             }
@@ -3395,6 +3401,55 @@ async fn a_disarmed_clips_ring_does_not_attach_to_record_even_with_the_saved_swi
             .replay
             .is_none()
     );
+}
+
+/// Owner report 2026-11-26: the ring's start sent no scene, so the backend
+/// rebuilt one from the capture config with no background, and every ring
+/// start (at launch, after each Stop) took a live background and its stage
+/// margin off the Preview. It carries the committed scene with the working
+/// background, as a Record start does and Electron's ring did.
+#[tokio::test]
+async fn the_ring_starts_with_the_working_background() {
+    let (backend, studio, _) = clips_studio(capture_config_with_camera()).await;
+    let background = json!({
+        "assetId": "live-silk-satin",
+        "managedAssetPath": "videorc-asset://background/live-silk-satin.webp",
+        "fit": "fill",
+        "scale": 100,
+        "offsetX": 0,
+        "offsetY": 0,
+        "blurPx": 0,
+        "dimPercent": 0,
+        "saturationPercent": 100,
+        "vignettePercent": 0,
+        "visibilityPercent": 20,
+        "live": {"id": "silk", "look": "satin", "motion": "calm"}
+    });
+    assert!(studio.set_working_background(Some(&background)).await);
+    // The ring waits for the background's transaction and its proof (#1640).
+    settled(&studio).await;
+    for _ in 0..40 {
+        if backend.count("session.start") > 0 {
+            break;
+        }
+        studio.clips_due().await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(backend.count("session.start"), 1);
+    let script = backend.script.lock().unwrap();
+    let started = &script.started_with[0];
+    assert!(started.replay.is_some(), "the ring's buffer-only start");
+    let scene = started
+        .scene
+        .as_ref()
+        .expect("the ring's start carries the scene");
+    let sent = scene
+        .background
+        .as_ref()
+        .expect("with the working background");
+    assert_eq!(sent.asset_id, "live-silk-satin");
+    assert_eq!(sent.visibility_percent, 20.0);
+    assert!(sent.live.is_some(), "the live background rides along");
 }
 
 /// L6's preview-check-invisible on c54b5bb6d: with no screen preview
