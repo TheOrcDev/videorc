@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { extname, join, resolve } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import {
   captionsPlatformUnavailableReason,
   captionsSkipLine
@@ -15,6 +15,7 @@ import {
 import { startFakeCaptionService } from './lib/fake-caption-service.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { reloadKeepingSeedJs, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
+import { createUiDriver } from './lib/ui-driver.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 // Plan 077 gate: live captions on BOTH legs of a dual-orientation stream.
@@ -29,6 +30,7 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 // stream (which must be the portrait leg) and the recording all carry the
 // High Contrast caption plate, and no second captioned copy is rendered.
 
+const gpuiApp = smokeAppIsGpui()
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 240_000)
 const baselineMs = Number(process.env.VIDEORC_CAPTIONS_DUAL_BASELINE_MS ?? 1_800)
 const captionCaptureMs = Number(process.env.VIDEORC_CAPTIONS_DUAL_CAPTURE_MS ?? 3_000)
@@ -41,7 +43,7 @@ const outputDirectory = resolve(
     join(tmpdir(), `videorc-captions-dual-orientation-${Date.now()}`)
 )
 const stateRoot = join(outputDirectory, 'app-state')
-const appDataDir = join(stateRoot, 'app-data')
+const appDataDir = join(stateRoot, gpuiApp ? 'user-data' : 'app-data')
 const reportPath = join(outputDirectory, 'captions-dual-orientation-artifact.json')
 const smokeSessionToken = 'captions-dual-session-token'
 const smokeRealtimeToken = 'captions-dual-realtime-token'
@@ -118,9 +120,11 @@ try {
   })
   backend = await connectBackend(launched.connections['backend-ready'], timeoutMs)
   const smoke = launched.connections['preview-motion-ready']
-  captionsUnavailableReason = await captionsPlatformUnavailableReason(
-    async (code) => (await smokeCommand(smoke, 'eval-js', { code }))?.result
-  )
+  captionsUnavailableReason = gpuiApp
+    ? await gpuiCaptionsPlatformReason(smoke)
+    : await captionsPlatformUnavailableReason(
+        async (code) => (await smokeCommand(smoke, 'eval-js', { code }))?.result
+      )
   if (captionsUnavailableReason) throw new CaptionsPlatformSkip(captionsUnavailableReason)
 
   fake.state.realtimeAvailable = false
@@ -387,6 +391,39 @@ function sessionParams(outputDirectoryCapability) {
 }
 
 async function seedRendererDualProfile(smoke) {
+  if (gpuiApp) {
+    await smokeCommand(smoke, 'studio-capture-configure', {
+      config: {
+        recordEnabled: true,
+        streamEnabled: true,
+        video,
+        streaming: streamingSettings(),
+        captions: captionsProfile
+      }
+    })
+    const deadline = Date.now() + timeoutMs
+    let stored
+    while (Date.now() < deadline) {
+      const snapshot = await request(backend, timeoutMs, 'ui.settings.get', {
+        keys: ['videorc.captureConfig']
+      })
+      const raw = snapshot.entries?.['videorc.captureConfig']
+      stored = typeof raw === 'string' ? JSON.parse(raw) : raw
+      if (
+        stored?.captions?.burnTarget === 'stream' &&
+        stored.video?.width === 1280 &&
+        stored.streaming?.targets?.some(
+          (target) =>
+            target.outputOrientation === 'vertical' &&
+            stored.streaming.enabledTargetIds?.includes(target.id)
+        )
+      )
+        return
+      await sleep(100)
+    }
+    throw new Error(`Studio did not keep the dual-orientation profile: ${JSON.stringify(stored)}`)
+  }
+
   // The renderer derives its caption rasters from the saved capture config,
   // exactly as for a user-started session, so it must see the same shape:
   // record + stream, a horizontal canvas, and an armed vertical destination.
@@ -446,6 +483,15 @@ async function seedRendererDualProfile(smoke) {
 }
 
 async function hydrateRendererActiveSession(smoke) {
+  if (gpuiApp) {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if ((await smokeCommand(smoke, 'studio-state')).status?.state === 'recording') return
+      await sleep(100)
+    }
+    throw new Error('Studio did not hydrate record+stream.')
+  }
+
   const hydrated = await smokeCommand(smoke, 'eval-js', {
     code: `
       if (typeof window.__videorcSmokeHydrateRecordingStatus !== 'function') {
@@ -667,4 +713,17 @@ function waitFor(predicate, deadlineMs, label) {
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
+}
+
+async function gpuiCaptionsPlatformReason(smoke) {
+  const ui = createUiDriver(smoke)
+  await ui.openTab('captions', { waitFor: { id: 'captions-enabled' } })
+  try {
+    await ui.waitFor({ id: 'captions-platform-unavailable' }, { timeoutMs: 300 })
+    return await ui.readText({ id: 'captions-platform-unavailable' })
+  } catch (error) {
+    if (String(error.message).startsWith('Timed out waiting for id captions-platform-unavailable'))
+      return null
+    throw error
+  }
 }
