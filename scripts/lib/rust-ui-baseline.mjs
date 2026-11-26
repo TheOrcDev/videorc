@@ -672,17 +672,35 @@ async function shootIdleStates({ ctx, tryStep, only, missing }) {
     await setVerticalLeg(ctx, false)
   })
   // Plan 260 C4: Show stage gallery baselines (synthetic room; no LiveKit).
-  for (const [state, kind] of [
-    ['closed', 'closed'],
-    ['open', 'open'],
-    ['screens', 'screens'],
-    ['host-camera-off', 'host-camera-off']
+  // open / screens / host-camera-off match the gallery's `scroll: { dy: 420 }`
+  // so Layout / Screens / People sit under the Program well on both sides.
+  for (const [state, kind, scrollDy] of [
+    ['closed', 'closed', 0],
+    ['open', 'open', 420],
+    ['screens', 'screens', 420],
+    ['host-camera-off', 'host-camera-off', 420]
   ]) {
     await tryStep('show-stage', state, async () => {
       await ctx.dismiss()
       await seedShowStage(ctx, kind)
       await ctx.open('studio')
       await sleep(800)
+      if (scrollDy > 0) {
+        await ctx.js(
+          `const well = await waitFor(
+             () => document.querySelector('[data-testid=show-stage-well],[data-testid=show-stage-root],[data-testid=preview-replaced-by-show-stage]'),
+             'the Show stage'
+           );
+           let scroller = well.parentElement;
+           while (scroller && !(scroller.scrollHeight > scroller.clientHeight && /auto|scroll/.test(getComputedStyle(scroller).overflowY))) {
+             scroller = scroller.parentElement;
+           }
+           if (!scroller) throw new Error('no Show stage scroller');
+           scroller.scrollTop = ${scrollDy};
+           await sleep(600);
+           return scroller.scrollTop`
+        )
+      }
       await ctx.shoot('show-stage', state)
       await seedShowStage(ctx, null)
     })
