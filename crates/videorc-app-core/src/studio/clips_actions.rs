@@ -553,11 +553,20 @@ impl<B: StudioBackend> Studio<B> {
                     };
                     match params {
                         Err(message) => Err((None, message)),
-                        Ok(params) => self
-                            .backend
-                            .session_start_into(params, folder)
-                            .await
-                            .map_err(|error| (Some(error.code), error.message)),
+                        Ok(params) => {
+                            // As a recording's start does (`startSession`):
+                            // the screen capture runs first, since the
+                            // backend's session takes it over and refuses a
+                            // screen that produced no frames ("the screen
+                            // preview source(s) produced no frames"). Electron's
+                            // renderer has it running already, from idle.
+                            self.prepare_session_capture(&params.sources, &params.output.video)
+                                .await;
+                            self.backend
+                                .session_start_into(params, folder)
+                                .await
+                                .map_err(|error| (Some(error.code), error.message))
+                        }
                     }
                 }
             };
