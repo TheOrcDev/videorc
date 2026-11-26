@@ -26,6 +26,15 @@ use crate::{
 
 /// The one page breakpoint: two config columns from here.
 pub const CONFIG_GRID_TWO_COLUMNS: f32 = 940.0;
+/// The shell's sidebar (`w-52`): the page is the window less it, the width
+/// Electron's `@container/page` queries.
+pub const SHELL_SIDEBAR: f32 = 208.0;
+
+/// The page's width: the window less the shell's sidebar, known before any
+/// layout, so a page's breakpoint never waits for a measured frame.
+pub fn page_width(window: &Window) -> f32 {
+    f32::from(window.viewport_size().width) - SHELL_SIDEBAR
+}
 /// The gallery's gap (`gap-3`).
 pub const GALLERY_GAP: f32 = 12.0;
 
@@ -44,6 +53,9 @@ fn record_width(state: &Entity<f32>, bounds: Bounds<Pixels>, window: &mut Window
     let width = f32::from(bounds.size.width);
     if (state.read(cx) - width).abs() > 0.5 {
         state.update(cx, |w, _| *w = width);
+        // Notify the view that drew it as well: a next-frame callback alone
+        // can wait while the window is inactive and frame-limited.
+        cx.notify(window.current_view());
         // `refresh` is a no-op while the window draws, and prepaint
         // is drawing: ask for it from the next frame, where it
         // re-renders every view with the new width.
@@ -183,10 +195,12 @@ impl ParentElement for ConfigGrid {
 impl RenderOnce for ConfigGrid {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
-        let width = measured_width(&self.id, window, cx);
+        // The page's width, from the window: a measured width chained
+        // through a second measured layout (Chat's segments inside it) kept
+        // the first frame's choice.
         let two = self
             .two_columns
-            .unwrap_or_else(|| *width.read(cx) >= CONFIG_GRID_TWO_COLUMNS);
+            .unwrap_or_else(|| page_width(window) >= CONFIG_GRID_TWO_COLUMNS);
         let scroll = self.scroll.filter(|_| two);
         // A column that scrolls on its own needs the grid to have a height.
         let fill = self.pair || scroll.is_some();
@@ -201,8 +215,7 @@ impl RenderOnce for ConfigGrid {
             .w_full()
             .flex()
             .flex_col()
-            .when(fill, |grid| grid.flex_1().min_h(px(0.0)))
-            .on_prepaint(move |bounds, window, cx| record_width(&width, bounds, window, cx));
+            .when(fill, |grid| grid.flex_1().min_h(px(0.0)));
         if !two {
             return grid.children(children);
         }
