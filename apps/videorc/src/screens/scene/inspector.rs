@@ -141,7 +141,6 @@ impl ScenePage {
                     copy::SCREEN_SIZE,
                     reason.is_some(),
                     reason,
-                    t,
                     cx,
                 ))
                 .child(meta_line(inspector_copy::SCREEN_SIZE_HINT, t))
@@ -207,7 +206,7 @@ impl ScenePage {
                     .flex()
                     .flex_col()
                     .gap(px(4.))
-                    .child(self.knob_row(Knob::ScreenZoom, copy::ZOOM, !enabled, reason, t, cx))
+                    .child(self.knob_row(Knob::ScreenZoom, copy::ZOOM, !enabled, reason, cx))
                     .child(meta_line(inspector_copy::SCREEN_ZOOM_HINT, t)),
             );
         }
@@ -289,7 +288,6 @@ impl ScenePage {
     }
 
     /// P553, P554: a Freeform screen's crop.
-    // TODO(kit): ResetIcon (ArrowCounterClockwise) on Reset crop.
     fn crop_fields(
         &self,
         enabled: bool,
@@ -329,6 +327,7 @@ impl ScenePage {
             )
             .child(
                 Button::new("scene-crop-reset")
+                    .icon(IconName::ArrowCounterClockwise)
                     .label(copy::RESET_CROP)
                     .size(ButtonSize::Xs)
                     .variant(ButtonVariant::Ghost)

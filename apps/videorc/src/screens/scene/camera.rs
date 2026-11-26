@@ -6,9 +6,7 @@
 
 use std::rc::Rc;
 
-use gpui::{
-    AnyElement, Context, KeyDownEvent, SharedString, Window, div, point, prelude::*, px, relative,
-};
+use gpui::{AnyElement, Context, KeyDownEvent, SharedString, Window, div, point, prelude::*, px};
 use serde_json::json;
 use videorc_app_core::editor::inspector::{
     InspectorSelection, InspectorView, camera_settings_defaults, camera_shape_patch,
@@ -16,10 +14,9 @@ use videorc_app_core::editor::inspector::{
 };
 use videorc_app_core::nav::PageId;
 use videorc_app_core::studio::camera_background_view::{
-    BLUR_MARKS, BLUR_MAX_PCT, BLUR_MIN_PCT, BLUR_STRENGTH_LABEL, BackgroundSectionView,
-    CHOOSE_IMAGE_DESCRIPTION, CHOOSE_IMAGE_EMPTY, CHOOSE_IMAGE_LABEL, CHOOSE_IMAGE_TITLE, Choice,
-    ChoiceId, DONE_LABEL, KEY_EDGES, OPEN_IMAGES_LABEL, background_for_choice, key_edges_of,
-    key_edges_set,
+    BLUR_STRENGTH_LABEL, BackgroundSectionView, CHOOSE_IMAGE_DESCRIPTION, CHOOSE_IMAGE_EMPTY,
+    CHOOSE_IMAGE_LABEL, CHOOSE_IMAGE_TITLE, Choice, ChoiceId, DONE_LABEL, KEY_EDGES,
+    OPEN_IMAGES_LABEL, background_for_choice, key_edges_of, key_edges_set,
 };
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::chrome::focus_ring;
@@ -148,8 +145,6 @@ impl ScenePage {
         let mut sections = Vec::new();
 
         // P544, P556: the name section.
-        // TODO(kit): ResetIcon (ArrowCounterClockwise) on Reset camera
-        // settings.
         sections.push(
             PanelSection::new("scene-camera-section")
                 .icon(adjust_icon(t))
@@ -157,6 +152,7 @@ impl ScenePage {
                 .children(self.visibility_row(view, cx))
                 .child(
                     Button::new("scene-camera-reset")
+                        .icon(IconName::ArrowCounterClockwise)
                         .label(inspector_copy::CAMERA_RESET_LABEL)
                         .size(ButtonSize::Xs)
                         .variant(ButtonVariant::Ghost)
@@ -255,7 +251,6 @@ impl ScenePage {
                     copy::CORNER_RADIUS,
                     false,
                     None,
-                    t,
                     cx,
                 ));
             }
@@ -275,8 +270,7 @@ impl ScenePage {
                     .children(crops.then(|| meta_line(copy::ASPECT_CROPS, t)));
             }
             if rows.margin.is_some() {
-                section =
-                    section.child(self.knob_row(Knob::Margin, copy::MARGIN, false, None, t, cx));
+                section = section.child(self.knob_row(Knob::Margin, copy::MARGIN, false, None, cx));
             }
             if let Some(fields) = &placement.fields {
                 section = section.child(self.transform_fields(fields, t, cx));
@@ -321,9 +315,9 @@ impl ScenePage {
                                 }),
                         ),
                 )
-                .child(self.knob_row(Knob::CameraZoom, copy::ZOOM, false, None, t, cx))
-                .child(self.knob_row(Knob::PanX, copy::PAN_X, false, None, t, cx))
-                .child(self.knob_row(Knob::PanY, copy::PAN_Y, false, None, t, cx));
+                .child(self.knob_row(Knob::CameraZoom, copy::ZOOM, false, None, cx))
+                .child(self.knob_row(Knob::PanX, copy::PAN_X, false, None, cx))
+                .child(self.knob_row(Knob::PanY, copy::PAN_Y, false, None, cx));
             sections.push(section.into_any_element());
 
             let disabled = lens.look_reason.is_some();
@@ -346,7 +340,6 @@ impl ScenePage {
                         copy::BRIGHTNESS,
                         disabled,
                         lens.look_reason,
-                        t,
                         cx,
                     ))
                     .child(self.knob_row(
@@ -354,7 +347,6 @@ impl ScenePage {
                         copy::CONTRAST,
                         disabled,
                         lens.look_reason,
-                        t,
                         cx,
                     ))
                     .child(self.knob_row(
@@ -362,7 +354,6 @@ impl ScenePage {
                         copy::SATURATION,
                         disabled,
                         lens.look_reason,
-                        t,
                         cx,
                     ))
                     .into_any_element(),
@@ -538,33 +529,13 @@ impl ScenePage {
 
         // P581: Blur strength, its marks under the track.
         if view.blur_pct.is_some() {
-            let span = (BLUR_MAX_PCT - BLUR_MIN_PCT) as f32;
-            let mut marks = div().relative().h(px(16.)).w_full();
-            for (at, word) in BLUR_MARKS {
-                marks = marks.child(
-                    div()
-                        .absolute()
-                        .left(relative((at - BLUR_MIN_PCT) as f32 / span))
-                        .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
-                        .child(word),
-                );
-            }
-            section = section.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .child(self.knob_row(
-                        Knob::BlurStrength,
-                        BLUR_STRENGTH_LABEL,
-                        false,
-                        None,
-                        t,
-                        cx,
-                    ))
-                    .child(marks),
-            );
+            section = section.child(self.knob_row(
+                Knob::BlurStrength,
+                BLUR_STRENGTH_LABEL,
+                false,
+                None,
+                cx,
+            ));
         }
 
         // P582–P584: a screen key's tuning and Hide edges.
@@ -580,9 +551,9 @@ impl ScenePage {
                 ));
             }
             section = section
-                .child(self.knob_row(Knob::Similarity, copy::SIMILARITY, false, None, t, cx))
-                .child(self.knob_row(Knob::Smoothness, copy::SMOOTHNESS, false, None, t, cx))
-                .child(self.knob_row(Knob::Spill, copy::SPILL_REMOVAL, false, None, t, cx))
+                .child(self.knob_row(Knob::Similarity, copy::SIMILARITY, false, None, cx))
+                .child(self.knob_row(Knob::Smoothness, copy::SMOOTHNESS, false, None, cx))
+                .child(self.knob_row(Knob::Spill, copy::SPILL_REMOVAL, false, None, cx))
                 .child(
                     div()
                         .id("scene-key-edges")
@@ -592,9 +563,9 @@ impl ScenePage {
                         .child(SectionLabel::new(copy::HIDE_EDGES))
                         .child(edges)
                         .child(meta_line(copy::HIDE_EDGES_HELP, t))
-                        // TODO(kit): ResetIcon (ArrowCounterClockwise).
                         .children(key_edges_set(&screen.hide_edges).then(|| {
                             Button::new("scene-key-edges-reset")
+                                .icon(IconName::ArrowCounterClockwise)
                                 .label(copy::SHOW_ALL_EDGES)
                                 .size(ButtonSize::Xs)
                                 .variant(ButtonVariant::Ghost)

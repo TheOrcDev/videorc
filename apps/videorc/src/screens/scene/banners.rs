@@ -58,7 +58,6 @@ fn labelled(label: &'static str, body: impl IntoElement) -> gpui::Div {
 
 impl ScenePage {
     /// P589–P595: the overlay item's section.
-    // TODO(kit): CaptionsIcon on the Live captions row.
     pub(super) fn overlay_section(
         &self,
         view: &InspectorView,
@@ -94,6 +93,11 @@ impl ScenePage {
                             inspector_copy::LIVE_CAPTIONS,
                             summary,
                         )
+                        .icon(icon(
+                            IconName::ClosedCaptioning,
+                            16.,
+                            hsla(t.muted_foreground),
+                        ))
                         .on_navigate(cx.listener(|this, _, _, cx| {
                             this.navigate(SceneNavigate::Page(PageId::Captions), cx)
                         })),
@@ -235,7 +239,7 @@ impl ScenePage {
         // HTML overlays' statuses.
 
         // P605: Opacity, one update on release.
-        section = section.child(self.knob_row(Knob::Opacity, copy::OPACITY, blocked, None, t, cx));
+        section = section.child(self.knob_row(Knob::Opacity, copy::OPACITY, blocked, None, cx));
 
         // P606: Appears in, the switch before its words.
         let mut appears = div().flex().flex_wrap().gap_x(px(24.)).gap_y(px(8.));
@@ -567,11 +571,15 @@ impl ScenePage {
             .children(checker);
         match path {
             Some(path) => frame
+                // `[&_img]:p-0.5` inside the 36 x 20 box: the image gets the
+                // 32 x 16 it may fill and is fitted whole (`object-contain`),
+                // never scaled to the width and cut at the bottom.
                 .child(
-                    div()
-                        .size_full()
-                        .p(px(2.))
-                        .child(img(path).size_full().object_fit(ObjectFit::Contain)),
+                    img(path)
+                        .w(px(36. - 4.))
+                        .h(px(20. - 4.))
+                        .flex_none()
+                        .object_fit(ObjectFit::Contain),
                 )
                 .into_any_element(),
             None => frame

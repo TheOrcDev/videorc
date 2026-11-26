@@ -1,10 +1,11 @@
 //! The inspector's stateful controls: one `SliderState` per slider (the
-//! `PowerSlider`s and the banner's Opacity) and one `InputState` per typed
-//! number (Position and size, Crop, Hide edges). The page owns them; each
-//! follows the editor model while the streamer isn't moving or typing in
-//! it, and its release, Enter or blur commits through the Studio.
+//! `PowerSlider`s and the banner's Opacity), one `InputState` per
+//! `PowerSlider`'s typed number and one per typed percent (Position and
+//! size, Crop, Hide edges). The page owns them; each follows the editor
+//! model while the streamer isn't moving or typing in it, and its release,
+//! reset, Enter or blur commits through the Studio.
 
-use gpui::{AnyElement, App, Context, Entity, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, px};
 use serde_json::{Map, Value, json};
 use tokio::sync::oneshot;
 use videorc_app_core::editor::inspector::{
@@ -16,14 +17,15 @@ use videorc_app_core::editor::inspector::{
 use videorc_app_core::editor::stage::{StageCrop, StageRect, stage_crop_of};
 use videorc_app_core::studio::camera_background::STRONG_BLUR_PCT;
 use videorc_app_core::studio::camera_background_view::{
-    BLUR_MAX_PCT, BLUR_MIN_PCT, KEY_EDGES, background_with_key, key_edges_of, key_edges_patch,
-    key_of,
+    BLUR_MARKS, BLUR_MAX_PCT, BLUR_MIN_PCT, KEY_EDGES, background_with_key, key_edges_of,
+    key_edges_patch, key_of,
 };
 use videorc_kit::command::InputEvent;
 use videorc_kit::dialog::DialogHandle;
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::label::Label;
-use videorc_kit::slider::{Slider, SliderEvent, SliderState};
+use videorc_kit::power_slider::{PowerSlider, PowerSliderMark, clamp_to_range};
+use videorc_kit::slider::{SliderEvent, SliderState};
 use videorc_kit::theme::{TypeScale, hsla};
 use videorc_kit::tokens::{Theme, text};
 
@@ -104,6 +106,40 @@ impl Knob {
             Knob::Opacity => (20., 100., 1., 100.),
         }
     }
+
+    /// The unit after the value (each `PowerSlider`'s `suffix`).
+    fn suffix(self) -> &'static str {
+        match self {
+            Knob::Margin => "px",
+            Knob::PanX | Knob::PanY | Knob::Brightness | Knob::Contrast | Knob::Saturation => "",
+            _ => "%",
+        }
+    }
+
+    /// A value either side of zero (`bipolar`).
+    fn bipolar(self) -> bool {
+        matches!(
+            self,
+            Knob::PanX | Knob::PanY | Knob::Brightness | Knob::Contrast | Knob::Saturation
+        )
+    }
+
+    /// The reset's value (`defaultValue`), where Electron offers one.
+    fn reset_to(self) -> Option<f32> {
+        match self {
+            Knob::ScreenSize => Some(SCREEN_SIZE_DEFAULT as f32),
+            Knob::ScreenZoom => Some(SCREEN_ZOOM_MIN as f32),
+            Knob::Brightness | Knob::Contrast | Knob::Saturation => Some(0.),
+            Knob::BlurStrength => Some(STRONG_BLUR_PCT as f32),
+            _ => None,
+        }
+    }
+
+    /// The typed number in place of the readout (`numericInput`): every
+    /// `PowerSlider`; the banner's Opacity is a `ParameterSlider`.
+    fn typed(self) -> bool {
+        self != Knob::Opacity
+    }
 }
 
 /// Every typed number on the inspector, by its place in the core's lists.
@@ -141,6 +177,10 @@ pub(super) struct Controls {
     live: Option<Knob>,
     /// The last value a send-on-every-change slider sent.
     last_sent: Option<(Knob, i64)>,
+    /// Each `PowerSlider`'s typed number.
+    knob_inputs: Vec<(Knob, Entity<InputState>)>,
+    /// The slider whose number the streamer typed in since its last commit.
+    typing: Option<Knob>,
     inputs: Vec<(Field, Entity<InputState>)>,
     /// The field the streamer typed in since its last commit.
     editing: Option<Field>,
@@ -175,6 +215,19 @@ impl Controls {
             .detach();
             knobs.push((knob, state));
         }
+        let mut knob_inputs = Vec::new();
+        for knob in Knob::ALL.into_iter().filter(|knob| knob.typed()) {
+            let state = cx.new(|cx| InputState::new(window, cx));
+            cx.subscribe_in(
+                &state,
+                window,
+                move |page, input, event: &InputEvent, window, cx| {
+                    page.knob_input_event(knob, input, event, window, cx)
+                },
+            )
+            .detach();
+            knob_inputs.push((knob, state));
+        }
         let mut inputs = Vec::new();
         for field in Field::ALL {
             let state = cx.new(|cx| InputState::new(window, cx));
@@ -192,6 +245,8 @@ impl Controls {
             knobs,
             live: None,
             last_sent: None,
+            knob_inputs,
+            typing: None,
             inputs,
             editing: None,
             look_in_flight: false,
@@ -210,6 +265,14 @@ impl Controls {
             .find(|(each, _)| *each == knob)
             .expect("every knob has a slider")
             .1
+    }
+
+    /// A `PowerSlider`'s typed number (none for the banner's Opacity).
+    fn knob_input(&self, knob: Knob) -> Option<&Entity<InputState>> {
+        self.knob_inputs
+            .iter()
+            .find(|(each, _)| *each == knob)
+            .map(|(_, state)| state)
     }
 
     fn input(&self, field: Field) -> &Entity<InputState> {
@@ -302,6 +365,18 @@ impl ScenePage {
             };
             state.update(cx, |state, cx| {
                 if (state.value().end() - target).abs() >= 0.5 {
+                    state.set_value(target, window, cx);
+                }
+            });
+        }
+        // A typed number shows its slider, a drag's value too.
+        for (knob, state) in &self.controls.knob_inputs {
+            if self.controls.typing == Some(*knob) {
+                continue;
+            }
+            let target = rounded(self.controls.knob(*knob).read(cx).value().end()).to_string();
+            state.update(cx, |state, cx| {
+                if state.value().to_string() != target {
                     state.set_value(target, window, cx);
                 }
             });
@@ -511,6 +586,66 @@ impl ScenePage {
         }
     }
 
+    /// A `PowerSlider`'s typed number: Enter or blur commits it.
+    fn knob_input_event(
+        &mut self,
+        knob: Knob,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            // `set_value` stays quiet, so a change is the streamer's.
+            InputEvent::Change => self.controls.typing = Some(knob),
+            InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                if self.controls.typing == Some(knob) {
+                    self.controls.typing = None;
+                    let typed = input.read(cx).value().to_string();
+                    self.commit_knob_text(knob, &typed, window, cx);
+                }
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    /// `commitNumeric`: a number, clamped and snapped to the slider's
+    /// range, moves the slider and commits as a release does. Nothing when
+    /// it doesn't parse or says what is already there.
+    fn commit_knob_text(
+        &mut self,
+        knob: Knob,
+        typed: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(parsed) = typed.trim().parse::<f32>() else {
+            return;
+        };
+        if !parsed.is_finite() {
+            return;
+        }
+        let (min, max, step, _) = knob.range();
+        let value = clamp_to_range(parsed, min, max, step);
+        let state = self.controls.knob(knob).clone();
+        if rounded(state.read(cx).value().end()) == rounded(value) {
+            return;
+        }
+        state.update(cx, |state, cx| state.set_value(value, window, cx));
+        self.knob_moved(knob, rounded(value), true, cx);
+        self.controls.last_sent = None;
+    }
+
+    /// A `PowerSlider`'s reset (its button or a double-click on the track):
+    /// the kit has moved the slider to `value`; it commits as a release.
+    fn knob_reset(&mut self, knob: Knob, value: f32, cx: &mut Context<Self>) {
+        self.controls.live = None;
+        self.knob_moved(knob, rounded(value), true, cx);
+        self.controls.last_sent = None;
+        cx.notify();
+    }
+
     /// Enter or blur on a typed number (`commitField`): nothing when it
     /// doesn't parse, is off, or says what is already there.
     fn commit_field(&mut self, field: Field, typed: &str, cx: &mut Context<Self>) {
@@ -713,58 +848,68 @@ impl ScenePage {
 
     // ── Drawing ────────────────────────────────────────────────────────
 
-    /// A `PowerSlider`: its label and value over the track, and the reason
-    /// it waits under it.
-    // TODO(kit): PowerSlider's numeric input, its Reset button and the
-    // double-click reset; the value shows as words until then.
+    /// A `PowerSlider`: its label and typed number over the track, the
+    /// reset where Electron has a default, Blur strength's marks, and the
+    /// reason it waits under it. The banner's Opacity (a `ParameterSlider`)
+    /// shows its value as words.
     pub(super) fn knob_row(
         &self,
         knob: Knob,
         label: &'static str,
         disabled: bool,
-        line: Option<&'static str>,
-        t: &Theme,
-        cx: &App,
+        reason: Option<&'static str>,
+        cx: &Context<Self>,
     ) -> AnyElement {
-        let state = self.controls.knob(knob);
-        let value = rounded(state.read(cx).value().end());
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .min_w_0()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.))
-                    .child(Label::new(label))
-                    .child(
-                        div()
-                            .type_scale(text::META)
-                            .text_color(hsla(t.muted_foreground))
-                            .child(value.to_string()),
-                    ),
-            )
-            .child(
-                Slider::new(state)
-                    .disabled(disabled)
-                    .accessibility_label(label),
-            )
-            .children(line.map(|line| {
-                div()
-                    .type_scale(text::META)
-                    .text_color(hsla(t.muted_foreground))
-                    .child(line)
-            }))
-            .into_any_element()
+        let id = format!("scene-knob-{knob:?}");
+        let (_, _, step, _) = knob.range();
+        let mut slider = PowerSlider::new(
+            SharedString::from(id.clone()),
+            label,
+            self.controls.knob(knob),
+        )
+        .step(step)
+        .suffix(knob.suffix())
+        .bipolar(knob.bipolar())
+        .disabled(disabled);
+        if let Some(reason) = reason {
+            slider = slider.disabled_reason(reason);
+        }
+        if let Some(default) = knob.reset_to() {
+            let page = cx.entity().downgrade();
+            slider = slider.default_value(default).on_reset(move |value, _, cx| {
+                let _ = page.update(cx, |page, cx| page.knob_reset(knob, value, cx));
+            });
+        }
+        if knob == Knob::BlurStrength {
+            slider = slider.marks(
+                BLUR_MARKS
+                    .iter()
+                    .map(|(at, word)| PowerSliderMark {
+                        value: *at as f32,
+                        label: Some(SharedString::from(*word)),
+                    })
+                    .collect(),
+            );
+        }
+        if let Some(input) = self.controls.knob_input(knob) {
+            slider = slider.value_slot(
+                div().w(px(80.)).child(
+                    Input::new(SharedString::from(format!("{id}-value")), input)
+                        // Electron's number box is `text-right`.
+                        .align_right(true)
+                        .disabled(disabled)
+                        .revert_on_escape(true)
+                        .accessibility_label(format!("{label} value")),
+                ),
+            );
+        }
+        slider.into_any_element()
     }
 
     /// One typed percent: its label over the field and the `%` after it.
-    // TODO(kit): InputGroup with an inline-end addon. P549: Escape reverts
-    // the draft to what the field held when it took focus (kit
-    // `Input::revert_on_escape`).
+    // TODO(kit): `InputGroup` with an inline-end `%` addon, once it takes
+    // `revert_on_escape` (P549: Escape reverts the draft to what the field
+    // held when it took focus; only the plain `Input` has it today).
     pub(super) fn percent_field(
         &self,
         field: Field,
