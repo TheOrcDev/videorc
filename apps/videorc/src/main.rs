@@ -418,6 +418,14 @@ fn main() -> Result<()> {
         logger.clone(),
     );
     studio.set_clips_media_access(Some(permissions.snapshot()));
+    // Electron's `replayAutoPreviewStarts`: the Clips ring waits for the
+    // screen and camera previews' first frames only when the app starts
+    // those previews itself. Electron's renderer does (`preview.screen.start`
+    // at idle); this app shows the program and sends `preview.screen.start`
+    // only before a session, so a ring that waited would wait for good
+    // ("Waiting for the screen preview to start."), as in Electron with
+    // VIDEORC_DISABLE_AUTO_PREVIEW=1.
+    studio.set_clips_auto_preview(false);
     // The bundled pictures, registered with the backend at every READY.
     app::bundled_backgrounds::install(runtime.handle(), supervisor.state(), logger.clone());
     // Videorc Camera's extension: activated when the backend's switch is on.
