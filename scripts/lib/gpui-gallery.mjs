@@ -395,16 +395,6 @@ export const SCREENS = Object.freeze([
     sections: ['Scene ⌘3: Layout section']
   },
   {
-    id: 'scene-new-scene',
-    title: 'Scene ⌘3, Add scene…',
-    deck: 'shell-studio',
-    open: page('layout'),
-    clicks: [{ names: ['Add scene…', 'Add scene'] }],
-    close: 'Escape',
-    baseline: { screen: 'scene', state: 'new-scene' },
-    sections: ['Scene ⌘3: Add scene / Change screen picker']
-  },
-  {
     id: 'library-kebab',
     title: 'Library ⌘0, a session ⋯ menu',
     deck: 'pages',
@@ -413,22 +403,6 @@ export const SCREENS = Object.freeze([
     close: 'Escape',
     baseline: { screen: 'library', state: 'kebab-menu' },
     sections: ['Library page']
-  },
-  {
-    id: 'notes-window',
-    title: 'Notes window ⇧⌘N',
-    deck: 'shell-studio',
-    open: page('studio'),
-    window: {
-      role: 'notes',
-      open: 'notes-window-open',
-      bounds: 'notes-window-set-bounds',
-      close: 'notes-window-close',
-      width: 640,
-      height: 420
-    },
-    baseline: { screen: 'notes', state: 'default', size: { width: 640, height: 420 } },
-    sections: ['Notes window (notes-window.tsx)']
   },
   {
     id: 'stream-manager-window',
