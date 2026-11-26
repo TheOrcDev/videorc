@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, statSync } from 'node:fs'
+import { incidentToneMissingFailure } from './lib/incident-ffmpeg-tone.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { resolveExistingSiblingFfprobe } from './lib/ffmpeg-sibling-paths.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import {
@@ -65,6 +66,9 @@ try {
   const launch = await launchDevApp({
     env: {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
+      // No microphone is selected: use the debug tone, as recording-matrix
+      // does, so the final-artifact audio gate measures a real signal.
+      VIDEORC_INCIDENT_FFMPEG_TONE: '1',
       VIDEORC_SMOKE_STATE_DIR: outputDirectory
     },
     timeoutMs,
@@ -141,6 +145,7 @@ async function runPerformanceSmoke(connection, smoke) {
 async function runScenario(ws, connection, smoke, samples, scenario) {
   samples.length = 0
   await request(ws, timeoutMs, 'preview.live.start', previewParams(scenario))
+  if (smokeAppIsGpui()) await requestSmokeCommand(smoke, 'preview-window-open', {}, { timeoutMs })
 
   const scenarioStartedAt = Date.now()
   const recordingDirectory = await requestSmokeCommand(
@@ -161,7 +166,15 @@ async function runScenario(ws, connection, smoke, samples, scenario) {
     )
   }
 
-  const previewPolling = pollPreviewFrames(connection)
+  const toneMissing = incidentToneMissingFailure(
+    await request(ws, timeoutMs, 'sessions.healthEvents.list', {
+      sessionId: started.sessionId,
+      limit: 120
+    })
+  )
+  if (toneMissing) throw new Error(`[${scenario.label}] ${toneMissing}`)
+
+  const previewPolling = pollPreviewFrames(connection, smoke)
   await sleep(recordingMs)
   previewPolling.stop()
   const polls = await previewPolling.done
@@ -268,19 +281,40 @@ function previewParams(scenario) {
   return { sources, layout, ffmpegPath, video: output.video }
 }
 
-function pollPreviewFrames(connection) {
+function pollPreviewFrames(connection, smoke) {
   let stopped = false
   let attempts = 0
   let successes = 0
+  let previousFrames = 0
   async function poll() {
     while (!stopped) {
       attempts += 1
-      const url = `http://${connection.host}:${connection.port}/preview/live.jpg?token=${encodeURIComponent(connection.token)}&t=${Date.now()}`
       try {
-        const response = await fetch(url)
-        if (response.ok && (await response.arrayBuffer()).byteLength > 0) successes += 1
+        if (smokeAppIsGpui() && process.platform === 'darwin') {
+          // Native presentation deliberately suppresses JPEG polling. Prove
+          // that the actual presenter advances, not that a debug JPEG exists.
+          // Read its live feed: backend status is throttled to ~1 Hz.
+          const status = await requestSmokeCommand(
+            smoke,
+            'native-preview-surface-status',
+            {},
+            { timeoutMs }
+          )
+          const frames = status.presentedFrameId ?? 0
+          if (
+            status.state === 'live' &&
+            status.transport === 'native-surface' &&
+            frames > previousFrames
+          )
+            successes += 1
+          previousFrames = frames
+        } else {
+          const url = `http://${connection.host}:${connection.port}/preview/live.jpg?token=${encodeURIComponent(connection.token)}&t=${Date.now()}`
+          const response = await fetch(url)
+          if (response.ok && (await response.arrayBuffer()).byteLength > 0) successes += 1
+        }
       } catch {
-        // Failed fetches remain visible in the success-ratio gate.
+        // Failed reads remain visible in the success-ratio gate.
       }
       await sleep(previewPollMs)
     }
