@@ -34,7 +34,7 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import {
   FIXTURE_DIRECTORY,
   judgeOutput,
@@ -61,6 +61,7 @@ import {
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
 import { takeSiblingPaths } from './lib/separate-source-take-gates.mjs'
+import { createUiDriver } from './lib/ui-driver.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -489,6 +490,7 @@ async function evaluate(smoke, code, params = {}) {
  * survived the relaunch on the same profile.
  */
 async function backgroundThroughControls(appHandle, setup, pass) {
+  if (smokeAppIsGpui()) return backgroundThroughControlsGpui(appHandle, setup, pass)
   const { smoke } = appHandle
   const cameraId = setup.camera.id
   if (!appHandle.rendererCameraPinned) {
@@ -516,6 +518,59 @@ async function backgroundThroughControls(appHandle, setup, pass) {
       `clicking "${choice}" stored ${JSON.stringify(stored)} for ${cameraId}, not the ${pass} background`
     )
   return { clicked: choice, trigger: picked?.after ?? null, triggerBefore: picked?.before, stored }
+}
+
+async function backgroundThroughControlsGpui(appHandle, setup, pass) {
+  const { smoke, ws } = appHandle
+  const cameraId = setup.camera.id
+  const ui = createUiDriver(smoke)
+  if (!appHandle.rendererCameraPinned) {
+    await requestSmokeCommand(
+      smoke,
+      'select-camera-device',
+      { cameraId, settleMs: 200 },
+      { timeoutMs }
+    )
+    appHandle.rendererCameraPinned = true
+  }
+  const readStored = async () => {
+    const snapshot = await request(ws, timeoutMs, 'ui.settings.get', { keys: ['videorc.settings'] })
+    const raw = snapshot.entries?.['videorc.settings']
+    const settings = typeof raw === 'string' ? JSON.parse(raw) : raw
+    return settings?.cameraBackgrounds?.[cameraId] ?? null
+  }
+  let stored = await readStored()
+  if (pass === 'relaunch' || controlsMatchPass(pass, stored)) {
+    if (!controlsMatchPass(pass, stored))
+      throw new Error(`the camera's background did not survive relaunch: ${JSON.stringify(stored)}`)
+    return { clicked: null, trigger: null, stored }
+  }
+  const trigger = { id: 'quick-settings-background-trigger' }
+  await ui.openTab('studio', { waitFor: trigger })
+  const before = await ui.readText(trigger)
+  await ui.click(trigger)
+  const choice = controlChoiceFor(pass)
+  const tile = { id: `camera-background-${choice}` }
+  if (choice.startsWith('image:')) {
+    const visible = await ui.waitFor(tile, { timeoutMs: 1000 }).catch(() => null)
+    if (!visible) {
+      await ui.click({ id: 'camera-background-choose-image' })
+      tile.id = `camera-background-image-${choice}`
+    }
+  }
+  await ui.click(tile)
+  const deadline = Date.now() + 5000
+  do {
+    stored = await readStored()
+    if (controlsMatchPass(pass, stored)) break
+    await sleep(50)
+  } while (Date.now() < deadline)
+  if (!controlsMatchPass(pass, stored))
+    throw new Error(
+      `clicking "${choice}" stored ${JSON.stringify(stored)} for ${cameraId}, not the ${pass} background`
+    )
+  await ui.press('Escape')
+  return { clicked: choice, trigger: await ui.readText(trigger), triggerBefore: before, stored }
 }
 
 async function stageStatus(ws) {

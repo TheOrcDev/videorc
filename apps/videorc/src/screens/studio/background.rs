@@ -53,6 +53,13 @@ fn background_tile(
     };
     let mut face = div()
         .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(label.clone())
+        .aria_toggled(if selected {
+            gpui::Toggled::True
+        } else {
+            gpui::Toggled::False
+        })
         .flex()
         .flex_col()
         .gap(px(4.))
