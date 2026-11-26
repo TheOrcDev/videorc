@@ -15,6 +15,8 @@ pub struct TrackedText {
     size: f32,
     /// Extra space after each glyph, in `em`.
     tracking_em: f32,
+    /// The Retro LCD's ink glow (`drop-shadow(0 0 3px glow)`).
+    glow: bool,
 }
 
 impl TrackedText {
@@ -24,7 +26,18 @@ impl TrackedText {
             text: text.into(),
             size,
             tracking_em,
+            glow: false,
         }
+    }
+
+    /// A soft halo in the text's own ink round each glyph, the Retro LCD's
+    /// `drop-shadow(0 0 3px var(--lcd-display-glow))`: the glow is the lit
+    /// ink at 60% on the dark screen and 22% on the light one. GPUI has no
+    /// text shadow or blur, so four copies 1 px off each side, at half that
+    /// strength, sit under the glyph.
+    pub fn glow(mut self, glow: bool) -> Self {
+        self.glow = glow;
+        self
     }
 }
 
@@ -34,18 +47,34 @@ pub fn tracking_px(size: f32, tracking_em: f32) -> f32 {
 }
 
 impl RenderOnce for TrackedText {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let gap = tracking_px(self.size, self.tracking_em);
         let name = self.text.clone();
         // CSS puts the spacing after every letter, the last one too.
+        let glow = self.glow.then(|| {
+            let t = crate::theme::resolve(None, window, cx);
+            if crate::theme::is_dark(t) { 0.3 } else { 0.11 }
+        });
         let glyphs = self.text.chars().map(|glyph| {
+            // A lone space would shape to nothing: draw it unbreakable.
+            let shown =
+                SharedString::from((if glyph == ' ' { '\u{a0}' } else { glyph }).to_string());
+            let halo = glow.filter(|_| glyph != ' ').map(|strength| {
+                [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)].map(|(x, y)| {
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top(px(y))
+                        .opacity(strength)
+                        .child(shown.clone())
+                })
+            });
             div()
+                .relative()
                 .flex_none()
                 .mr(px(gap))
-                // A lone space would shape to nothing: draw it unbreakable.
-                .child(SharedString::from(
-                    (if glyph == ' ' { '\u{a0}' } else { glyph }).to_string(),
-                ))
+                .children(halo.into_iter().flatten())
+                .child(div().relative().child(shown))
         });
         div()
             .id(SharedString::from(format!("tracked/{}", self.text)))
