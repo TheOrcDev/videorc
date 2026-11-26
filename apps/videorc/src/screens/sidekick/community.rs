@@ -912,13 +912,18 @@ pub fn render_community(
         settings.remember_offered,
     ) {
         summary = summary.child(remember_offer(cx));
+    } else if community::backfill_line(state.summary.as_ref()).is_none() {
+        // Electron's section always has content (`<RememberOffer>` is an
+        // element even when it draws nothing), so its empty body still
+        // takes the 12 px gap under the description.
+        summary = summary.child(div());
     }
 
     // D-2: links that need you, only when there are any. Each row names
     // both accounts with their platform marks, then its two answers.
     let links = (!state.suggestions.is_empty()).then(|| {
         let mut list = GroupedList::new();
-        for suggestion in &state.suggestions {
+        for (index, suggestion) in state.suggestions.iter().enumerate() {
             let account_a = suggestion.account_a.account_key.clone();
             let account_b = suggestion.account_b.account_key.clone();
             let key = format!("{account_a}|{account_b}");
@@ -995,9 +1000,15 @@ pub fn render_community(
                             }
                         }),
                 );
+            // `divide-y` puts each later row's 1 px border inside its
+            // `min-h-row py-1` box, so those rows stand 33 px; the kit
+            // paints the hairline over the row, so give that pixel back.
             list = list.item(
                 div()
                     .id(SharedString::from(format!("link-{key}")))
+                    .when(index > 0, |row| {
+                        row.border_t_1().border_color(gpui::transparent_black())
+                    })
                     .flex()
                     .flex_wrap()
                     .items_center()
