@@ -928,6 +928,13 @@ impl PreviewElement {
             return;
         }
         self.visible = visible;
+        // The watchdog holds while the host hides the video on purpose
+        // (only here: a route handover's own layer hiding isn't the host's).
+        if let Some(handle) = self.telemetry_handle()
+            && let Ok(mut t) = handle.lock()
+        {
+            t.hidden_by_host = !visible;
+        }
         self.apply_layer_hidden();
         self.send_bounds();
     }
@@ -1206,6 +1213,8 @@ async fn watchdog(
     let mut was_connected = false;
     let mut last_frames_rendered: Option<u64> = None;
     let mut last_presented: Option<u64> = None;
+    // The host hid the video at the last tick.
+    let mut was_hidden = false;
     let mut current = PreviewStatus::initial();
     let publish = |next: PreviewStatus, current: &mut PreviewStatus| {
         let changed = next.phase != current.phase || next.reason != current.reason;
@@ -1263,6 +1272,20 @@ async fn watchdog(
                 &mut current,
             );
             continue;
+        }
+        if t.hidden_by_host {
+            // The host hid the video on purpose (its page is away, a dialog
+            // is over the slot): nothing on screen to judge, and nothing to
+            // heal. Unlike a park, the contract isn't reset: the phase stays,
+            // so a Preview that was presenting is still presenting when it
+            // shows again. ogre, 2026-11-26: 30 s away read "Preview failed".
+            last_frames_rendered = None;
+            last_presented = None;
+            was_hidden = true;
+            continue;
+        }
+        if std::mem::take(&mut was_hidden) {
+            resume_after_hidden(&mut mode);
         }
         let rearmed = rearm.load(Ordering::Relaxed);
         if !was_connected || rearmed != seen_rearm {
@@ -1363,6 +1386,20 @@ async fn watchdog(
     }
 }
 
+/// The host shows the video again after hiding it: the contract's clocks
+/// start fresh, so the hidden stretch counts as neither a first frame's wait
+/// nor a stall. The phase stays; if the frames really stopped, the ladder
+/// takes it from there.
+fn resume_after_hidden(mode: &mut Mode) {
+    match mode {
+        Mode::FirstFrame { started_at, ledger } => {
+            *started_at = Instant::now();
+            *ledger = Ledger::default();
+        }
+        Mode::Presenting { watch } => *watch = PresentingWatch::default(),
+    }
+}
+
 fn heal(
     action: HealingAction,
     reason: &str,
@@ -1389,6 +1426,32 @@ fn heal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hidden_stretch_counts_as_neither_a_wait_nor_a_stall() {
+        // ogre, 2026-11-26: the Studio page away (or a dialog over the
+        // slot) for 30 s read "Preview failed". Showing it again restarts
+        // the first frame's budget and forgets the presenting watch's tally.
+        let long_ago = Instant::now() - std::time::Duration::from_secs(60);
+        let mut waiting = Mode::FirstFrame {
+            started_at: long_ago,
+            ledger: Ledger::default(),
+        };
+        resume_after_hidden(&mut waiting);
+        assert!(matches!(
+            waiting,
+            Mode::FirstFrame { started_at, .. } if started_at.elapsed().as_secs() < 5
+        ));
+
+        let mut presenting = Mode::Presenting {
+            watch: PresentingWatch::default(),
+        };
+        resume_after_hidden(&mut presenting);
+        assert!(matches!(
+            presenting,
+            Mode::Presenting { ref watch } if *watch == PresentingWatch::default()
+        ));
+    }
 
     #[test]
     fn the_routes_name_themselves() {
