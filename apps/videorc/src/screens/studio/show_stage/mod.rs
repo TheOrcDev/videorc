@@ -6,12 +6,17 @@
 //! `set_stage`, and the Program monitor + Listen.
 
 mod camera_off;
+mod cards;
+mod moderation;
+mod privacy;
+mod room_person;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, Image, ObjectFit, Role, Window, div, img,
-    prelude::*, px, relative,
+    AnyElement, App, Context, Entity, EventEmitter, Image, ObjectFit, Role, SharedString, Window,
+    div, img, prelude::*, px, relative,
 };
 use videorc_app_core::guests::layout::{
     StageCanvas, StageTile, StageTileKind, plan_stage, show_stage_input, stage_rect_fraction,
@@ -24,37 +29,46 @@ use videorc_app_core::guests::stage_screens::{
 };
 use videorc_app_core::guests::tile::{host_circle, shows_away};
 use videorc_app_core::guests::view::{
-    self as guests, CloudRoomFacts, LayoutOption, RoomPerson, RoomScreen, bring_on_blocked_reason,
-    close_room_asks_first, layout_options, layout_reasons_line, request_device, request_title,
-    room_counts, room_limits, room_people, room_screens, selected_layout, stage_with_screen_card,
+    self as guests, CloudRoomFacts, Heard, LayoutOption, RoomPerson, RoomScreen,
+    bring_on_blocked_reason, close_room_asks_first, layout_options, layout_reasons_line,
+    mic_toggle_label, person_mic_view, room_limits, room_people, room_screens, selected_layout,
+    stage_with_screen_card,
 };
 use videorc_app_core::guests::wire::{
-    DrawnStageLayout, RecordingStatus, RoomClientState, RoomParticipant, RoomPhase, RoomRequest,
-    RoomStatus, Stage, StageLayout,
+    DrawnStageLayout, RecordingStatus, RoomClientState, RoomParticipant, RoomPhase, RoomStatus,
+    Stage, StageLayout,
 };
 use videorc_app_core::livestream::cloud_status::CloudStatus;
 use videorc_app_core::nav::PageId;
 use videorc_app_core::studio::room_frames::RemoteSource;
 use videorc_app_core::studio::room_media::RoomMedia;
 use videorc_app_core::studio::screen_views::{PREVIEW_REPLACED_BY_SHOW_STAGE, TalkShowRoomView};
-use videorc_app_core::studio::source_selection::capture_picker_devices;
+use videorc_app_core::studio::source_selection::{
+    SourceKind, camera_picker_devices, capture_picker_devices,
+};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle, DialogSize};
 use videorc_kit::empty::Empty;
 use videorc_kit::icon::{IconName, icon};
-use videorc_kit::list_row::{GroupedList, ListRow};
+use videorc_kit::kebab_menu::KebabMenuItem;
+use videorc_kit::list_row::GroupedList;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::section_label::SectionLabel;
 use videorc_kit::spinner::Spinner;
-use videorc_kit::theme::{self, TypeScale, faded_over, hsla, with_alpha};
-use videorc_kit::tokens::{Color, Theme, radius, text};
+use videorc_kit::status_dot::{StatusDot, StatusTone};
+use videorc_kit::theme::{self, TypeScale, hsla, with_alpha};
+use videorc_kit::tokens::{Theme, radius, text};
 use videorc_kit::tooltip::tooltip;
 
 use super::talk_show_host::TalkShowRoomHost;
 use super::transport::{AppStudio, OpenPage};
 use crate::app::bridge::Mirror;
 use camera_off::{CAMERA_OFF_LABEL, camera_off_avatar};
+use cards::{StageCard, card_columns, reasons_line, screen_thumb, stage_layout_thumb};
+use moderation::GuestModeration;
+use room_person::{PersonRowParts, count_label, person_row, request_row};
+use videorc_protocol::ScreenPrivacy;
 
 const STAGE_CANVAS: StageCanvas = StageCanvas {
     width: 1920,
@@ -74,8 +88,6 @@ const WAITING_SCREEN: &str = "Waiting for the screen";
 const NO_PICTURE: &str = "No picture yet";
 const BACK_IN_A_MOMENT: &str = "Back in a moment";
 const WANTS_TO_JOIN: &str = "Wants to join";
-const LET_IN: &str = "Let in";
-const DECLINE: &str = "Decline";
 const LAYOUT: &str = "Layout";
 const SCREENS: &str = "Screens";
 const ON_STAGE: &str = "On stage";
@@ -197,6 +209,11 @@ pub struct ShowStage {
     share_pending: bool,
     share_picker: DialogHandle,
     close_confirm: DialogHandle,
+    /// Mute hold, screen share and Rename/Remove/Ban for a guest's row.
+    moderation: Entity<GuestModeration>,
+    /// Hide screen's backend state (`useScreenPrivacy`), mirrored here.
+    privacy: ScreenPrivacy,
+    privacy_revision: u64,
 }
 
 impl EventEmitter<OpenPage> for ShowStage {}
@@ -240,7 +257,12 @@ impl ShowStage {
             }
         })
         .detach();
-        Self {
+        let moderation = cx.new(|_| GuestModeration::new(studio.clone(), runtime.clone()));
+        cx.observe(&moderation, |_, _, cx| cx.notify()).detach();
+        let mut stage = Self {
+            privacy: ScreenPrivacy::default(),
+            privacy_revision: 0,
+            moderation,
             studio,
             runtime,
             talk_show,
@@ -252,7 +274,9 @@ impl ShowStage {
             share_pending: false,
             share_picker: DialogHandle::new(false),
             close_confirm: DialogHandle::new(false),
-        }
+        };
+        stage.watch_privacy(cx);
+        stage
     }
 
     /// Wire the talk-show host so tiles, Screens, layouts and the Program
@@ -475,6 +499,55 @@ impl ShowStage {
         cx.notify();
     }
 
+    /// `setSpotlight`: the spotlight layout on this person.
+    fn spotlight(&mut self, identity: String, cx: &mut Context<Self>) {
+        let Some(room) = self.room().cloned() else {
+            return;
+        };
+        self.apply_stage(
+            Stage {
+                layout: StageLayout::Spotlight,
+                spotlight: Some(identity),
+                ..room.stage.clone()
+            },
+            cx,
+        );
+    }
+
+    /// The host's own mic, from their row: the Studio's mute.
+    fn toggle_host_mic(&mut self, muted: bool) {
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            studio.request_microphone_mute(!muted).await;
+        });
+    }
+
+    /// The host's camera, from their row's ⋯: off is the Camera picker's
+    /// Off; on picks the first camera the picker lists.
+    fn set_host_camera(&mut self, on: bool) {
+        let studio = self.studio.clone();
+        let picked = on
+            .then(|| {
+                let devices = studio.snapshot().sources.devices.devices;
+                camera_picker_devices(&devices)
+                    .first()
+                    .map(|device| device.id.clone())
+            })
+            .flatten();
+        if on && picked.is_none() {
+            eprintln!("[videorc-app] Show stage: Turn camera on: no camera listed");
+            return;
+        }
+        self.runtime.spawn(async move {
+            let result = studio
+                .select_source_device(SourceKind::Camera, picked.as_deref())
+                .await;
+            if let Err(error) = result {
+                eprintln!("[videorc-app] Show stage: camera: {error}");
+            }
+        });
+    }
+
     fn toggle_listen(&mut self, cx: &mut Context<Self>) {
         let Some(host) = self.room_host.clone() else {
             return;
@@ -671,6 +744,33 @@ impl ShowStage {
 
         let mut stack = div().child(body);
         if let Some(plate) = tile.plate {
+            // `tileVoice`: who talks and who can't be heard, on the picture.
+            let voice = (tile.kind == StageTileKind::Person)
+                .then(|| self.room_media(cx))
+                .flatten()
+                .and_then(|media| {
+                    if Some(tile.identity.as_str()) == host_identity {
+                        return (!media.microphone).then_some(true);
+                    }
+                    let person = media.people.iter().find(|p| p.identity == tile.identity);
+                    if person.is_some_and(|p| p.mic_muted) || participant.is_some_and(|p| p.muted) {
+                        Some(true)
+                    } else {
+                        person.is_some_and(|p| p.speaking).then_some(false)
+                    }
+                });
+            let mark = voice.map(|muted| {
+                if muted {
+                    icon(IconName::WaveformSlash, 12., muted_fg).into_any_element()
+                } else {
+                    div()
+                        .flex_none()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(hsla(t.success))
+                        .into_any_element()
+                }
+            });
             let [pl, pt, pw, ph] = stage_rect_fraction(STAGE_CANVAS, plate);
             stack = stack.child(
                 div()
@@ -684,6 +784,9 @@ impl ShowStage {
                     .child(
                         div()
                             .max_w_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
                             .px(px(8.))
                             .py(px(2.))
                             .rounded_full()
@@ -691,87 +794,87 @@ impl ShowStage {
                             .type_scale(text::META)
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(fg)
-                            .truncate()
-                            .child(name),
+                            .children(mark)
+                            .child(div().min_w_0().truncate().child(name)),
                     ),
             );
         }
         stack.into_any_element()
     }
 
-    fn join_requests(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// "Ada wants to join", above everything the host arranges.
+    fn join_requests(&self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let room = self.room()?;
         if room.requests.is_empty() {
             return None;
         }
         let open = room.phase == RoomPhase::Open;
-        let shown: Vec<&RoomRequest> = room.requests.iter().take(REQUESTS_SHOWN).collect();
         let overflow = room.requests.len().saturating_sub(REQUESTS_SHOWN);
         let entity = cx.entity();
-        let mut list =
-            GroupedList::new().label(format!("{WANTS_TO_JOIN} · {}", room.requests.len()));
-        for request in shown {
-            let id = request.request_id.clone();
-            let id_decline = request.request_id.clone();
-            list = list.item(
-                ListRow::new(
-                    format!("join-{}", request.request_id),
-                    request_title(request),
-                )
-                .context(request_device(request))
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .child(
-                            Button::new(format!("let-in-{}", request.request_id))
-                                .label(LET_IN)
-                                .size(ButtonSize::Xs)
-                                .disabled(!open)
-                                .on_click({
-                                    let entity = entity.clone();
-                                    move |_, _, cx| {
-                                        entity.update(cx, |stage, _| {
-                                            stage.decide(id.clone(), "let-in")
-                                        })
-                                    }
-                                }),
-                        )
-                        .child(
-                            Button::new(format!("decline-{}", request.request_id))
-                                .label(DECLINE)
-                                .variant(ButtonVariant::Outline)
-                                .size(ButtonSize::Xs)
-                                .disabled(!open)
-                                .on_click({
-                                    let entity = entity.clone();
-                                    move |_, _, cx| {
-                                        entity.update(cx, |stage, _| {
-                                            stage.decide(id_decline.clone(), "decline")
-                                        })
-                                    }
-                                }),
-                        ),
-                ),
-            );
+        let mut list = GroupedList::new()
+            .id("show-stage-requests-list")
+            .accessibility_label(WANTS_TO_JOIN);
+        for request in room.requests.iter().take(REQUESTS_SHOWN) {
+            let let_in: Rc<dyn Fn(&mut Window, &mut App)> = {
+                let entity = entity.clone();
+                let id = request.request_id.clone();
+                Rc::new(move |_, cx| {
+                    entity.update(cx, |stage, _| stage.decide(id.clone(), "let-in"))
+                })
+            };
+            let decline: Rc<dyn Fn(&mut Window, &mut App)> = {
+                let entity = entity.clone();
+                let id = request.request_id.clone();
+                Rc::new(move |_, cx| {
+                    entity.update(cx, |stage, _| stage.decide(id.clone(), "decline"))
+                })
+            };
+            list = list.row(request_row(request, !open, t, let_in, decline));
         }
-        let mut block = div().flex().flex_col().gap(px(8.)).child(list);
+        // The label: a pulsing amber dot, then "Wants to join 2".
+        let label = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .pl(px(4.))
+            .child(
+                StatusDot::new("show-stage-requests-dot")
+                    .tone(StatusTone::Warn)
+                    .pulse(true),
+            )
+            .child(
+                div()
+                    .ml(px(-4.))
+                    .child(count_label(WANTS_TO_JOIN, room.requests.len(), t)),
+            );
+        let mut block = div()
+            .id("show-stage-requests")
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(div().flex().flex_col().gap(px(6.)).child(label).child(list));
         if overflow > 0 {
             block = block.child(
-                Button::new("more-want-to-join")
-                    .label(more_want_to_join(overflow))
-                    .variant(ButtonVariant::Ghost)
-                    .size(ButtonSize::Xs)
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_, _, cx| entity.update(cx, |stage, cx| stage.open_guests(cx))
-                    }),
+                div().child(
+                    Button::new("more-want-to-join")
+                        .label(more_want_to_join(overflow))
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Xs)
+                        .child(icon(IconName::CaretRight, 14., hsla(t.foreground)))
+                        .on_click({
+                            let entity = entity.clone();
+                            move |_, _, cx| entity.update(cx, |stage, cx| stage.open_guests(cx))
+                        }),
+                ),
             );
         }
         Some(block.into_any_element())
     }
 
-    fn layouts(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    /// The room's layouts as cards, each with its diagram (plan 252). A
+    /// layout that can't apply says why on hover; one line under the cards
+    /// says it for all of them.
+    fn layouts(&self, columns: u16, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let room = self.room();
         let managed = is_managed_show(self.show_node_id.as_deref());
         let host = self.host_identity(cx);
@@ -779,53 +882,47 @@ impl ShowStage {
         let options = layout_options(room, managed, sharers);
         let reasons = layout_reasons_line(&options);
         let room_open = room.is_some_and(|r| r.phase == RoomPhase::Open);
+        let interactive = room_open && self.room_host.is_some();
         let current = selected_layout(
             room,
             two_screens_chosen(room.map(|r| &r.stage), self.two_screens_picked),
         );
-        let muted = hsla(t.muted_foreground);
         let entity = cx.entity();
-        let host_ready = self.room_host.is_some();
-        let mut cards = div()
+        let mut grid = div()
             .id("show-stage-layouts")
-            .flex()
-            .flex_wrap()
+            .grid()
+            .grid_cols(columns)
             .gap(px(8.))
             .role(Role::Group)
             .aria_label(LAYOUT);
         for option in &options {
-            cards = cards.child(layout_card(
-                option,
-                current,
-                room_open && host_ready,
-                entity.clone(),
-                t,
-            ));
+            grid = grid.child(layout_card(option, current, interactive, entity.clone(), t));
         }
         div()
             .flex()
             .flex_col()
+            .min_w_0()
             .gap(px(6.))
-            .child(SectionLabel::new(LAYOUT))
-            .child(cards)
-            .children(room_open.then(|| reasons).flatten().map(|line| {
-                div()
-                    .id("show-stage-layout-reasons")
-                    .px(px(4.))
-                    .type_scale(text::META)
-                    .text_color(muted)
-                    .child(line)
-            }))
+            .child(div().px(px(4.)).child(SectionLabel::new(LAYOUT)))
+            .child(grid)
+            .children(
+                room_open
+                    .then_some(reasons)
+                    .flatten()
+                    .map(|line| reasons_line("show-stage-layout-reasons", line, t)),
+            )
             .into_any_element()
     }
 
+    /// The screens shared in the room (plan 252), each a card with its live
+    /// picture; Share screen… starts the host's own.
     fn screens_section(
         &self,
         people: &[RoomPerson],
+        columns: u16,
         t: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let muted = hsla(t.muted_foreground);
         let room = self.room();
         let room_open = room.is_some_and(|r| r.phase == RoomPhase::Open);
         let host_ready = self.room_host.is_some();
@@ -833,9 +930,15 @@ impl ShowStage {
         let screens = room_screens(room, people, sharing, self.two_screens_picked);
         let entity = cx.entity();
         let pending = self.share_pending;
+        // Plan 254 D4: shown over the host's own screen, or while it holds.
+        let privacy = self.privacy_view();
+        let privacy_shown = sharing
+            || screens.iter().any(|screen| screen.host)
+            || privacy.hidden
+            || privacy.chip.is_some();
 
         let share_btn = if sharing {
-            Button::new("stop-share")
+            Button::new("show-stage-stop-share")
                 .label(STOP_SHARING)
                 .variant(ButtonVariant::Outline)
                 .size(ButtonSize::Xs)
@@ -844,193 +947,378 @@ impl ShowStage {
                     let entity = entity.clone();
                     move |_, _, cx| entity.update(cx, |stage, cx| stage.stop_sharing(cx))
                 })
+                .into_any_element()
         } else {
-            Button::new("share-screen")
-                .label(SHARE_SCREEN)
+            let mut button = Button::new("show-stage-share")
                 .variant(ButtonVariant::Outline)
                 .size(ButtonSize::Xs)
-                .disabled(!room_open || !host_ready || pending)
-                .tooltip(if host_ready {
-                    SHARE_A_SCREEN_DESCRIPTION
-                } else {
-                    ROOM_HOST_PENDING
-                })
+                .disabled(!room_open || !host_ready || pending);
+            button = if pending {
+                button.child(Spinner::new("show-stage-share-pending").size(14.))
+            } else {
+                button.icon(IconName::Monitor)
+            };
+            button
+                .label(SHARE_SCREEN)
+                .when(!host_ready, |button| button.tooltip(ROOM_HOST_PENDING))
                 .on_click({
                     let entity = entity.clone();
                     move |_, window, cx| {
                         entity.update(cx, |stage, cx| stage.open_share_picker(window, cx))
                     }
                 })
+                .into_any_element()
         };
 
-        let mut body = div().flex().flex_col().gap(px(6.)).child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(SectionLabel::new(SCREENS))
-                .child(div().flex_1())
-                .child(share_btn),
-        );
-
+        // `flex min-h-6 items-center gap-x-2 px-1`: the name, then the
+        // controls at the end.
+        let header = div()
+            .min_h(px(24.))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.))
+            .px(px(4.))
+            .child(SectionLabel::new(SCREENS))
+            .children(Self::privacy_chip(&privacy, t))
+            .child(div().flex_1())
+            .children(privacy_shown.then(|| self.privacy_control(&privacy, cx)))
+            .child(share_btn);
+        let mut body = div()
+            .id("show-stage-screens")
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .gap(px(6.))
+            .child(header);
         if screens.is_empty() {
-            body = body.child(
-                div()
-                    .type_scale(text::META)
-                    .text_color(muted)
-                    .child(format!(
-                        "{} {}",
-                        guests::NO_SCREENS_YET,
-                        guests::SCREENS_GUEST_HINT
-                    )),
-            );
+            body = body.child(reasons_line(
+                "show-stage-screens-empty",
+                format!("{} {}", guests::NO_SCREENS_YET, guests::SCREENS_GUEST_HINT),
+                t,
+            ));
         } else {
-            let mut cards = div()
-                .id("show-stage-screens")
-                .flex()
-                .flex_wrap()
+            let mut grid = div()
+                .id("show-stage-screen-cards")
+                .grid()
+                .grid_cols(columns)
                 .gap(px(8.))
                 .role(Role::Group)
                 .aria_label(SCREENS);
             for screen in &screens {
-                cards = cards.child(self.screen_card(
-                    screen,
-                    room_open && host_ready,
-                    entity.clone(),
-                    t,
-                    cx,
-                ));
+                let disabled = !room_open || !host_ready || screen.blocked_reason.is_some();
+                let frame = self.remote_frame(&screen.identity, RemoteSource::Screen, cx);
+                let chosen = screen.clone();
+                let entity = entity.clone();
+                grid = grid.child(
+                    StageCard {
+                        id: SharedString::from(format!("show-stage-screen-{}", screen.identity))
+                            .into(),
+                        thumb: screen_thumb(frame, t),
+                        label: screen.name.clone().into(),
+                        meta: Some(SharedString::from(if screen.on_program {
+                            ON_STAGE
+                        } else {
+                            PUT_ON_STAGE
+                        })),
+                        selected: screen.on_program,
+                        disabled,
+                        disabled_reason: room_open
+                            .then(|| screen.blocked_reason.clone())
+                            .flatten()
+                            .map(Into::into),
+                    }
+                    .render(t, move |_, cx| {
+                        let screen = chosen.clone();
+                        entity.update(cx, |stage, cx| stage.toggle_screen_card(screen, cx));
+                    }),
+                );
             }
-            body = body.child(cards);
+            body = body.child(grid);
         }
         body.into_any_element()
     }
 
-    fn screen_card(
+    /// Everyone in the room, in two lists: On stage and Backstage, the one
+    /// home of Bring on and Send backstage (D16).
+    fn people_section(
         &self,
-        screen: &RoomScreen,
-        interactive: bool,
-        entity: Entity<Self>,
+        people: &[RoomPerson],
         t: &Theme,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
-        let disabled = !interactive || screen.blocked_reason.is_some();
-        let paint = StageCardPaint::of(t, screen.on_program, disabled);
-        let frame = self.remote_frame(&screen.identity, RemoteSource::Screen, cx);
-        let entity_screen = screen.clone();
-        let mut thumb = div()
-            .relative()
-            .h(px(72.))
-            .w_full()
-            .rounded(px(radius::CHIP / 2.))
-            .bg(paint.thumb)
-            .overflow_hidden();
-        if let Some(frame) = frame {
-            thumb = thumb.child(img(frame).size_full().object_fit(ObjectFit::Cover));
+        if people.is_empty() {
+            return div().into_any_element();
         }
-        if let Some(veil) = paint.thumb_veil {
-            thumb = thumb.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .rounded(px(radius::CHIP / 2.))
-                    .bg(veil),
-            );
-        }
-        let mut card = div()
-            .id(format!("stage-screen-{}", screen.identity))
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .w(px(140.))
-            .p(px(8.))
-            .rounded(px(radius::CHIP))
-            .border_1()
-            .border_color(paint.border)
-            .bg(paint.fill)
-            .child(thumb)
-            .child(
-                div()
-                    .type_scale(text::META)
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(paint.name)
-                    .truncate()
-                    .child(screen.name.clone()),
-            )
-            .child(div().type_scale(text::META).text_color(paint.meta).child(
-                if screen.on_program {
-                    ON_STAGE
-                } else {
-                    PUT_ON_STAGE
-                },
-            ));
-        if !disabled {
-            card = card.on_click(move |_, _, cx| {
-                let screen = entity_screen.clone();
-                entity.update(cx, |stage, cx| stage.toggle_screen_card(screen, cx));
-            });
-        }
-        if let Some(reason) = screen.blocked_reason.as_deref() {
-            card = card.tooltip(tooltip(reason.to_string()));
-        }
-        card.into_any_element()
-    }
-
-    fn people_section(&self, people: &[RoomPerson], cx: &mut Context<Self>) -> AnyElement {
+        let room = self.room();
+        let room_open = room.is_some_and(|r| r.phase == RoomPhase::Open);
+        let disabled = !room_open || self.room_host.is_none();
+        let blocked = bring_on_blocked_reason(people, room_limits(self.facts.as_ref()));
         let on_stage: Vec<&RoomPerson> = people.iter().filter(|p| p.host || p.on_stage).collect();
         let backstage: Vec<&RoomPerson> =
             people.iter().filter(|p| !p.host && !p.on_stage).collect();
-        let counts = room_counts(self.room(), people);
-        let entity = cx.entity();
-        let host_ready = self.room_host.is_some();
-        let blocked = bring_on_blocked_reason(people, room_limits(self.facts.as_ref()));
+        let spotlight = room
+            .filter(|r| r.stage.layout == StageLayout::Spotlight)
+            .and_then(|r| r.stage.spotlight.clone());
+
+        let group = |label: &str, count: usize, rows: Vec<videorc_kit::list_row::ListRow>| {
+            let mut list = GroupedList::new()
+                .id(SharedString::from(format!("show-stage-list-{label}")))
+                .accessibility_label(label.to_string());
+            for row in rows {
+                list = list.row(row);
+            }
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(count_label(label, count, t))
+                .child(list)
+        };
+
+        let on_rows = on_stage
+            .iter()
+            .map(|person| self.stage_row(person, disabled, None, spotlight.as_deref(), t, cx))
+            .collect();
         let mut root = div()
-            .id("show-stage-people")
+            .id("show-stage-strip")
             .flex()
             .flex_col()
-            .gap(px(8.))
+            .gap(px(16.))
             .role(Role::Region)
-            .aria_label("In the room");
-
-        let mut on_list = GroupedList::new().label(format!("{ON_STAGE} · {}", counts.on_stage));
-        for person in &on_stage {
-            on_list = on_list.item(person_row(person, true, host_ready, None, entity.clone()));
-        }
-        root = root.child(on_list);
+            .aria_label("In the room")
+            .child(group(ON_STAGE, on_stage.len(), on_rows));
 
         if backstage.is_empty() {
+            let entity = cx.entity();
             root = root.child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(8.))
-                    .child(SectionLabel::new(format!("{BACKSTAGE} · 0")))
-                    .child(Empty::new().description(guests::NOBODY_BACKSTAGE))
+                    .gap(px(6.))
+                    .child(count_label(BACKSTAGE, 0, t))
                     .child(
-                        Button::new("invite-link")
-                            .label(INVITE_LINK)
-                            .variant(ButtonVariant::Outline)
-                            .size(ButtonSize::Xs)
-                            .on_click({
-                                let entity = entity.clone();
-                                move |_, _, cx| entity.update(cx, |stage, cx| stage.open_guests(cx))
-                            }),
+                        div()
+                            .id("show-stage-backstage-empty")
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.))
+                            .rounded(px(radius::ROW))
+                            .border_1()
+                            .border_color(hsla(t.border))
+                            .bg(hsla(t.inset))
+                            .py(px(6.))
+                            .pr(px(6.))
+                            .pl(px(12.))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .type_scale(text::META)
+                                    .text_color(hsla(t.muted_foreground))
+                                    .child(guests::NOBODY_BACKSTAGE),
+                            )
+                            .child(
+                                Button::new("show-stage-invite-link")
+                                    .icon(IconName::LinkSimple)
+                                    .label(INVITE_LINK)
+                                    .variant(ButtonVariant::Ghost)
+                                    .size(ButtonSize::Xs)
+                                    .child(icon(IconName::CaretRight, 14., hsla(t.foreground)))
+                                    .on_click(move |_, _, cx| {
+                                        entity.update(cx, |stage, cx| stage.open_guests(cx))
+                                    }),
+                            ),
                     ),
             );
         } else {
-            let mut back = GroupedList::new().label(format!("{BACKSTAGE} · {}", backstage.len()));
-            for person in &backstage {
-                back = back.item(person_row(
-                    person,
-                    false,
-                    host_ready,
-                    blocked.clone(),
-                    entity.clone(),
-                ));
-            }
-            root = root.child(back);
+            let back_rows = backstage
+                .iter()
+                .map(|person| {
+                    self.stage_row(
+                        person,
+                        disabled,
+                        blocked.clone(),
+                        spotlight.as_deref(),
+                        t,
+                        cx,
+                    )
+                })
+                .collect();
+            root = root.child(group(BACKSTAGE, backstage.len(), back_rows));
         }
         root.into_any_element()
+    }
+
+    /// `StageRow`: a `PersonRow` with the stage move and the stage's ⋯.
+    fn stage_row(
+        &self,
+        person: &RoomPerson,
+        disabled: bool,
+        bring_on_blocked: Option<String>,
+        spotlight: Option<&str>,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> videorc_kit::list_row::ListRow {
+        let entity = cx.entity();
+        let media = self.room_media(cx);
+        let local_mic_muted = media.is_some_and(|media| !media.microphone);
+        let remote = media.and_then(|media| {
+            media
+                .people
+                .iter()
+                .find(|entry| entry.identity == person.identity)
+        });
+        let (camera_off, picture) = if person.host {
+            let off = media.is_some_and(|media| !media.camera);
+            let identity = self.host_identity(cx).unwrap_or_default();
+            (
+                off,
+                (!off)
+                    .then(|| self.remote_frame(&identity, RemoteSource::Camera, cx))
+                    .flatten(),
+            )
+        } else {
+            let off = remote.is_some_and(|remote| remote.camera_off);
+            (
+                off,
+                (!off)
+                    .then(|| self.remote_frame(&person.identity, RemoteSource::Camera, cx))
+                    .flatten(),
+            )
+        };
+        let mic = person_mic_view(
+            person,
+            Heard {
+                local_mic_muted,
+                room_mic_muted: remote.is_some_and(|remote| remote.mic_muted),
+                speaking: remote.is_some_and(|remote| remote.speaking),
+            },
+        );
+
+        // ⋯: Spotlight (or End spotlight), then the host's camera or the
+        // guest's moderation.
+        let identity = person.identity.clone();
+        let spotlit = spotlight == Some(identity.as_str());
+        let mut menu = vec![if spotlit {
+            let entity = entity.clone();
+            KebabMenuItem::new("spotlight", "End spotlight", move |_, cx| {
+                entity.update(cx, |stage, cx| {
+                    stage.set_layout(DrawnStageLayout::SideBySide, cx)
+                })
+            })
+            .group("stage")
+        } else {
+            let entity = entity.clone();
+            let identity = identity.clone();
+            let item = KebabMenuItem::new("spotlight", "Spotlight", move |_, cx| {
+                let identity = identity.clone();
+                entity.update(cx, |stage, cx| stage.spotlight(identity, cx))
+            })
+            .group("stage");
+            if person.on_stage || person.host {
+                item
+            } else {
+                item.disabled(true).disabled_reason("Bring them on first.")
+            }
+        }];
+        if person.host {
+            let entity = entity.clone();
+            menu.push(
+                KebabMenuItem::new(
+                    "camera",
+                    if camera_off {
+                        "Turn camera on"
+                    } else {
+                        "Turn camera off"
+                    },
+                    move |_, cx| entity.update(cx, |stage, _| stage.set_host_camera(camera_off)),
+                )
+                .group("stage"),
+            );
+        } else {
+            menu.extend(GuestModeration::items(&self.moderation, person));
+        }
+
+        // The host is always on stage (H2): their row has no stage move.
+        let action = (!person.host).then(|| {
+            let blocked = (!person.on_stage).then_some(bring_on_blocked).flatten();
+            let on_stage = person.on_stage;
+            let identity = identity.clone();
+            let entity = entity.clone();
+            let button = Button::new(SharedString::from(format!(
+                "show-stage-{}-{}",
+                if on_stage {
+                    "send-backstage"
+                } else {
+                    "bring-on"
+                },
+                person.identity
+            )))
+            .icon(if on_stage {
+                IconName::ArrowDown
+            } else {
+                IconName::ArrowUp
+            })
+            .label(if on_stage { SEND_BACKSTAGE } else { BRING_ON })
+            .variant(if on_stage {
+                ButtonVariant::Outline
+            } else {
+                ButtonVariant::Secondary
+            })
+            .size(ButtonSize::Xs)
+            .disabled(disabled || blocked.is_some())
+            .on_click(move |_, _, cx| {
+                let identity = identity.clone();
+                entity.update(cx, |stage, cx| stage.move_person(identity, !on_stage, cx))
+            });
+            match blocked {
+                Some(reason) => button.tooltip(reason).into_any_element(),
+                None => button.into_any_element(),
+            }
+        });
+
+        let on_mic: Rc<dyn Fn(&mut Window, &mut App)> = {
+            let entity = entity.clone();
+            let moderation = self.moderation.clone();
+            let person = person.clone();
+            Rc::new(move |_, cx| {
+                if person.host {
+                    entity.update(cx, |stage, _| stage.toggle_host_mic(local_mic_muted));
+                } else {
+                    moderation.update(cx, |moderation, cx| moderation.toggle_mute(&person, cx));
+                }
+            })
+        };
+        let on_share: Rc<dyn Fn(&mut Window, &mut App)> = {
+            let moderation = self.moderation.clone();
+            let person = person.clone();
+            Rc::new(move |_, cx| {
+                moderation.update(cx, |moderation, cx| {
+                    moderation.toggle_screen_share(&person, cx)
+                })
+            })
+        };
+        person_row(
+            PersonRowParts {
+                person: person.clone(),
+                picture,
+                camera_off,
+                mic,
+                mic_label: mic_toggle_label(person, local_mic_muted),
+                mic_pressed: if person.host {
+                    local_mic_muted
+                } else {
+                    person.muted
+                },
+                disabled,
+                menu,
+                action,
+            },
+            t,
+            on_mic,
+            on_share,
+        )
     }
 
     fn program_monitor(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -1057,6 +1345,10 @@ impl ShowStage {
             .is_some_and(|host| host.read(cx).monitor_listening());
         let entity = cx.entity();
 
+        let pictured = match view {
+            ProgramMonitorView::Return => frame.is_some(),
+            ProgramMonitorView::Stage(state) => state == StageMonitorState::Shown,
+        };
         let body: AnyElement = match view {
             ProgramMonitorView::Return => {
                 if let Some(frame) = frame {
@@ -1113,10 +1405,13 @@ impl ShowStage {
             }
         };
 
+        // `flex min-h-6 items-center gap-1.5 px-1`.
         let mut header = div()
+            .min_h(px(24.))
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(px(6.))
+            .px(px(4.))
             .child(SectionLabel::new(title))
             .child(div().flex_1());
 
@@ -1159,12 +1454,15 @@ impl ShowStage {
             .flex_shrink_0()
             .child(header)
             .child(
+                // `aspect-video rounded-row`: empty, the frame is the
+                // Preview's inset well (a video-ground box would vanish on
+                // the dark ground and leave its words floating).
                 div()
                     .relative()
                     .w_full()
                     .aspect_ratio(16. / 9.)
-                    .rounded(px(radius::PANEL))
-                    .bg(hsla(t.video_ground))
+                    .rounded(px(radius::ROW))
+                    .bg(hsla(if pictured { t.video_ground } else { t.inset }))
                     .overflow_hidden()
                     .child(body),
             )
@@ -1254,64 +1552,6 @@ fn program_monitor_view_simple(
     })
 }
 
-/// Colours for a layout / Screens card. Disabled paints each layer
-/// pre-blended over the card ground — never `.opacity` (GPUI fades each
-/// layer alone and the label shows its fill through).
-struct StageCardPaint {
-    border: gpui::Hsla,
-    fill: gpui::Hsla,
-    thumb: gpui::Hsla,
-    name: gpui::Hsla,
-    meta: gpui::Hsla,
-    /// Half the card ground over a live thumb when the card is disabled.
-    thumb_veil: Option<gpui::Hsla>,
-}
-
-impl StageCardPaint {
-    fn of(t: &Theme, selected: bool, disabled: bool) -> Self {
-        // PanelSection paints no fill: these cards sit on plain glass_solid,
-        // not a 4% MediaCard panel. Unselected fill stays transparent.
-        let ground = t.glass_solid;
-        let dim = |color: Color| {
-            if disabled {
-                faded_over(color, ground, 0.5)
-            } else {
-                color
-            }
-        };
-        let border = if selected { t.foreground } else { t.border };
-        let fill = if selected {
-            let selected_fill = with_alpha(t.foreground, 0.08);
-            if disabled {
-                faded_over(selected_fill, ground, 0.5)
-            } else {
-                selected_fill
-            }
-        } else {
-            with_alpha(t.foreground, 0.)
-        };
-        Self {
-            border: hsla(dim(border)),
-            fill: hsla(fill),
-            thumb: hsla(dim(t.inset)),
-            name: hsla(dim(t.foreground)),
-            meta: hsla(dim(t.muted_foreground)),
-            thumb_veil: disabled.then(|| hsla(with_alpha(ground, 0.5))),
-        }
-    }
-
-    /// Layout cards use a muted plate instead of the Screens inset well.
-    fn layout_thumb(t: &Theme, disabled: bool) -> gpui::Hsla {
-        let ground = t.glass_solid;
-        let plate = with_alpha(t.muted, 0.5);
-        hsla(if disabled {
-            faded_over(plate, ground, 0.5)
-        } else {
-            plate
-        })
-    }
-}
-
 fn person_name(
     tile: &StageTile,
     participant: Option<&RoomParticipant>,
@@ -1343,99 +1583,25 @@ fn layout_card(
     entity: Entity<ShowStage>,
     t: &Theme,
 ) -> AnyElement {
-    let selected = current == option.value;
-    let disabled = !interactive || option.disabled_reason.is_some();
-    let reason = interactive.then_some(option.disabled_reason).flatten();
-    let paint = StageCardPaint::of(t, selected, disabled);
     let value = option.value;
-    let mut card = div()
-        .id(format!("stage-layout-{}", option.label))
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .w(px(120.))
-        .p(px(8.))
-        .rounded(px(radius::CHIP))
-        .border_1()
-        .border_color(paint.border)
-        .bg(paint.fill)
-        .child(
-            div()
-                .h(px(40.))
-                .rounded(px(radius::CHIP / 2.))
-                .bg(StageCardPaint::layout_thumb(t, disabled)),
-        )
-        .child(
-            div()
-                .type_scale(text::META)
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(paint.name)
-                .truncate()
-                .child(option.label),
-        );
-    if !disabled {
-        card = card.on_click(move |_, _, cx| {
+    let selected = current == value;
+    StageCard {
+        id: SharedString::from(format!("show-stage-layout-{}", option.label)).into(),
+        thumb: stage_layout_thumb(value, t),
+        label: option.label.into(),
+        meta: None,
+        selected,
+        disabled: !interactive || option.disabled_reason.is_some(),
+        disabled_reason: interactive
+            .then_some(option.disabled_reason)
+            .flatten()
+            .map(Into::into),
+    }
+    .render(t, move |_, cx| {
+        if !selected {
             entity.update(cx, |stage, cx| stage.set_layout(value, cx));
-        });
-    }
-    if let Some(reason) = reason {
-        card = card.tooltip(tooltip(reason));
-    } else if !interactive {
-        card = card.tooltip(tooltip(ROOM_HOST_PENDING));
-    }
-    card.into_any_element()
-}
-
-fn person_row(
-    person: &RoomPerson,
-    on_stage_list: bool,
-    host_ready: bool,
-    bring_blocked: Option<String>,
-    entity: Entity<ShowStage>,
-) -> ListRow {
-    let action = if person.host {
-        None
-    } else if on_stage_list && person.on_stage {
-        Some((SEND_BACKSTAGE, false))
-    } else if !person.host {
-        Some((BRING_ON, true))
-    } else {
-        None
-    };
-    let mut row = ListRow::new(format!("person-{}", person.identity), person.name.clone()).context(
-        if person.host {
-            "Host"
-        } else if person.on_stage {
-            ON_STAGE
-        } else {
-            BACKSTAGE
-        },
-    );
-    if let Some((label, on_stage)) = action {
-        let identity = person.identity.clone();
-        let disabled = !host_ready || (on_stage && bring_blocked.is_some());
-        let tip = if !host_ready {
-            Some(ROOM_HOST_PENDING.to_string())
-        } else if on_stage {
-            bring_blocked
-        } else {
-            None
-        };
-        let mut button = Button::new(format!("move-{}", person.identity))
-            .label(label)
-            .variant(ButtonVariant::Outline)
-            .size(ButtonSize::Xs)
-            .disabled(disabled)
-            .on_click(move |_, _, cx| {
-                let identity = identity.clone();
-                entity.update(cx, |stage, cx| stage.move_person(identity, on_stage, cx));
-            });
-        if let Some(tip) = tip {
-            button = button.tooltip(tip);
         }
-        row = row.child(button);
-    }
-    row
+    })
 }
 
 impl Render for ShowStage {
@@ -1481,9 +1647,14 @@ impl Render for ShowStage {
                     .title(problem),
             );
         }
-        if let Some(requests) = self.join_requests(cx) {
+        if let Some(requests) = self.join_requests(&t, cx) {
             section = section.child(requests);
         }
+
+        // `@min-[30rem]/show-stage:grid-cols-4`: the stage's own width is
+        // the window less the sidebar (208) and the Studio's right column
+        // (~330) and gutters; under 480 px the cards go two across.
+        let columns = card_columns(f32::from(window.viewport_size().width) - 208. - 330. - 48.);
 
         // Electron: Layout / Screens / People on the left (`flex-1`); Program
         // on the right at 36% (`@min-[44rem]/show-stage:flex-row`). Gallery
@@ -1494,9 +1665,9 @@ impl Render for ShowStage {
             .gap(px(16.))
             .min_w_0()
             .flex_1()
-            .child(self.layouts(&t, cx))
-            .child(self.screens_section(&people, &t, cx))
-            .child(self.people_section(&people, cx));
+            .child(self.layouts(columns, &t, cx))
+            .child(self.screens_section(&people, columns, &t, cx))
+            .child(self.people_section(&people, &t, cx));
 
         let row = div()
             .flex()
@@ -1560,5 +1731,6 @@ impl Render for ShowStage {
             )
             .child(close_dialog)
             .child(self.share_dialog(window, cx))
+            .child(self.moderation.clone())
     }
 }
