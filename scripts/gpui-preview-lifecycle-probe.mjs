@@ -21,6 +21,10 @@
 // 5. Retry after the backend surface is torn down (`preview.surface.destroy`):
 //    Retry brings it back presenting. A forced first-frame fallback has no
 //    switch in the GPUI app yet: that case is a named SKIP.
+// 6. Away from the Studio (#2342): 40 s on another page (Library), polling
+//    the phase twice a second: never healing, stalled or fallback, no "[preview]
+//    healing" / "Preview failed" in the log, and presenting again within
+//    5 s of coming back (VIDEORC_PREVIEW_AWAY_MS).
 //
 // Functional contract only (no fps or memory budgets). Evidence:
 // <VIDEORC_SMOKE_OUTPUT_DIR or a temp dir>/gpui-preview-lifecycle.json.
@@ -35,6 +39,7 @@ import {
   launchGpuiApp,
   logLinesSince,
   presentedAdvance,
+  sleep,
   waitUntil
 } from './lib/gpui-preview-probe.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -43,6 +48,7 @@ const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const cycles = Math.max(1, Number(process.env.VIDEORC_PREVIEW_LIFECYCLE_CYCLES ?? 10))
 const presentBudgetMs = Number(process.env.VIDEORC_GPUI_PREVIEW_BUDGET_MS ?? 20000)
 const sampleMs = 1000
+const awayMs = Number(process.env.VIDEORC_PREVIEW_AWAY_MS ?? 40000)
 const mac = process.platform === 'darwin'
 
 const steps = []
@@ -243,6 +249,45 @@ export async function runGpuiPreviewLifecycleProbe() {
       }
       const advance = await framesAdvance('after the torn-down retry')
       return { summary: `phases [${trail.join(' → ')}], ${advance} frames after` }
+    })
+
+    // 6. Away from the Studio (#2342): the page hides the docked video, and
+    // the watchdog holds instead of judging it, so 40 s on another page
+    // never reads healing or "Preview failed", and the Preview is still
+    // presenting on return.
+    await step(`away from the Studio for ${awayMs / 1000} s`, async () => {
+      await waitUntil(
+        'the docked preview was not presenting before leaving',
+        state,
+        (seen) => presenting(seen) && seen.mode === 'docked',
+        { budgetMs: presentBudgetMs, label: phaseOf }
+      )
+      const mark = logs.length
+      await command('open-tab', { tab: 'library' })
+      const phases = new Set()
+      const until = Date.now() + awayMs
+      while (Date.now() < until) {
+        const now = await state()
+        phases.add(phaseOf(now))
+        // "Preview failed" on the page is a stalled or fallback phase.
+        if (['healing', 'stalled', 'fallback'].includes(now?.phase)) {
+          throw new Error(`away, the preview read ${phaseOf(now)}`)
+        }
+        await sleep(500)
+      }
+      await command('open-tab', { tab: 'studio' })
+      const { trail } = await waitUntil(
+        'the preview was not presenting after coming back',
+        state,
+        (seen) => presenting(seen) && seen.mode === 'docked',
+        { budgetMs: 5000, label: phaseOf }
+      )
+      const healed = logLinesSince(logs, mark, /\[preview\] healing:|Preview failed/)
+      if (healed.length) throw new Error(`the log says: ${healed.slice(0, 3).join(' | ')}`)
+      const advance = await framesAdvance('back on the Studio')
+      return {
+        summary: `away: [${[...phases].join(', ')}]; back: [${trail.join(' → ')}], ${advance} frames after`
+      }
     })
 
     record('retry after a forced first-frame fallback', 'SKIP', {
