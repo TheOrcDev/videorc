@@ -5,20 +5,25 @@
 use std::rc::Rc;
 
 use gpui::{AnyElement, App, ClickEvent, IntoElement, Window, div, prelude::*};
+use videorc_app_core::chat::model::LiveChatProviderState;
+use videorc_app_core::chat::view::platform_label;
 use videorc_app_core::desktop::capture_protection::HideMethod;
 use videorc_app_core::stream_manager::copy::{
     CAPTURE_PROTECTION_UNSUPPORTED, HIDDEN_FROM_STREAM_FOOTER, HIDE_FROM_STREAM,
     HIGHLIGHT_POSITION, MORE_ACTIONS, SHOW_HIGHLIGHTS_IN, hide_from_stream_hint, open_preview,
 };
+use videorc_app_core::stream_manager::send::{chat_state_label, waiting_provider_message};
 use videorc_app_core::studio::clips::clip_length_label;
 use videorc_app_core::studio::sources::copy::{HIDE_SCREEN, SHOW_SCREEN};
 use videorc_kit::{
     button::{Button, ButtonSize, ButtonVariant},
     dropdown_menu::{DropdownMenu, Menu, MenuItem},
     pin_window_button::PinWindowButton,
+    platform_glyph::PlatformMark,
     shortcut_keys::ShortcutKeys,
     status_bar::{StatusBar, StatusBarHint},
     status_bar_action::StatusBarAction,
+    status_dot::{StatusDot, StatusTone},
 };
 
 use super::layout::{Tier, full_labels};
@@ -60,6 +65,7 @@ const SHOW_SCREEN_HINT: &str = "Show your screen to viewers again";
 /// The status bar under the panes.
 pub fn status_bar(
     notices: gpui::Entity<crate::screens::notifications::Centre>,
+    providers: &[LiveChatProviderState],
     pinned: bool,
     hidden: bool,
     hide_method: HideMethod,
@@ -94,6 +100,11 @@ pub fn status_bar(
         None
     };
     let mut bar = StatusBar::new();
+    // `StreamManagerStatusBar` leading (`chat-states`): each chat platform's
+    // mark and status dot, with its words when chat can't read and send.
+    if !providers.is_empty() {
+        bar = bar.leading(chat_states(providers));
+    }
     if let Some(words) = footer {
         bar = bar.leading(div().child(words));
     }
@@ -409,4 +420,74 @@ fn sounds_menu(
         }
     }
     menu
+}
+
+/// `providerTone`.
+fn provider_tone(provider: &LiveChatProviderState) -> StatusTone {
+    match provider.state.as_str() {
+        "connected" => StatusTone::Good,
+        "connecting" | "reconnecting" | "waiting" => StatusTone::Warn,
+        "failed" => StatusTone::Error,
+        _ => StatusTone::Neutral,
+    }
+}
+
+/// `providerCapabilityLabel`: what chat can't do here, in a word or two
+/// ("ended", "read-only"); empty while it reads and sends.
+fn provider_capability_label(provider: &LiveChatProviderState) -> String {
+    let label = chat_state_label(provider);
+    if label == "Connected" {
+        return String::new();
+    }
+    let mut chars = label.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// `providerProblem`: a stuck or stopped provider's own words.
+fn provider_problem(provider: &LiveChatProviderState) -> Option<String> {
+    if provider.state != "waiting" && provider.state != "failed" {
+        return None;
+    }
+    waiting_provider_message(provider, chrono::Local::now())
+        .or_else(|| Some(provider.message.trim().to_string()).filter(|m| !m.is_empty()))
+}
+
+/// The leading chat states: mark, dot, then "{Platform} {label}" (or the
+/// provider's problem), as `StreamManagerStatusBar` draws them.
+fn chat_states(providers: &[LiveChatProviderState]) -> AnyElement {
+    div()
+        .min_w(gpui::px(0.))
+        .flex()
+        .items_center()
+        .gap(gpui::px(12.))
+        .overflow_hidden()
+        .children(providers.iter().map(|provider| {
+            let words = provider_problem(provider).or_else(|| {
+                let label = provider_capability_label(provider);
+                (!label.is_empty())
+                    .then(|| format!("{} {label}", platform_label(&provider.platform)))
+            });
+            div()
+                .min_w(gpui::px(0.))
+                .flex()
+                .items_center()
+                .gap(gpui::px(6.))
+                .child(
+                    PlatformMark::new(super::rows::chat_platform(&provider.platform)).id(
+                        gpui::SharedString::from(format!("chat-state-mark-{}", provider.id)),
+                    ),
+                )
+                .child(
+                    StatusDot::new(gpui::SharedString::from(format!(
+                        "chat-state-{}",
+                        provider.id
+                    )))
+                    .tone(provider_tone(provider)),
+                )
+                .children(words.map(|words| div().truncate().child(words)))
+        }))
+        .into_any_element()
 }
