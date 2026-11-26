@@ -107,6 +107,10 @@ use screens::studio::{
 const APP_ID: &str = "dev.theorcdev.videorc";
 
 fn main() -> Result<()> {
+    // X11's one scale: Xft.dpi or GDK_SCALE, else 1, not the panel's
+    // physical DPI (platform/linux/x11_scale.rs). First, before any thread.
+    #[cfg(target_os = "linux")]
+    platform::linux::x11_scale::apply();
     // A launch as the update helper (plan 260 S5.2) installs the update the
     // app left ready once the app is gone, and does nothing else.
     #[cfg(target_os = "macos")]
