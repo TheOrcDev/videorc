@@ -141,6 +141,32 @@ fn pixel_chevron(ink: Hsla) -> Div {
         .child(dot(2., 2.))
 }
 
+/// `LcdPixelChevron direction="right"`: five 2 px dots in a 3×5 grid,
+/// 6 × 10 px. `hover_ink` lights the dots with their action button's words.
+fn pixel_chevron_right(ink: Hsla, hover_ink: Option<Hsla>) -> Div {
+    let dot = |x: f32, y: f32| {
+        div()
+            .absolute()
+            .left(px(x * 2.))
+            .top(px(y * 2.))
+            .size(px(2.))
+            .bg(ink)
+            .when_some(hover_ink, |dot, lit_ink| {
+                dot.group_hover(ACTION_GROUP, move |style| style.bg(lit_ink))
+            })
+    };
+    div()
+        .relative()
+        .flex_none()
+        .w(px(6.))
+        .h(px(10.))
+        .child(dot(0., 0.))
+        .child(dot(0., 4.))
+        .child(dot(1., 1.))
+        .child(dot(1., 3.))
+        .child(dot(2., 2.))
+}
+
 /// The opaque solid for inverted key fills.
 pub fn solid(theme: &Theme) -> Hsla {
     hsla(theme.glass_solid)
@@ -341,6 +367,7 @@ pub fn action_button(
     let lit_ink = lit(theme);
     div()
         .id(id)
+        .group(ACTION_GROUP)
         .aria_label(label.clone())
         .flex()
         .min_w_0()
@@ -354,8 +381,13 @@ pub fn action_button(
         .cursor_pointer()
         .on_click(on_click)
         .child(div().truncate().child(caps(label)))
-        .child(icon(IconName::CaretRight, 10., lit_ink))
+        // `LcdPixelChevron direction="right"` in the words' ink
+        // (`currentColor`): dim at rest, lit with them on hover.
+        .child(pixel_chevron_right(ink, Some(lit_ink)))
 }
+
+/// The hover group an action button's chevron lights with.
+const ACTION_GROUP: &str = "lcd-action-button";
 
 /// Settings cog that opens the owning page ("Open Sources", "Open Images").
 pub fn cog(
@@ -483,7 +515,7 @@ pub fn nav_row(
                 .gap(px(8.))
                 .text_color(lit(theme))
                 .child(div().min_w_0().truncate().child(value))
-                .child(icon(IconName::CaretRight, 10., lit(theme))),
+                .child(pixel_chevron_right(lit(theme), None)),
         )
 }
 
@@ -627,6 +659,11 @@ pub fn switch_words(
     aria: impl Into<SharedString>,
     on_change: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    // `LcdPanelSwitch`: `LCD_VALUE_BUTTON`'s lit words for On, the dim ink
+    // for Off (`!checked && text-(--lcd-display-ink-dim)`); never a fill.
     let words = if checked { "On" } else { "Off" };
-    value_button(id, theme, words, checked, disabled, None, on_change).aria_label(aria)
+    value_button_with(
+        id, theme, None, !checked, words, false, disabled, None, on_change,
+    )
+    .aria_label(aria)
 }
