@@ -219,6 +219,12 @@ impl ChatPane {
         let sign_in_rows = pane::chat_sign_in_rows(&seed.providers);
         let delivery_cursor = seed.delivery.cursor();
         let session_id = seed.session_id.clone();
+        // Electron's pane: a chat with a session is live, on air or not.
+        let live = live || session_id.is_some();
+        // A window opened onto chat that's already there opens on its newest
+        // message, once the rows have laid out (`apply_live_chat` settles the
+        // same way for later updates).
+        let settle_scroll = if messages.is_empty() { 0 } else { 3 };
         let operations = moderation.borrow().clone();
         let mut events = studio.backend().subscribe();
         cx.spawn(async move |this, cx| {
@@ -296,7 +302,7 @@ impl ChatPane {
             completion_index: 0,
             following: true,
             history: false,
-            settle_scroll: 0,
+            settle_scroll,
             unread: 0,
             incomplete: false,
             delivery_cursor,
