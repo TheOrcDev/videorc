@@ -347,7 +347,13 @@ fn gpui_key_names_become_dom_codes() {
         ("space", "Space"),
         ("µ", "Unsupported"),
         ("f25", "Unsupported"),
-        ("shift", "Unsupported"),
+        // A lone modifier's release (GPUI's own keystroke) is its modifier
+        // code, which the recorder reads as held keys (#2284).
+        ("shift", "ShiftLeft"),
+        ("control", "ControlLeft"),
+        ("alt", "AltLeft"),
+        ("platform", "MetaLeft"),
+        ("function", "Fn"),
     ] {
         assert_eq!(code_for_gpui_key(key), code, "{key}");
     }
