@@ -1657,6 +1657,9 @@ fn look_body(
 
     let mut orientation = SegmentedControl::new("first-run-orientation")
         .accessibility_label("Orientation")
+        // Electron's default w-fit (look-step.tsx, a plain flex column): the
+        // track hugs its words instead of filling the column.
+        .fit(true)
         .option(Segment::new("horizontal", "Horizontal 16:9"))
         .option(Segment::new("vertical", "Vertical 9:16"))
         .value(Some(SharedString::from(match screen.orientation {
@@ -1680,6 +1683,7 @@ fn look_body(
 
     let mut shape = SegmentedControl::new("first-run-shape")
         .accessibility_label("Camera shape")
+        .fit(true)
         .option(Segment::new("rectangle", "Rectangle"))
         .option(Segment::new("rounded", "Rounded"))
         .option(Segment::new("circle", "Circle"))
