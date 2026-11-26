@@ -250,6 +250,20 @@ try {
     )
   await renderer.setClips(false)
   await waitForRecordingIdle()
+  // Electron's reconcile puts the first available display in a fresh
+  // profile's capture config (`reconcileSourceSelection`'s
+  // defaultCaptureDevice, lib/capture.ts), so Screen only finds a screen.
+  // The GPUI app withholds device defaults under the smoke command server
+  // (`StudioConfig::withhold_device_defaults`, S3.1c: it inherits the
+  // terminal's grants), so its capture config holds no screen and Screen
+  // only is refused as "No screen is chosen". Pick that display here.
+  if (gpuiApp) {
+    await renderer.command('select-screen-device', { sourceId: display.id, settleMs: 0 })
+    await renderer.waitFor(
+      (state) => state.visual.sources.screenId === display.id,
+      `working scene on ${display.name} (the display Electron picks by default)`
+    )
+  }
   await renderer.applyLayout(
     { layoutPreset: 'screen-only' },
     (state) => state.canSave && state.visual.layout.layoutPreset === 'screen-only',
