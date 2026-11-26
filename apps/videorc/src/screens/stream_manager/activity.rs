@@ -13,6 +13,7 @@ use videorc_app_core::chat::view::platform_label;
 use videorc_app_core::stream_manager::activity::{ActivityFilter, ActivityItem, activity_items};
 use videorc_app_core::stream_manager::dashboard::LiveDashboard;
 use videorc_kit::empty::Empty;
+use videorc_kit::platform_glyph::PlatformMark;
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, hsla};
 use videorc_kit::toggle_group::{ToggleGroup, ToggleItem};
@@ -23,6 +24,21 @@ const ACTIVITY_FILTERED_EMPTY: &str = "Nothing matches this filter.";
 const ACTIVITY_PANE: &str = "Activity";
 const ACTIVITY_LIST: &str = "Activity";
 const AUTO_SHOW: &str = "Auto-show";
+/// The switch's name (`aria-label`).
+const AUTO_SHOW_NAME: &str =
+    "Automatically show new follows, subs, gifts, tips, rewards, raids and streaks on stream";
+const FILTER_ACTIVITY: &str = "Filter activity";
+/// `PlatformFilter`'s order.
+const PLATFORM_ORDER: &[&str] = &[
+    "youtube",
+    "twitch",
+    "kick",
+    "x",
+    "facebook",
+    "tiktok",
+    "instagram",
+    "custom",
+];
 const SHOW_FROM: &str = "Show activity from";
 
 const FILTERS: &[(ActivityFilter, &str)] = &[
@@ -43,6 +59,8 @@ pub struct ActivityPane {
     audience: Option<videorc_app_core::stream_manager::dashboard::AudienceSnapshot>,
     /// `None` = All.
     filter: Option<ActivityFilter>,
+    /// `PlatformFilter`'s choice; `None` = All.
+    platform: Option<String>,
     auto_show: bool,
 }
 
@@ -98,8 +116,18 @@ impl ActivityPane {
             destination_events,
             audience,
             filter: None,
+            platform: None,
             auto_show: false,
         }
+    }
+
+    /// The platforms chat reads, in the filter's order (`PlatformFilter`).
+    fn platforms(&self) -> Vec<&'static str> {
+        PLATFORM_ORDER
+            .iter()
+            .copied()
+            .filter(|platform| self.messages.iter().any(|m| m.platform == *platform))
+            .collect()
     }
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
@@ -126,73 +154,159 @@ impl ActivityPane {
                 None => true,
                 Some(want) => item.filter == Some(want),
             })
+            .filter(|item| {
+                self.platform
+                    .as_deref()
+                    .is_none_or(|platform| item.platform == platform)
+            })
             .collect()
     }
 
-    fn filters_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// `ActivityPane`'s header: the platform filter (All and each platform's
+    /// mark, as chat's), the kind chips that have rows (with their count; a
+    /// chip pressed again turns back off), and Auto-show with its words.
+    fn filters_bar(&self, muted: gpui::Hsla, cx: &mut Context<Self>) -> AnyElement {
         let this = cx.entity().downgrade();
-        let mut values: Vec<SharedString> = Vec::new();
-        if let Some(filter) = self.filter {
-            values.push(filter_id(filter).into());
-        } else {
-            values.push("all".into());
-        }
-        let mut group = ToggleGroup::new("activity-kind-filters")
+        let mut platform_group = ToggleGroup::new("activity-platform-filter")
             .xs(true)
             .accessibility_label(SHOW_FROM)
             .item(ToggleItem::new("all", "All"))
-            .value(values)
+            .value(vec![SharedString::from(
+                self.platform.clone().unwrap_or_else(|| "all".into()),
+            )])
             .on_change({
                 let this = this.clone();
                 move |values, _, app| {
-                    let next = values.first().map(|v| v.as_ref()).and_then(parse_filter);
+                    let next = values.first().map(|v| v.to_string()).filter(|v| v != "all");
                     let _ = this.update(app, |pane, cx| {
-                        pane.filter = next;
+                        pane.platform = next;
                         cx.notify();
                     });
                 }
             });
-        for (filter, label) in FILTERS {
-            let count = self
-                .items
-                .iter()
-                .filter(|item| item.filter == Some(*filter))
-                .count();
-            let words = if count > 0 {
-                format!("{label} {count}")
-            } else {
-                (*label).to_string()
-            };
-            group = group.item(ToggleItem::new(filter_id(*filter), words));
+        for platform in self.platforms() {
+            platform_group = platform_group.item(
+                ToggleItem::new(platform, platform_label(platform))
+                    .child(
+                        PlatformMark::new(chat_platform(platform))
+                            .id(SharedString::from(format!(
+                                "activity-filter-mark-{platform}"
+                            )))
+                            .size(20.),
+                    )
+                    .chip(true),
+            );
         }
+        let with_rows: Vec<(ActivityFilter, &str, usize)> = FILTERS
+            .iter()
+            .map(|(filter, label)| {
+                let count = self
+                    .items
+                    .iter()
+                    .filter(|item| item.filter == Some(*filter))
+                    .count();
+                (*filter, *label, count)
+            })
+            .filter(|(_, _, count)| *count > 0)
+            .collect();
+        let kinds = (!with_rows.is_empty()).then(|| {
+            let mut group = ToggleGroup::new("activity-kind-filters")
+                .xs(true)
+                .accessibility_label(FILTER_ACTIVITY)
+                .value(
+                    self.filter
+                        .map(|filter| vec![SharedString::from(filter_id(filter))])
+                        .unwrap_or_default(),
+                )
+                .on_change({
+                    let this = this.clone();
+                    move |values, _, app| {
+                        let next = values.first().map(|v| v.as_ref()).and_then(parse_filter);
+                        let _ = this.update(app, |pane, cx| {
+                            pane.filter = next;
+                            cx.notify();
+                        });
+                    }
+                });
+            for (filter, label, count) in with_rows {
+                group = group.item(ToggleItem::new(
+                    filter_id(filter),
+                    format!("{label} {count}"),
+                ));
+            }
+            group
+        });
         let auto_show = self.auto_show;
         div()
             .id("activity-filters")
             .flex()
             .flex_none()
-            .flex_wrap()
             .items_center()
             .gap(px(8.))
-            .px(px(12.))
+            .px(px(8.))
             .py(px(6.))
-            .child(group)
-            .child(div().flex_1())
             .child(
-                Switch::new("activity-auto-show")
-                    .small(true)
-                    .accessibility_label(AUTO_SHOW)
-                    .checked(auto_show)
-                    .on_change({
-                        let this = this;
-                        move |value, _, app| {
-                            let _ = this.update(app, |pane, cx| {
-                                pane.auto_show = value;
-                                cx.notify();
-                            });
-                        }
-                    }),
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(platform_group)
+                    .children(kinds),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(12.))
+                    .text_color(muted)
+                    .child(AUTO_SHOW)
+                    .child(
+                        Switch::new("activity-auto-show")
+                            .small(true)
+                            .accessibility_label(AUTO_SHOW_NAME)
+                            .checked(auto_show)
+                            .on_change(move |value, _, app| {
+                                let _ = this.update(app, |pane, cx| {
+                                    pane.auto_show = value;
+                                    cx.notify();
+                                });
+                            }),
+                    ),
             )
             .into_any_element()
+    }
+
+    /// `activityCapabilityNote`: what this stream's platforms don't share.
+    fn capability_note(&self) -> Option<String> {
+        let platforms = self.platforms();
+        let mut notes: Vec<&str> = Vec::new();
+        if platforms.contains(&"x") {
+            notes.push("X doesn't share tips. New X followers show as a count.");
+        }
+        if platforms.contains(&"kick") {
+            notes.push("Kick shows each new follow but doesn't share a follower total.");
+        }
+        (!notes.is_empty()).then(|| notes.join(" "))
+    }
+}
+
+/// `ChatPlatformIcon`'s platform: the backend's id, anything else custom.
+fn chat_platform(platform: &str) -> videorc_kit::ChatPlatform {
+    use videorc_kit::ChatPlatform;
+    match platform {
+        "youtube" => ChatPlatform::Youtube,
+        "twitch" => ChatPlatform::Twitch,
+        "kick" => ChatPlatform::Kick,
+        "x" => ChatPlatform::X,
+        "facebook" => ChatPlatform::Facebook,
+        "tiktok" => ChatPlatform::Tiktok,
+        "instagram" => ChatPlatform::Instagram,
+        _ => ChatPlatform::Custom,
     }
 }
 
@@ -276,10 +390,14 @@ impl Render for ActivityPane {
         let border = hsla(t.border);
         let shown = self.shown();
         let filtering = self.filter.is_some();
-        let empty = if filtering {
-            ACTIVITY_FILTERED_EMPTY
+        let filtering = filtering || self.platform.is_some();
+        let empty: String = if filtering {
+            ACTIVITY_FILTERED_EMPTY.into()
         } else {
-            ACTIVITY_EMPTY
+            match self.capability_note() {
+                Some(note) => format!("{ACTIVITY_EMPTY} {note}"),
+                None => ACTIVITY_EMPTY.into(),
+            }
         };
         div()
             .id("activity-pane")
@@ -287,7 +405,7 @@ impl Render for ActivityPane {
             .flex()
             .flex_col()
             .aria_label(ACTIVITY_PANE)
-            .child(self.filters_bar(cx))
+            .child(self.filters_bar(muted, cx))
             .child(
                 div()
                     .flex_1()
