@@ -180,6 +180,11 @@ impl Render for Player {
         if let Some(line) = no_player {
             body = body.child(
                 div()
+                    .id("player-no-video")
+                    // Opening focuses `self.focus` (the video slot's, absent
+                    // here): the line holds it, so the dialog keeps the key
+                    // focus and Escape closes it.
+                    .track_focus(&self.focus)
                     .type_scale(text::META)
                     .text_color(hsla(t.muted_foreground))
                     .child(line),
