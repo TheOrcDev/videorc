@@ -5,7 +5,7 @@ use videorc_app_core::library::{
     noise::{NoiseCleanupAction, latest_job_for_session},
 };
 use videorc_kit::{
-    Checkbox, CheckboxChecked,
+    Checkbox, CheckboxChecked, MenuShortcut,
     alert::{Alert, AlertVariant},
     badge::{Badge, BadgeVariant},
     button::{Button, ButtonSize, ButtonVariant},
@@ -134,26 +134,45 @@ impl LibraryScreen {
                 let weak = cx.entity().downgrade();
                 let id = row.id.clone();
                 let action = item.id;
-                KebabMenuItem::new(item.id.as_str(), item.label.clone(), move |window, cx| {
-                    let _ = weak.update(cx, |this, cx| this.action(id.clone(), action, window, cx));
-                })
-                .disabled(
-                    item.disabled
-                        || !implemented
-                        || row.menu_disabled
-                        || self.busy.contains(&row.id),
-                )
-                .disabled_reason(item.reason.clone().unwrap_or_else(|| {
-                    if !implemented {
-                        "This action isn't available in this window yet.".into()
-                    } else if row.menu_disabled {
-                        "Videorc is reconnecting…".into()
-                    } else {
-                        "This recording isn't ready for that action.".into()
+                let item =
+                    KebabMenuItem::new(item.id.as_str(), item.label.clone(), move |window, cx| {
+                        let _ =
+                            weak.update(cx, |this, cx| this.action(id.clone(), action, window, cx));
+                    })
+                    .disabled(
+                        item.disabled
+                            || !implemented
+                            || row.menu_disabled
+                            || self.busy.contains(&row.id),
+                    )
+                    .disabled_reason(item.reason.clone().unwrap_or_else(|| {
+                        if !implemented {
+                            "This action isn't available in this window yet.".into()
+                        } else if row.menu_disabled {
+                            "Videorc is reconnecting…".into()
+                        } else {
+                            "This recording isn't ready for that action.".into()
+                        }
+                    }))
+                    .destructive(item.destructive)
+                    .group(group.to_string());
+                // Electron's row menu (`library-tab.tsx`): each item's icon,
+                // and Rename's and Delete's keys.
+                let item = match menu_icon(action) {
+                    Some(name) => item.icon(move |ink| icon(name, 16., ink)),
+                    None => item,
+                };
+                match action {
+                    MenuId::Rename => item.shortcut(MenuShortcut::Keys("enter")),
+                    MenuId::Delete => {
+                        item.shortcut(MenuShortcut::Keys(if cfg!(target_os = "macos") {
+                            "cmd-backspace"
+                        } else {
+                            "ctrl-backspace"
+                        }))
                     }
-                }))
-                .destructive(item.destructive)
-                .group(group.to_string())
+                    _ => item,
+                }
             })
             .collect()
     }
@@ -991,4 +1010,28 @@ impl LibraryScreen {
             line,
         )
     }
+}
+
+/// Electron's icons for the row menu (`components/icons.tsx`): Play, the
+/// Sidekick page's UserSound, Scissors for Clean cut, BookmarkSimple,
+/// FolderOpen, WaveformSlash, FileVideo, ChatCircle, PencilSimple, Copy,
+/// CheckCircle, ArrowCounterClockwise and Trash. Repair's Wrench isn't in
+/// the kit's set yet.
+fn menu_icon(id: MenuId) -> Option<IconName> {
+    Some(match id {
+        MenuId::Play => IconName::Play,
+        MenuId::BuddyReport => IconName::UserSound,
+        MenuId::CleanCut | MenuId::ReviewCleanCut => IconName::Scissors,
+        MenuId::Markers => IconName::BookmarkSimple,
+        MenuId::Reveal => IconName::FolderOpen,
+        MenuId::NoiseCleanup => IconName::WaveformSlash,
+        MenuId::ExportMp4 => IconName::FileVideo,
+        MenuId::StreamManager => IconName::ChatCircle,
+        MenuId::Rename => IconName::PencilSimple,
+        MenuId::Duplicate => IconName::Copy,
+        MenuId::Check => IconName::CheckCircle,
+        MenuId::Restore => IconName::ArrowCounterClockwise,
+        MenuId::Delete => IconName::Trash,
+        MenuId::Repair => return None,
+    })
 }
