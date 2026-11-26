@@ -162,6 +162,30 @@ export const SCREENS = Object.freeze([
     baseline: { screen: 'library', state: 'default' },
     sections: ['Library page']
   },
+  // Before go-live's restart: a relaunch marks the fake chat's running
+  // session interrupted, and Electron's shooter (one launch) still shows it
+  // running ("Still recording" in its Markers dialog).
+  {
+    id: 'library-kebab',
+    title: 'Library ⌘0, a session ⋯ menu',
+    deck: 'pages',
+    open: page('library'),
+    clicks: [{ names: ['Session actions'], role: 'button' }],
+    close: 'Escape',
+    baseline: { screen: 'library', state: 'kebab-menu' },
+    sections: ['Library page']
+  },
+  {
+    id: 'library-player',
+    title: 'Library ⌘0, a session in the player (Markers)',
+    deck: 'pages',
+    open: page('library'),
+    // Electron's shooter: the row's ⋯, then Markers, which opens the player.
+    clicks: [{ names: ['Session actions'], role: 'button' }, { names: ['Markers'] }],
+    close: 'Escape',
+    baseline: { screen: 'library-player', state: 'default' },
+    sections: ['Library page']
+  },
   {
     id: 'images',
     title: 'Images ⇧⌘G',
@@ -412,27 +436,6 @@ export const SCREENS = Object.freeze([
     close: { click: { name: 'Twitch' } },
     baseline: { screen: 'livestream-setup', state: 'stream-quality' },
     sections: ['Destination card', 'Stream quality']
-  },
-  {
-    id: 'library-kebab',
-    title: 'Library ⌘0, a session ⋯ menu',
-    deck: 'pages',
-    open: page('library'),
-    clicks: [{ names: ['Session actions'], role: 'button' }],
-    close: 'Escape',
-    baseline: { screen: 'library', state: 'kebab-menu' },
-    sections: ['Library page']
-  },
-  {
-    id: 'library-player',
-    title: 'Library ⌘0, a session in the player (Markers)',
-    deck: 'pages',
-    open: page('library'),
-    // Electron's shooter: the row's ⋯, then Markers, which opens the player.
-    clicks: [{ names: ['Session actions'], role: 'button' }, { names: ['Markers'] }],
-    close: 'Escape',
-    baseline: { screen: 'library-player', state: 'default' },
-    sections: ['Library page']
   },
   {
     id: 'stream-manager-window',
