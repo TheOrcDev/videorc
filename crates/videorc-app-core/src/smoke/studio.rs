@@ -422,14 +422,18 @@ impl StudioSmoke {
         let kind = crate::studio::gallery_show_stage::GalleryShowStage::parse(kind)
             .ok_or_else(|| {
                 format!(
-                    "gallery-seed-show-stage kind must be closed, open, screens or host-camera-off (got {kind})."
+                    "gallery-seed-show-stage kind must be none, closed, open, screens or host-camera-off (got {kind})."
                 )
             })?;
         self.studio.seed_gallery_show_stage(kind).await;
         Ok(json!({
             "seeded": true,
             "kind": kind.as_str(),
-            "previewReplaced": kind != crate::studio::gallery_show_stage::GalleryShowStage::Closed,
+            "previewReplaced": !matches!(
+                kind,
+                crate::studio::gallery_show_stage::GalleryShowStage::None
+                    | crate::studio::gallery_show_stage::GalleryShowStage::Closed
+            ),
         }))
     }
 
