@@ -93,18 +93,14 @@ export async function runGpuiFreeformEditor({
   const command = (name, params = {}) => requestSmokeCommand(smoke, name, params, { timeoutMs })
   const ui = createUiDriver(smoke)
   const backend = await connectBackend(launched.connections['backend-ready'], timeoutMs)
-  const setScene = async (scene, layout = null) => {
-    const status = await request(backend, timeoutMs, 'compositor.status')
-    const revision = Number(status.sceneRevision ?? 0) + 1
-    await command('backend-debug-rpc', {
-      method: 'compositor.scene.update',
-      params: {
-        revision,
-        scene,
-        layout: layout ?? status.sceneLayout ?? status.layout ?? null,
-        activeScreen: null
-      },
-      timeoutMs
+  const setScene = async (scene) => {
+    await command('studio-scene-layout', {
+      patch: {
+        arrangementMode: 'freeform',
+        sourceTransformOverrides: Object.fromEntries(
+          scene.sources.map((source) => [source.id, source.transform])
+        )
+      }
     })
   }
 
@@ -124,7 +120,7 @@ export async function runGpuiFreeformEditor({
   // gutter outside it); the stage card around it also holds the toolbar's
   // lines and footer. It is measured again after each orientation change.
   // A build without the node falls back to the stage less the gutter.
-  const measureCanvas = async () => {
+  const readCanvas = async () => {
     const box = await ui.waitFor({ id: 'scene-canvas-box' }, { timeoutMs: 3000 }).catch(() => null)
     if (box?.bounds) return { ...box.bounds }
     const around = (await ui.waitFor({ id: 'scene-stage' })).bounds
@@ -134,6 +130,22 @@ export async function runGpuiFreeformEditor({
       width: around.width - STAGE_GUTTER_PX * 2,
       height: around.height - STAGE_GUTTER_PX * 2
     }
+  }
+  const measureCanvas = async () => {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const box = await readCanvas()
+      const bounds = (await command('main-window-id')).bounds
+      const viewport = bounds && { y: 40, height: bounds.height - 80 }
+      assert.ok(viewport, 'Scene viewport has no bounds')
+      if (box.y >= viewport.y + 20 && box.y + box.height <= viewport.y + viewport.height - 20) {
+        return box
+      }
+      await ui.scroll(undefined, {
+        dy: box.y + box.height / 2 - (viewport.y + viewport.height / 2)
+      })
+      await sleep(150)
+    }
+    throw new Error('Freeform canvas did not scroll fully into the Scene viewport')
   }
   let canvas = await measureCanvas()
   assert.ok(canvas.width > 40 && canvas.height > 40, `canvas too small: ${JSON.stringify(canvas)}`)
@@ -167,7 +179,10 @@ export async function runGpuiFreeformEditor({
     await patchSourceTransform(backend, timeoutMs, BASE_SOURCE_ID, seedTransform, setScene)
     await sleep(200)
     canvas = await measureCanvas()
-    report.gpui[orientation] = { canvas }
+    report.gpui[orientation] = {
+      canvas,
+      working: (await command('studio-scenes-state')).working
+    }
 
     for (let index = 0; index < 4; index++) {
       await gpuiGesture({
