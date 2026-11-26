@@ -91,6 +91,12 @@ const { values } = parseArgs({
     all: { type: 'boolean', default: false },
     'pages-only': { type: 'boolean', default: false },
     'electron-only': { type: 'boolean', default: false },
+    // Same state as the Electron baselines: the docked Preview closed
+    // (Electron's shooter can't capture its native Preview layer).
+    'preview-open': { type: 'boolean', default: false },
+    // Raise the window with focus, so it is shot active (a run nobody is
+    // typing next to, such as the overnight one).
+    focus: { type: 'boolean', default: false },
     sha: { type: 'string' }
   }
 })
@@ -386,7 +392,44 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
       focus: false
     })
     raisedWindowId = Number.isInteger(raised?.windowId) ? raised.windowId : null
+    // `--focus`: the GPUI app's raise-window has no focus yet, so activate
+    // the app by its pid (AppKit, no Accessibility grant); its window is
+    // then shot active.
+    if (values.focus) {
+      try {
+        execFileSync('osascript', [
+          '-l',
+          'JavaScript',
+          '-e',
+          `ObjC.import('AppKit'); $.NSRunningApplication.runningApplicationWithProcessIdentifier(${app.process.pid}).activateWithOptions($.NSApplicationActivateIgnoringOtherApps)`
+        ])
+      } catch (error) {
+        log(`could not activate the app: ${error.message}`)
+      }
+    }
     await sleep(800)
+    // Electron's baselines launch with VIDEORC_DISABLE_AUTO_PREVIEW and shoot
+    // the page through DevTools, which can't hold the native Preview layer:
+    // their Studio says "Preview is closed". Close the docked Preview here
+    // too, so every screen shot over the Studio compares in the same state.
+    // ⌘P's own handler (`preview-toggle-open`) closes it whatever the row
+    // shows; the state says whether it is open, before and after.
+    if (!values['preview-open']) {
+      await command('open-tab', { tab: 'studio' }).catch(() => {})
+      await sleep(SETTLE_MS)
+      try {
+        let state = await command('preview-window-state')
+        for (let tries = 0; state && !state.closed && tries < 2; tries += 1) {
+          await command('preview-toggle-open')
+          await sleep(800)
+          state = await command('preview-window-state')
+        }
+        if (!state?.closed) log(`the docked Preview stayed open: ${JSON.stringify(state)}`)
+      } catch (error) {
+        log(`could not close the docked Preview: ${error.message}`)
+      }
+      await sleep(400)
+    }
   }
   const stop = async () => {
     ws?.close()
