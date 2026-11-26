@@ -163,11 +163,27 @@ pub(crate) fn field_description(description: impl Into<SharedString>, t: &Theme)
 }
 
 /// A Field's words beside its control: `FieldLabel` over a
-/// `FieldDescription`, `gap-0.5`. A horizontal Field balances its
-/// description's lines (`group-has-data-horizontal/field:text-balance`).
+/// `FieldDescription`, `gap-0.5`.
 pub(crate) fn field_text(
     label: impl Into<SharedString>,
     description: Option<SharedString>,
+    t: &Theme,
+) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .gap(px(2.))
+        .child(field_label(label.into(), t))
+        .children(description.map(|description| field_description(description, t)))
+}
+
+/// `field_text` with balanced description lines: Electron balances a
+/// Field's description only when the Field holds something horizontal
+/// (`group-has-data-horizontal/field:text-balance`), a cooldown slider here.
+pub(crate) fn field_text_balanced(
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
     t: &Theme,
 ) -> gpui::Div {
     let label: SharedString = label.into();
@@ -178,11 +194,11 @@ pub(crate) fn field_text(
         .min_w_0()
         .gap(px(2.))
         .child(field_label(label, t))
-        .children(description.map(|description| {
+        .child(
             div()
                 .text_color(hsla(t.muted_foreground))
-                .child(BalancedText::new(id, description, 12., 18.))
-        }))
+                .child(BalancedText::new(id, description, 12., 18.)),
+        )
 }
 
 /// The same words with a plain `text-xs` line under the label (16 px line
