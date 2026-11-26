@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       artifacts:
-        description: Build downloadable Linux debug app and backend binaries
+        description: Build downloadable Linux debug app, backend and MCP bridge binaries
         type: boolean
         required: false
         default: false
@@ -66,7 +66,7 @@ jobs:
           if [ "$BUILD_ARTIFACTS" = true ]; then lock_args=(); fi
           cargo check "${lock_args[@]}" -p videorc-app-core -p videorc-kit -p videorc-protocol -p videorc-app --all-targets
 
-      - name: Build Linux debug app and backend
+      - name: Build Linux debug app, backend and MCP bridge
         if: github.event_name == 'workflow_dispatch' && inputs.artifacts
         env:
           CARGO_BUILD_JOBS: 1
@@ -75,14 +75,15 @@ jobs:
         # need Cargo to prune the feature edges. Never change release inputs.
         run: |
           cargo build -p videorc-app
-          cargo build -p videorc-backend
+          cargo build -p videorc-backend --bin videorc-backend --bin videorc-mcp
 
       - name: Bundle executable Linux debug binaries
         if: github.event_name == 'workflow_dispatch' && inputs.artifacts
         run: |
           artifact_dir="$RUNNER_TEMP/gpui-linux-x64"
           mkdir -p "$artifact_dir"
-          cp target/debug/Videorc target/debug/videorc-backend "$artifact_dir/"
+          cp target/debug/Videorc target/debug/videorc-backend target/debug/videorc-mcp "$artifact_dir/"
+          test -x "$artifact_dir/videorc-mcp"
           cp Cargo.lock "$artifact_dir/"
           printf '%s\n' "$GITHUB_SHA" > "$artifact_dir/SOURCE_SHA"
           # Tar preserves executable permissions across upload/download.
