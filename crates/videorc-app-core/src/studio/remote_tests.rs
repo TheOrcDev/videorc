@@ -70,6 +70,38 @@ fn an_idle_studio_shows_its_saved_mode_and_every_layout() {
 }
 
 #[test]
+fn system_audio_is_available_only_once_a_list_names_its_device() {
+    // Electron's `systemAudioStatus`: the listed device's own status. The
+    // Studio row's Mac stand-in ("Available until the first list") is not
+    // the remotes' word.
+    let mut snapshot = ready_snapshot();
+    snapshot.settings.capture.audio.system_audio_enabled = true;
+    let state = wire(&surface_of(&snapshot, &RemoteExtras::default()))["state"].clone();
+    assert_eq!(state["systemAudioAvailable"], json!(false));
+    assert_eq!(state["systemAudioOn"], json!(false));
+
+    let device: videorc_protocol::Device = serde_json::from_value(json!({
+        "id": "system-audio", "name": "System audio",
+        "kind": "system-audio", "status": "available"
+    }))
+    .expect("a device");
+    snapshot.sources.devices.devices = vec![device];
+    snapshot.sources.devices_known = true;
+    let state = wire(&surface_of(&snapshot, &RemoteExtras::default()))["state"].clone();
+    assert_eq!(state["systemAudioAvailable"], json!(true));
+    assert_eq!(
+        state["systemAudioOn"],
+        json!(true),
+        "the switch's request, unconfirmed"
+    );
+
+    snapshot.sources.devices.devices[0].status = DeviceStatus::PermissionRequired;
+    let state = wire(&surface_of(&snapshot, &RemoteExtras::default()))["state"].clone();
+    assert_eq!(state["systemAudioAvailable"], json!(false));
+    assert_eq!(state["systemAudioOn"], json!(false));
+}
+
+#[test]
 fn a_running_session_shows_what_it_does() {
     let mut snapshot = ready_snapshot();
     snapshot.settings.capture.record_enabled = false;
