@@ -63,6 +63,26 @@ fn media_type(permission: MediaAccessPermission) -> Option<&'static AVMediaType>
     }
 }
 
+/// The scroll bars macOS draws (`NSScroller.preferredScrollerStyle`):
+/// classic, in a gutter and always shown, with a mouse plugged in or "Show
+/// scroll bars: Always"; overlay otherwise. The kit's ScrollArea follows it,
+/// as Chromium's native bars do in Electron.
+pub fn system_scrollbar_style() -> videorc_kit::ScrollbarStyle {
+    use objc2::msg_send;
+    use objc2::runtime::AnyClass;
+    let Some(class) = AnyClass::get(c"NSScroller") else {
+        return videorc_kit::ScrollbarStyle::Overlay;
+    };
+    // SAFETY: an AppKit class method on the main thread returning
+    // NSScrollerStyle, an NSInteger: 0 is legacy (classic), 1 overlay.
+    let style: isize = unsafe { msg_send![class, preferredScrollerStyle] };
+    if style == 0 {
+        videorc_kit::ScrollbarStyle::Classic
+    } else {
+        videorc_kit::ScrollbarStyle::Overlay
+    }
+}
+
 /// The primary display's height in points (`NSScreen.screens[0]`), what
 /// flips a top-left frame into AppKit's bottom-left one.
 fn primary_screen_height() -> OsResult<f64> {

@@ -511,6 +511,10 @@ fn main() -> Result<()> {
         // The scene picker's Screen Recording alert reads it (P488).
         cx.set_global(app::permissions::PermissionsGlobal(settings_permissions.clone()));
         videorc_kit::init(cx);
+        // Classic scroll bars take a gutter, as the native ones do in
+        // Electron; overlay ones (the default) don't.
+        #[cfg(target_os = "macos")]
+        videorc_kit::set_scrollbar_style(platform::macos::system_scrollbar_style(), cx);
         // The menu bar from the core's template, and the keys it names.
         ExitGuard::install(cx, &exit_runtime, exit_events);
         // The question is the Studio's stop request (Quit or Close Window as

@@ -111,7 +111,7 @@ pub use platform_glyph::{PlatformGlyph, PlatformMark};
 pub use popover::Popover;
 pub use progress::Progress;
 pub use qr_code::{DEFAULT_SIZE, QrCode, path_for};
-pub use scroll_area::ScrollArea;
+pub use scroll_area::{CLASSIC_GUTTER, ScrollArea, ScrollbarStyle, set_scrollbar_style};
 pub use section_label::SectionLabel;
 pub use segmented_control::{Segment, SegmentedControl};
 pub use select::{Select, SelectOption, SelectSize, SelectTriggerState};
