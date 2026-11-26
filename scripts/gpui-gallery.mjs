@@ -466,18 +466,22 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
     if (!values['preview-open']) {
       await command('open-tab', { tab: 'studio' }).catch(() => {})
       await sleep(SETTLE_MS)
-      try {
-        let state = await command('preview-window-state')
-        for (let tries = 0; state && !state.closed && tries < 2; tries += 1) {
-          await command('preview-toggle-open')
-          await sleep(800)
-          state = await command('preview-window-state')
-        }
-        if (!state?.closed) log(`the docked Preview stayed open: ${JSON.stringify(state)}`)
-      } catch (error) {
-        log(`could not close the docked Preview: ${error.message}`)
-      }
+      await closeDockedPreview()
       await sleep(400)
+    }
+  }
+  const closeDockedPreview = async () => {
+    if (values['preview-open']) return
+    try {
+      let state = await command('preview-window-state')
+      for (let tries = 0; state && !state.closed && tries < 2; tries += 1) {
+        await command('preview-toggle-open')
+        await sleep(800)
+        state = await command('preview-window-state')
+      }
+      if (!state?.closed) log(`the docked Preview stayed open: ${JSON.stringify(state)}`)
+    } catch (error) {
+      log(`could not close the docked Preview: ${error.message}`)
     }
   }
   const stop = async () => {
@@ -545,6 +549,11 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
               await command(screen.afterSeed.command, screen.afterSeed.params ?? {})
               await sleep(SETTLE_MS)
             }
+            // A page that opens the docked Preview itself (the Scene page,
+            // P532): close it again, so the shot matches Electron's
+            // baseline, where it is closed (the Canvas draws the schematic,
+            // not the live picture).
+            if (screen.closePreview) await closeDockedPreview()
             // Below the fold: a wheel at the window's centre (the page's
             // own scroller), `dy` CSS pixels down, as Electron's shooter
             // sets the page-tabs scroller's `scrollTop`.
