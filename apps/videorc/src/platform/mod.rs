@@ -278,3 +278,23 @@ pub fn current() -> &'static dyn Platform {
         &Unsupported
     }
 }
+
+/// How this computer writes a day and a time (`format::day_label`), as
+/// `Intl.DateTimeFormat` with the system locale writes it in Electron: on
+/// macOS the system's own pattern for the user's region and 12/24-hour
+/// setting, on Windows the user locale and its time format. None elsewhere:
+/// on Linux the core reads `LC_ALL`/`LC_TIME`/`LANG` itself.
+pub fn system_date_style() -> Option<videorc_app_core::format::DateStyle> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::date_style()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::date_style()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        None
+    }
+}

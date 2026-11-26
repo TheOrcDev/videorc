@@ -17,7 +17,7 @@ use objc2_app_kit::{NSView, NSWindow, NSWindowSharingType};
 use objc2_av_foundation::{
     AVAuthorizationStatus, AVCaptureDevice, AVMediaType, AVMediaTypeAudio, AVMediaTypeVideo,
 };
-use objc2_foundation::{NSBundle, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSBundle, NSDateFormatter, NSLocale, NSPoint, NSRect, NSSize, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use videorc_app_core::desktop::camera_extension::CameraExtensionBinding;
 use videorc_app_core::desktop::permissions::{
@@ -25,6 +25,37 @@ use videorc_app_core::desktop::permissions::{
 };
 
 use super::{OsResult, Platform, ScreenFrame, SmokeWindowLevel};
+
+/// The user's way of writing a day and a time (`format::day_label`): the
+/// pattern `NSDateFormatter` resolves for `Intl`'s `{ month: 'short', day:
+/// 'numeric', hour: '2-digit', minute: '2-digit' }` (the template
+/// `MMMdjjmm`) in the current locale, which carries the region and the
+/// 24-hour setting from System Settings, with that locale's month and
+/// AM/PM words. "MMM d, hh:mm a" in the US, "d MMM, HH:mm" in the UK.
+pub fn date_style() -> Option<videorc_app_core::format::DateStyle> {
+    let locale = NSLocale::currentLocale();
+    let template = NSString::from_str("MMMdjjmm");
+    let pattern =
+        NSDateFormatter::dateFormatFromTemplate_options_locale(&template, 0, Some(&locale))?
+            .to_string();
+    let formatter = NSDateFormatter::new();
+    formatter.setLocale(Some(&locale));
+    let short_months: Vec<String> = formatter
+        .shortMonthSymbols()
+        .to_vec()
+        .iter()
+        .map(|month| month.to_string())
+        .collect();
+    if pattern.is_empty() || short_months.len() != 12 {
+        return None;
+    }
+    Some(videorc_app_core::format::DateStyle {
+        pattern,
+        short_months,
+        am: formatter.AMSymbol().to_string(),
+        pm: formatter.PMSymbol().to_string(),
+    })
+}
 
 /// `NSFloatingWindowLevel`, what Electron's `setAlwaysOnTop(true)` uses.
 const FLOATING_LEVEL: isize = 3;

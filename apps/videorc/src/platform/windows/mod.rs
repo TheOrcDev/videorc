@@ -9,12 +9,46 @@ pub mod front_app;
 use gpui::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Globalization::{
+    GetLocaleInfoEx, GetUserDefaultLocaleName, LOCALE_STIMEFORMAT,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowDisplayAffinity, HWND_TOP, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_SHOWWINDOW, SetWindowDisplayAffinity, SetWindowPos, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
 };
 
 use super::{OsResult, Platform, ScreenFrame, SmokeWindowLevel};
+
+/// The user's way of writing a day and a time (`format::day_label`): the
+/// user locale's region ("en-GB") and its time format's hour cycle ("HH:mm"
+/// is 24-hour, "h:mm tt" 12-hour), as Settings → Time & language sets them.
+pub fn date_style() -> Option<videorc_app_core::format::DateStyle> {
+    // LOCALE_NAME_MAX_LENGTH is 85 UTF-16 units, with the terminator.
+    let mut name = [0u16; 85];
+    // SAFETY: the buffer and its length in UTF-16 units are both ours.
+    let name_len = unsafe { GetUserDefaultLocaleName(name.as_mut_ptr(), name.len() as i32) };
+    if name_len <= 1 {
+        return None;
+    }
+    let mut time = [0u16; 80];
+    // SAFETY: `name` is NUL-terminated by the call above; `time` and its
+    // length in UTF-16 units are ours.
+    let time_len = unsafe {
+        GetLocaleInfoEx(
+            name.as_ptr(),
+            LOCALE_STIMEFORMAT,
+            time.as_mut_ptr(),
+            time.len() as i32,
+        )
+    };
+    let locale = String::from_utf16_lossy(&name[..name_len as usize - 1]);
+    let twenty_four_hour = (time_len > 1)
+        .then(|| String::from_utf16_lossy(&time[..time_len as usize - 1]).contains('H'));
+    Some(videorc_app_core::format::DateStyle::for_locale(
+        &locale,
+        twenty_four_hour,
+    ))
+}
 
 /// The window's `HWND`, from the handle GPUI hands out.
 fn hwnd(window: &Window) -> OsResult<HWND> {
