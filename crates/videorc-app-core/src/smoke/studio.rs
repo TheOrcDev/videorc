@@ -143,6 +143,16 @@ pub fn state_json(snapshot: &StudioSnapshot) -> Value {
         "startFailure": session.start_failure.as_ref().map(|failure| format!("{failure:?}")),
         "testPattern": test_pattern(snapshot),
         "lastError": snapshot.last_error,
+        // The Clips ring as the Output page reads it, so a smoke whose ring
+        // never settles can say why (a block or a wait).
+        "clips": {
+            "on": snapshot.clips.on,
+            "armed": snapshot.clips.armed,
+            "running": snapshot.clips.running,
+            "state": serde_json::to_value(&snapshot.clips.state).unwrap_or(Value::Null),
+            "blockedReason": snapshot.clips.blocked_reason,
+            "waitReason": snapshot.clips.wait_reason,
+        },
     })
 }
 
