@@ -430,6 +430,22 @@ export const SCREENS = Object.freeze([
     },
     baseline: { screen: 'stream-manager', state: 'band-1100', size: { width: 1100, height: 700 } },
     sections: ['Stream Manager — window and tiers']
+  },
+  {
+    id: 'captions-reader-window',
+    title: 'Captions reader window ⇧⌘C',
+    deck: 'pages',
+    open: page('studio'),
+    window: {
+      role: 'captions',
+      open: 'captions-window-open',
+      bounds: 'captions-window-set-bounds',
+      close: 'captions-window-close',
+      width: 640,
+      height: 320
+    },
+    baseline: { screen: 'captions-reader', state: 'default', size: { width: 640, height: 320 } },
+    sections: ['Captions reader window (components/captions-reader.tsx)']
   }
 ])
 

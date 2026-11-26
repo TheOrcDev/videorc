@@ -20,10 +20,14 @@ use videorc_app_core::smoke::{CommandFuture, SmokeCommandHandler};
 
 use super::UiThread;
 use crate::platform::{self, ScreenFrame, SmokeWindowLevel};
-use crate::screens::{notes, stream_manager};
+use crate::screens::{captions, notes, stream_manager};
 
 /// The commands this handler takes, sorted.
 pub const WINDOW_COMMANDS: &[&str] = &[
+    "captions-window-close",
+    "captions-window-open",
+    "captions-window-set-bounds",
+    "captions-window-state",
     "comments-window-click-message",
     "comments-window-close",
     "comments-window-command-trace",
@@ -48,6 +52,7 @@ pub const WINDOW_COMMANDS: &[&str] = &[
 ];
 
 const NOTES_CLOSED: &str = "Notes window is not open.";
+const CAPTIONS_CLOSED: &str = "Captions window is not open.";
 const CHAT_CLOSED: &str = "Chat window is not open.";
 
 pub struct WindowCommands {
@@ -75,6 +80,23 @@ impl SmokeCommandHandler for WindowCommands {
 
 fn run(command: &str, params: &Map<String, Value>, cx: &mut App) -> Result<Value, String> {
     match command {
+        // The Captions reader (⇧⌘C), as Electron's smoke opens it.
+        "captions-window-open" => {
+            captions::reader::show(cx);
+            Ok(captions_state(None, cx))
+        }
+        "captions-window-close" => {
+            captions::reader::close(cx);
+            Ok(captions_state(None, cx))
+        }
+        "captions-window-state" => Ok(captions_state(None, cx)),
+        "captions-window-set-bounds" => {
+            let Some(handle) = captions::reader::handle(cx) else {
+                return Ok(captions_state(Some(CAPTIONS_CLOSED), cx));
+            };
+            place(handle, params, cx)?;
+            Ok(captions_state(None, cx))
+        }
         "notes-window-open" => {
             notes::window::show(cx);
             Ok(notes_state(None, cx))
@@ -346,6 +368,11 @@ fn merge(state: &mut Value, extra: Value) {
     }
 }
 
+/// The reader's state: open, bounds (the windows' shared shape).
+fn captions_state(message: Option<&str>, cx: &mut App) -> Value {
+    window_state(captions::reader::handle(cx), message, cx)
+}
+
 fn notes_state(message: Option<&str>, cx: &mut App) -> Value {
     let mut state = window_state(notes::window::handle(cx), message, cx);
     let view = notes::window::view(cx).and_then(|view| {
@@ -383,6 +410,7 @@ fn raise(params: &Map<String, Value>, cx: &mut App) -> Result<Value, String> {
     }
     let handle = match role {
         "notes" => notes::window::handle(cx),
+        "captions" => captions::reader::handle(cx),
         "chat" | "comments" | "stream-manager" => stream_manager::window::handle(cx),
         "main" => super::shell(cx)?.window(videorc_app_core::smoke::security::UiWindow::Main, cx),
         _ => None,
