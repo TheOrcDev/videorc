@@ -132,6 +132,7 @@ pub mod sources_section;
 mod stream_details;
 pub mod stream_report_store;
 pub mod takeover_microphone;
+pub mod takeover_mute;
 #[cfg(test)]
 mod test_support;
 pub mod timecode;
@@ -234,7 +235,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 45] = [
+pub const STUDIO_EVENTS: [&str; 46] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -246,6 +247,8 @@ pub const STUDIO_EVENTS: [&str; 45] = [
     // Chat on stream follows the overlay layout's chat switches and rect
     // (`chat_overlay`).
     crate::chat::overlay::LAYOUT_EVENT,
+    // The takeover on air mutes the microphone (`takeover_mute`).
+    takeover_mute::ACTIVE_CHANGED_EVENT,
     // The toasts' news.
     crate::client::names::STREAM_TARGETS,
     crate::client::names::REPLAY_STATE,
@@ -1000,6 +1003,10 @@ pub struct Studio<B: StudioBackend> {
     remote_publish_kick: Notify,
     /// A remote intent waits; the driver runs it.
     remote_intent_kick: Notify,
+    /// The takeover on air, for its microphone mute (`takeover_mute`).
+    takeover_pending: Mutex<takeover_mute::TakeoverPending>,
+    /// The takeover changed or wants reading; the driver commits it.
+    takeover_kick: Notify,
     /// Chat on stream's driver memory (`chat_overlay`).
     chat_overlay: Mutex<chat_overlay::ChatOverlayState>,
     /// The overlay layout changed; chat on stream looks again.
@@ -1118,6 +1125,8 @@ impl<B: StudioBackend> Studio<B> {
             remote: Mutex::new(remote::RemotePublisher::default()),
             remote_publish_kick: Notify::new(),
             remote_intent_kick: Notify::new(),
+            takeover_pending: Mutex::new(takeover_mute::TakeoverPending::default()),
+            takeover_kick: Notify::new(),
             chat_overlay: Mutex::new(chat_overlay::ChatOverlayState::default()),
             chat_overlay_kick: Notify::new(),
         }
@@ -1176,6 +1185,7 @@ impl<B: StudioBackend> Studio<B> {
             () = self.drain_vertical_leg_when_kicked() => {}
             () = self.publish_remote_surface_when_kicked() => {}
             () = self.run_remote_intents_when_kicked() => {}
+            () = self.drive_takeover_mute() => {}
             () = self.drive_chat_overlay() => {}
         }
     }
@@ -1284,6 +1294,9 @@ impl<B: StudioBackend> Studio<B> {
                 self.forget_chat_overlay_connection();
                 self.publish();
                 self.bootstrap(generation).await;
+                // The takeover on air on this backend: a relaunch reads none
+                // and releases a mute the last run left (`takeover_mute`).
+                self.read_takeover_after_bootstrap();
                 // S1.6b part 5d: a session that runs on this connection.
                 self.follow_live_audio().await;
                 // The talk show's room an earlier connection held: back in
@@ -1446,6 +1459,12 @@ impl<B: StudioBackend> Studio<B> {
                 if event == crate::chat::overlay::LAYOUT_EVENT =>
             {
                 self.set_chat_overlay_layout(payload);
+            }
+            // A takeover went on air or ended: its microphone mute follows.
+            BackendEvent::Untyped { event, payload }
+                if event == takeover_mute::ACTIVE_CHANGED_EVENT =>
+            {
+                self.takeover_changed(!payload.is_null());
             }
             // S1.6b part 5b: the Captions row's word.
             BackendEvent::Untyped { event, payload }
