@@ -34,6 +34,7 @@ use videorc_app_core::user_error::{
 };
 use videorc_app_core::{BackendClient, BackendEvent, BackendState, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
+use videorc_kit::balanced_text::BalancedText;
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::DialogHandle;
 use videorc_kit::page::ConfigGrid;
@@ -162,19 +163,26 @@ pub(crate) fn field_description(description: impl Into<SharedString>, t: &Theme)
 }
 
 /// A Field's words beside its control: `FieldLabel` over a
-/// `FieldDescription`, `gap-0.5`.
+/// `FieldDescription`, `gap-0.5`. A horizontal Field balances its
+/// description's lines (`group-has-data-horizontal/field:text-balance`).
 pub(crate) fn field_text(
     label: impl Into<SharedString>,
     description: Option<SharedString>,
     t: &Theme,
 ) -> gpui::Div {
+    let label: SharedString = label.into();
+    let id = SharedString::from(format!("field/{label}/description"));
     div()
         .flex()
         .flex_col()
         .min_w_0()
         .gap(px(2.))
-        .child(field_label(label.into(), t))
-        .children(description.map(|description| field_description(description, t)))
+        .child(field_label(label, t))
+        .children(description.map(|description| {
+            div()
+                .text_color(hsla(t.muted_foreground))
+                .child(BalancedText::new(id, description, 12., 18.))
+        }))
 }
 
 /// The same words with a plain `text-xs` line under the label (16 px line
