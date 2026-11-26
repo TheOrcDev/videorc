@@ -240,8 +240,19 @@ fn main_window_id(cx: &mut App) -> Result<Value, String> {
         .window(videorc_app_core::smoke::security::UiWindow::Main, cx)
         .ok_or_else(|| MAIN_WINDOW_NOT_READY.to_string())?;
     handle
-        .update(cx, |_, window, _| {
+        .update(cx, |_, window, cx| {
             let bounds = window.bounds();
+            // The window's display in pixels, as the Output page's "Check this
+            // computer" reads it for the performance check's ceiling
+            // (Electron's `screen.width * devicePixelRatio`).
+            let scale = window.scale_factor();
+            let display = window.display(cx).map(|display| {
+                let size = display.bounds().size;
+                serde_json::json!({
+                    "width": (f32::from(size.width) * scale).round() as u32,
+                    "height": (f32::from(size.height) * scale).round() as u32,
+                })
+            });
             let frame = ScreenFrame {
                 x: f64::from(f32::from(bounds.origin.x)),
                 y: f64::from(f32::from(bounds.origin.y)),
@@ -256,6 +267,7 @@ fn main_window_id(cx: &mut App) -> Result<Value, String> {
                     "width": frame.width,
                     "height": frame.height,
                 },
+                "display": display,
             }))
         })
         .map_err(|_| MAIN_WINDOW_NOT_READY.to_string())?
