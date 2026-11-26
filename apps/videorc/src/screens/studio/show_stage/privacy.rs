@@ -9,7 +9,6 @@ use gpui::{AnyElement, Context, div, prelude::*, px};
 use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
 use videorc_app_core::BackendEvent;
-use videorc_app_core::desktop::accelerator::accelerator_display_keys;
 use videorc_app_core::studio::Connection;
 use videorc_app_core::studio::scene_on_stream::{
     SCREEN_PRIVACY_CHANGED_EVENT, SCREEN_PRIVACY_GET_METHOD, ScreenPrivacyView,
@@ -18,14 +17,13 @@ use videorc_app_core::studio::scene_on_stream::{
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::icon::{IconName, icon};
-use videorc_kit::kbd::{Kbd, kbd_group};
+use videorc_kit::shortcut_keys::ShortcutKeys;
 use videorc_kit::theme::hsla;
 use videorc_kit::tokens::Theme;
 use videorc_kit::tooltip::{tooltip, tooltip_with_accelerator};
 use videorc_protocol::ScreenPrivacy;
 
 use super::ShowStage;
-use crate::app::hotkeys::node_platform;
 
 impl ShowStage {
     /// The state, read now and on every connection, heard on every change
@@ -186,15 +184,9 @@ impl ShowStage {
         // chip takes the room and the key lives in the tooltip).
         let keys = view
             .accelerator
-            .as_deref()
+            .clone()
             .filter(|_| !view.hidden)
-            .map(|accelerator| {
-                kbd_group(
-                    accelerator_display_keys(Some(accelerator), Some(node_platform()))
-                        .into_iter()
-                        .map(Kbd::new),
-                )
-            });
+            .map(ShortcutKeys::accelerator);
         div()
             .flex()
             .items_center()
