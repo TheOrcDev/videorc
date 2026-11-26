@@ -1415,11 +1415,11 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P940 | Window header "Stream Manager" | Title-only row | `renderer/components/stream-manager/stream-manager.tsx:1317` | [ ] | [ ] | [ ] |
+| P940 | Window header "Stream Manager" | Title-only row | `renderer/components/stream-manager/stream-manager.tsx:1317` | [x] | [ ] | [ ] |
 | P941 | Default size 1120×720; legacy 420×640 frame migrated once; min width 320 | Window sizing | `main/stream-manager-frame.ts:7-8; main/index.ts:4728` | [x] | [ ] | [ ] |
-| P942 | Layout tiers: Wide ≥1040, Medium 640–1039, Narrow <640, labels hide <800 | Container-query layout | `renderer/lib/stream-manager-layout.ts:1-37` | [ ] | [ ] | [ ] |
-| P943 | History bar + "Back to live" | Session history view; return to live | `renderer/components/stream-manager/stream-manager.tsx:1319,1328` | [ ] | [ ] | [ ] |
-| P944 | Sidekick toasts (question, promise reminder, dead air) | Private live nudges | `renderer/components/stream-manager/stream-manager.tsx:675-695` | [ ] | [ ] | [ ] |
+| P942 | Layout tiers: Wide ≥1040, Medium 640–1039, Narrow <640, labels hide <800 | Container-query layout | `renderer/lib/stream-manager-layout.ts:1-37` | [x] | [ ] | [ ] |
+| P943 | History bar + "Back to live" | Session history view; return to live | `renderer/components/stream-manager/stream-manager.tsx:1319,1328` | [x] | [ ] | [ ] |
+| P944 | Sidekick toasts (question, promise reminder, dead air) | Private live nudges | `renderer/components/stream-manager/stream-manager.tsx:675-695` | [x] | [ ] | [ ] |
 
 ### Stream Manager — stats bar (stats-bar.tsx)
 
