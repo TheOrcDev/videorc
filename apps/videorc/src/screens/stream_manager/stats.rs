@@ -26,6 +26,11 @@ use videorc_kit::{
 
 use super::layout::WIDE_MIN;
 
+/// `sessionItem` off air.
+const OFF_AIR: &str = "Off air";
+/// A stat with no reading (`NO_VALUE`).
+const NO_VALUE: &str = "–";
+
 /// The session chip Electron's stats bar shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SessionChip {
@@ -105,8 +110,27 @@ impl StatsView {
             ("tips", "Tips", tips, Vec::new()),
             ("chat", "Chat pace", pace, pace_spark),
         ];
+        // `statItems`: a stat with nothing measured yet isn't in the bar
+        // (never a run of placeholders): viewers once counted or live,
+        // followers once reported, subs and tips once the session's totals
+        // arrive. The clock ("Off air") and chat pace always show.
+        let totals = matches!(board.chat_totals, Some(SessionChatTotals::Available { .. }));
+        let viewers_known = board.latest_viewers.is_some()
+            || !board.viewer_history.is_empty()
+            || matches!(board.session, SessionState::Live);
+        let shows = |id: &str, value: &str| match id {
+            "viewers" => viewers_known,
+            "followers" => value != NO_VALUE,
+            "supporters" | "tips" => totals,
+            _ => true,
+        };
         let cells = DEFAULT_STAT_ORDER
             .iter()
+            .filter(|id| {
+                by_id
+                    .iter()
+                    .any(|(cell_id, _, value, _)| cell_id == *id && shows(cell_id, value))
+            })
             .filter_map(|id| {
                 by_id.iter().find(|(cell_id, _, _, _)| cell_id == id).map(
                     |(id, label, value, spark)| StatCell {
@@ -132,12 +156,13 @@ impl StatsView {
     }
 }
 
+/// `sessionItem`: the session's clock, else "Off air".
 fn clock_value(board: &LiveDashboard, now_ms: i64) -> String {
     let Some(started) = board.started_at.as_deref().and_then(parse_time) else {
-        return "–".into();
+        return OFF_AIR.into();
     };
     if matches!(board.session, SessionState::OffAir) {
-        return "–".into();
+        return OFF_AIR.into();
     }
     let elapsed = now_ms - started.timestamp_millis();
     format_timecode(elapsed.max(0))
@@ -331,19 +356,19 @@ pub fn stats_bar(
                 .gap(px(6.))
                 .min_w(px(0.))
                 .cursor_move()
+                // `StatCell`: the value alone (15 px semibold, `text-subtle`
+                // when there's no reading); the label names it for assistive
+                // tech and its details.
+                .aria_label(format!("{}: {}", cell.label, cell.value))
                 .child(
                     div()
-                        .flex()
-                        .flex_col()
-                        .justify_center()
-                        .min_w(px(0.))
-                        .child(div().text_size(px(11.)).text_color(muted).child(cell.label))
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(cell.value),
-                        ),
+                        .text_size(px(15.))
+                        .line_height(px(20.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .when(cell.value == OFF_AIR || cell.value == NO_VALUE, |value| {
+                            value.text_color(muted)
+                        })
+                        .child(cell.value),
                 )
                 .children(spark)
                 .on_drag(drag, |info: &StatDrag, _, _, cx| cx.new(|_| info.clone()))
