@@ -42,7 +42,7 @@ import { join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { parseArgs } from 'node:util'
 
-import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
+import { launchDevApp, repoRoot, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { resolveExistingSiblingFfprobe } from './lib/ffmpeg-sibling-paths.mjs'
 import {
   connectRemote,
@@ -266,6 +266,30 @@ async function sendIntent(ctx, intent) {
 }
 
 async function seedRenderer(smoke) {
+  if (smokeAppIsGpui()) {
+    await requestSmokeCommand(
+      smoke,
+      'studio-capture-configure',
+      {
+        config: {
+          video: {
+            preset: 'tutorial-1080p30',
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrateKbps: 6000
+          },
+          layout: { layoutPreset: 'screen-only' },
+          audio: { systemAudioEnabled: false, systemAudioGainDb: -6 },
+          sources: { microphoneId: null, microphoneName: null, microphoneOff: true },
+          recordEnabled: true,
+          streamEnabled: false
+        }
+      },
+      { timeoutMs }
+    )
+    return
+  }
   await requestSmokeCommand(
     smoke,
     'eval-js',

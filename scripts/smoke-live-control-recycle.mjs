@@ -48,8 +48,8 @@ const stateRoot = resolve(
     mkdtempSync(join(tmpdir(), 'videorc-live-control-recycle-'))
 )
 const outputDirectory = join(stateRoot, 'recordings')
-const databasePath = join(stateRoot, 'app-data', 'videorc.sqlite3')
-const recoveryDirectory = join(stateRoot, 'app-data', 'session-finalization-recovery')
+let databasePath = join(stateRoot, 'app-data', 'videorc.sqlite3')
+let recoveryDirectory = join(stateRoot, 'app-data', 'session-finalization-recovery')
 const streamArtifactPath = join(outputDirectory, 'recycle-stream.flv')
 const streamPort = Number(process.env.VIDEORC_LIVE_CONTROL_RECYCLE_RTMP_PORT ?? 19629)
 const streamTarget = {
@@ -101,6 +101,16 @@ try {
   assertBackendConnection(original, 'initial backend')
   const oldBackendPid = requiredPid(original.pid, 'initial backend PID')
   const appPid = requiredPid(smoke?.appPid, 'Electron PID')
+  // The GPUI backend owns the database under its isolated user-data dir;
+  // Electron's app-data convention is not a backend storage contract.
+  const isolation = await requestSmokeCommand(
+    smoke,
+    'inspect-backend-state-isolation',
+    {},
+    { timeoutMs }
+  )
+  databasePath = requiredString(isolation?.databasePath, 'isolated backend database path')
+  recoveryDirectory = join(dirname(databasePath), 'session-finalization-recovery')
   oldSocket = await connectBackend(original, timeoutMs)
   streamListener = spawnRtmpListener()
   await waitForOwnedTcpListener({
