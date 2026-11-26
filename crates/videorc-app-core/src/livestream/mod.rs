@@ -74,6 +74,7 @@ pub mod watchdog;
 pub mod watchdog_notify;
 pub mod watchdog_section;
 pub mod x_categories;
+pub mod x_live_edit;
 
 use accounts::{
     AccountValidation, PlatformAccount, ProviderCredentials, XCapability, YouTubeChannel,
@@ -98,6 +99,8 @@ pub mod methods {
     pub const X_CAPABILITY: &str = "streamTargets.x.capability";
     /// X's live categories for the Stream details picker (plan 260 L2).
     pub const X_LIVE_CATEGORIES: &str = "streamTargets.x.liveCategories";
+    /// Live on X: a new title or category for the broadcast on air.
+    pub const X_UPDATE_BROADCAST: &str = "streamTargets.x.updateBroadcast";
     pub const X_START_LIVE_AUTHORIZATION: &str = "streamTargets.x.startLiveAuthorization";
     pub const MANUAL_KEY_STORE: &str = "streamTargets.manualKey.store";
     pub const MANUAL_KEY_RESTORE: &str = "streamTargets.manualKey.restorePrevious";

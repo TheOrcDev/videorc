@@ -21,6 +21,7 @@ use crate::livestream::accounts::{
 };
 use crate::livestream::targets::{self, TargetPatch};
 use crate::livestream::x_categories::{XLiveCategoriesResult, XLiveCategoriesStatus};
+use crate::livestream::x_live_edit::{self, XBroadcastUpdated, XLiveChanges};
 use crate::livestream::{ACCOUNTS_CHANGED_EVENT, PlatformsState, copy, methods};
 use crate::notices::{NoticeAction, NoticeCommand, NoticeLifetime, ToastRequest};
 use crate::user_error::UserErrorContext;
@@ -612,6 +613,35 @@ impl<B: StudioBackend> Studio<B> {
                 });
             }
         }
+    }
+
+    /// `updateXBroadcast`: the changes go to X now; X's answer, or the words
+    /// for "X didn't take the change: …".
+    pub async fn update_x_broadcast(
+        &self,
+        account_id: Option<String>,
+        broadcast_id: String,
+        changes: XLiveChanges,
+    ) -> Result<XBroadcastUpdated, String> {
+        if !self.is_connected() {
+            return Err(x_live_edit::X_UPDATE_OFFLINE.to_string());
+        }
+        let mut params = json!({ "broadcastId": broadcast_id });
+        if let Some(account_id) = account_id {
+            params["accountId"] = json!(account_id);
+        }
+        if let Some(title) = changes.title {
+            params["title"] = json!(title);
+        }
+        if let Some(category) = changes.live_category_id {
+            params["liveCategoryId"] = json!(category);
+        }
+        self.livestream_call(methods::X_UPDATE_BROADCAST, params)
+            .await
+            .and_then(|value| {
+                super::backend::read_json::<XBroadcastUpdated>(methods::X_UPDATE_BROADCAST, value)
+            })
+            .map_err(|error| error.message)
     }
 
     fn clear_x_live_categories(&self) {

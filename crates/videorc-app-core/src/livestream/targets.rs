@@ -43,6 +43,9 @@ pub struct Target {
     pub scheduled_event_title: Option<String>,
     /// The scheduled event's privacy as saved when it was prepared.
     pub scheduled_privacy: Option<String>,
+    /// The platform's broadcast for this stream, once Go Live prepared it
+    /// (Live on X reads X's, plan 260 L2).
+    pub platform_broadcast_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
