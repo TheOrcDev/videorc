@@ -17,6 +17,7 @@ mod thumbnail;
 mod upcoming;
 mod watchdog;
 mod x_details;
+mod x_live;
 mod youtube_consent;
 
 use std::sync::Arc;
@@ -134,6 +135,8 @@ pub struct DestinationsPanel {
     category_picker: Option<category::CategoryPicker>,
     thumbnail_field: thumbnail::Field,
     schedule: Option<schedule::ScheduleEditor>,
+    /// Live on X while an X broadcast is on air (plan 260 L2).
+    x_live_edit: Option<x_live::XLiveEdit>,
 }
 
 /// Electron's vertical `Field` in an open destination's card (Server URL,
@@ -279,6 +282,7 @@ impl DestinationsPanel {
             category_picker: None,
             thumbnail_field: thumbnail::Field::default(),
             schedule: None,
+            x_live_edit: None,
         };
         panel.rebuild_from_studio();
         panel
@@ -1214,6 +1218,7 @@ impl Render for DestinationsPanel {
         self.ensure_discord_paste(window, cx);
         let details = self.details.clone();
         self.sync_details_inputs(&details, window, cx);
+        self.sync_x_live_edit(window, cx);
 
         let t = theme::current(window, cx).theme();
         let entity = cx.entity();
@@ -1347,6 +1352,8 @@ impl Render for DestinationsPanel {
                             .description(setup.destinations_description.clone())
                             .child(list),
                     )
+                    // `XLiveEditSection` while X is live, above Stream details.
+                    .children(self.x_live_section(window, cx))
                     .child(self.details_section(&details, setup.controls_disabled, window, cx))
                     .child(self.chat_commands_section(&self.chat_commands.clone(), window, cx));
                 let mut trail = div()

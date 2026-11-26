@@ -31,76 +31,18 @@ impl DestinationsPanel {
     ) -> AnyElement {
         let t = *theme::current(window, cx).theme();
         let entity = cx.entity();
-        let platforms = self.studio.platforms_now();
-        let status = platforms.x_live_categories_status;
-        let pick = x::x_category_pick(&platforms.x_live_categories, status, saved_id, saved_name);
-        let select_disabled = disabled || pick.unavailable;
-
-        let mut select = Select::new("x-category")
-            .accessibility_label(X_CATEGORY_ACCESSIBLE_LABEL)
-            .full_width(true)
-            .disabled(select_disabled)
-            .placeholder(if status == XLiveCategoriesStatus::Loading {
-                X_CATEGORIES_LOADING
-            } else {
-                X_NO_CATEGORY_LABEL
-            })
-            .value(Some(SharedString::from(pick.value.clone())));
-        for item in &pick.items {
-            select = select.option(item.value.clone(), item.label.clone());
-        }
-        let items = pick.items.clone();
-        let select = select.on_change({
+        let field = self.x_category_field(&t, "x-category", saved_id, saved_name, disabled, {
             let entity = entity.clone();
-            move |value, _, cx| {
-                let items = items.clone();
+            move |value, items, cx| {
                 entity.update(cx, |this, cx| {
                     this.studio.patch_target_metadata_draft("x", |draft| {
-                        x::apply_x_category(draft, value.as_ref(), &items);
+                        x::apply_x_category(draft, &value, &items);
                     });
                     this.details_dirty = true;
                     cx.notify();
                 });
             }
         });
-
-        // `Field`: the label, the control filling the column, then the note.
-        let mut field = div()
-            .id("x-category-field")
-            .flex()
-            .flex_col()
-            .gap(px(12.))
-            .child(Label::new(x::X_CATEGORY_LABEL).disabled(select_disabled))
-            .child(select);
-        if let Some(note) = pick.note {
-            let failed = note == X_CATEGORIES_FAILED;
-            let mut line = div()
-                .flex()
-                .flex_wrap()
-                .items_baseline()
-                .gap(px(4.))
-                .type_scale(text::META)
-                .text_color(hsla(t.muted_foreground))
-                .child(note);
-            if failed {
-                let studio = self.studio.clone();
-                let runtime = self.runtime.clone();
-                line = line.child(
-                    Button::new("x-category-retry")
-                        .label(X_CATEGORIES_RETRY)
-                        .variant(ButtonVariant::Link)
-                        .size(ButtonSize::Xs)
-                        .disabled(disabled)
-                        .on_click(move |_, _, _| {
-                            let studio = studio.clone();
-                            runtime.spawn(async move {
-                                studio.load_x_live_categories(true).await;
-                            });
-                        }),
-                );
-            }
-            field = field.child(line);
-        }
 
         let announce_row = SettingsRow::new("x-metadata-announce", X_ANNOUNCE_LABEL)
             .description(X_ANNOUNCE_DESCRIPTION)
@@ -127,5 +69,79 @@ impl DestinationsPanel {
             .child(field)
             .child(announce_row)
             .into_any_element()
+    }
+    /// `XCategoryField`: X's own short list in its order, so a plain Select
+    /// (as Twitch's Language), not a search; the label, the control filling
+    /// the column, then one quiet note. Stream details and Live on X both
+    /// show it (`id` "x-category" / "x-live-category").
+    pub(super) fn x_category_field(
+        &self,
+        t: &videorc_kit::tokens::Theme,
+        id: &'static str,
+        saved_id: Option<&str>,
+        saved_name: Option<&str>,
+        disabled: bool,
+        on_change: impl Fn(String, Vec<x::XCategoryItem>, &mut gpui::App) + 'static,
+    ) -> gpui::Stateful<gpui::Div> {
+        let platforms = self.studio.platforms_now();
+        let status = platforms.x_live_categories_status;
+        let pick = x::x_category_pick(&platforms.x_live_categories, status, saved_id, saved_name);
+        let select_disabled = disabled || pick.unavailable;
+
+        let mut select = Select::new(id)
+            .accessibility_label(X_CATEGORY_ACCESSIBLE_LABEL)
+            .full_width(true)
+            .disabled(select_disabled)
+            .placeholder(if status == XLiveCategoriesStatus::Loading {
+                X_CATEGORIES_LOADING
+            } else {
+                X_NO_CATEGORY_LABEL
+            })
+            .value(Some(SharedString::from(pick.value.clone())));
+        for item in &pick.items {
+            select = select.option(item.value.clone(), item.label.clone());
+        }
+        let items = pick.items.clone();
+        let select = select.on_change(move |value, _, cx| {
+            on_change(value.to_string(), items.clone(), cx);
+        });
+
+        let mut field = div()
+            .id(SharedString::from(format!("{id}-field")))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(Label::new(x::X_CATEGORY_LABEL).disabled(select_disabled))
+            .child(select);
+        if let Some(note) = pick.note {
+            let failed = note == X_CATEGORIES_FAILED;
+            let mut line = div()
+                .flex()
+                .flex_wrap()
+                .items_baseline()
+                .gap(px(4.))
+                .type_scale(text::META)
+                .text_color(hsla(t.muted_foreground))
+                .child(note);
+            if failed {
+                let studio = self.studio.clone();
+                let runtime = self.runtime.clone();
+                line = line.child(
+                    Button::new(SharedString::from(format!("{id}-retry")))
+                        .label(X_CATEGORIES_RETRY)
+                        .variant(ButtonVariant::Link)
+                        .size(ButtonSize::Xs)
+                        .disabled(disabled)
+                        .on_click(move |_, _, _| {
+                            let studio = studio.clone();
+                            runtime.spawn(async move {
+                                studio.load_x_live_categories(true).await;
+                            });
+                        }),
+                );
+            }
+            field = field.child(line);
+        }
+        field
     }
 }
