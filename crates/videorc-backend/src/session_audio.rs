@@ -4075,6 +4075,9 @@ struct SourceClock {
     /// current lag window, and the device position that closes the window.
     lag_min: f64,
     lag_window_end: f64,
+    /// The longest forward timestamp step spliced rather than played as
+    /// silence ([`SYSTEM_SPLICE_FRAMES`] for system audio; 0 keeps every gap).
+    splice_frames: f64,
 }
 
 /// How long the mapping must stay behind its capture times before it steps.
@@ -4083,6 +4086,16 @@ const LAG_WINDOW_FRAMES: f64 = 24_000.0;
 /// [`LAG_WINDOW_FRAMES`] before it steps forward: beyond capture-time jitter
 /// (Pulse stamps carry 20 ms) and far inside the playout delay.
 const LAG_STEP_FRAMES: f64 = 1_920.0;
+
+/// Plan 260 L2: ScreenCaptureKit now and then skips one delivery slot and
+/// stamps the next 20 ms buffer about 17 ms ahead (seen about a second into
+/// a capture, in both apps): played as a gap, that is an 18 ms hole of
+/// digital silence inside a steady tone. A forward step of at most one
+/// buffer is spliced instead: the next buffer follows the last one, and the
+/// mapping's offset from its capture times (well under the playout delay and
+/// [`LAG_STEP_FRAMES`]) is slewed by the rate estimate. Longer steps (a real
+/// interruption) stay a gap of their own length.
+const SYSTEM_SPLICE_FRAMES: f64 = 1_200.0;
 
 impl SourceClock {
     fn new(frame: &AudioFrame, epoch: Instant) -> Self {
@@ -4101,7 +4114,13 @@ impl SourceClock {
             delay_frames: 0,
             lag_min: f64::INFINITY,
             lag_window_end: frame.timestamp_micros as f64 * 0.048 + LAG_WINDOW_FRAMES,
+            splice_frames: 0.0,
         }
+    }
+
+    fn with_splice(mut self, splice_frames: f64) -> Self {
+        self.splice_frames = splice_frames;
+        self
     }
 
     fn with_delay(mut self, delay_frames: u64) -> Self {
@@ -4156,7 +4175,11 @@ impl SourceClock {
         // frames. Preserve exact continuity at packet boundaries within that
         // tolerance; genuine missing intervals remain silence in the bus.
         let gap = device_start - self.device_end;
-        let gap = if gap.abs() < 0.05 { 0.0 } else { gap };
+        let gap = if gap.abs() < 0.05 || (gap > 0.0 && gap <= self.splice_frames) {
+            0.0
+        } else {
+            gap
+        };
         let mut start = self.mapped_end + gap * self.ratio;
         // Retest 153: on a loaded Linux desktop Pulse overruns lose a few
         // milliseconds at a time, each too short to read as a dropout, so the
@@ -5418,9 +5441,15 @@ impl SourceSlot {
             return PlaceOutcome::Refused;
         };
         let delay_frames = self.delay_frames;
-        let clock = self
-            .clock
-            .get_or_insert_with(|| SourceClock::new(&frame, epoch).with_delay(delay_frames));
+        let splice_frames = match self.role {
+            SourceRole::System => SYSTEM_SPLICE_FRAMES,
+            SourceRole::Microphone => 0.0,
+        };
+        let clock = self.clock.get_or_insert_with(|| {
+            SourceClock::new(&frame, epoch)
+                .with_delay(delay_frames)
+                .with_splice(splice_frames)
+        });
         let Some((start, frames)) = clock.interval(&frame) else {
             let frames = frame.frame_count() as u64;
             self.timeline.counters.discarded_frames += frames;
@@ -8214,6 +8243,45 @@ mod tests {
         assert!(
             longest_silence < 9_600,
             "silence of {longest_silence} frames"
+        );
+    }
+
+    /// Plan 260 L2: a system buffer stamped one slot ahead (ScreenCaptureKit,
+    /// ~17 ms) is spliced to the last one, not preceded by silence. The
+    /// microphone keeps the gap, and a long step stays a gap on both.
+    #[test]
+    fn a_system_clock_splices_a_one_buffer_timestamp_step() {
+        let epoch = Instant::now();
+        let gaps = |splice: f64, step_micros: u64| {
+            let mut packet = frame(0.3, 960);
+            packet.captured_at = epoch + Duration::from_millis(20);
+            let mut clock = SourceClock::new(&packet, epoch).with_splice(splice);
+            let (start, count) = clock.interval(&packet).unwrap();
+            let mut end = start + count as u64;
+            let mut timestamp = 0_u64;
+            let mut gaps = Vec::new();
+            for index in 1..100_u64 {
+                timestamp += 20_000 + if index == 50 { step_micros } else { 0 };
+                packet.timestamp_micros = timestamp;
+                packet.captured_at = epoch + Duration::from_micros(timestamp + 20_000);
+                let (start, count) = clock.interval(&packet).unwrap();
+                if start != end {
+                    gaps.push(start as i64 - end as i64);
+                }
+                end = start + count as u64;
+            }
+            gaps
+        };
+        assert_eq!(gaps(SYSTEM_SPLICE_FRAMES, 17_110), Vec::<i64>::new());
+        let kept = gaps(0.0, 17_110);
+        assert!(
+            kept.len() == 1 && (820..=823).contains(&kept[0]),
+            "the microphone keeps the gap: {kept:?}"
+        );
+        let long = gaps(SYSTEM_SPLICE_FRAMES, 200_000);
+        assert!(
+            long.len() == 1 && (9_590..=9_610).contains(&long[0]),
+            "a real interruption stays a gap: {long:?}"
         );
     }
 
