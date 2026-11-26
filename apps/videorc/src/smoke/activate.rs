@@ -14,7 +14,9 @@
 //! into gpui-pre), and reads and acts on it exactly as on macOS.
 
 use gpui::Window;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use raw_window_handle::HasWindowHandle;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use raw_window_handle::RawWindowHandle;
 
 /// The window's native handle, taken while the window is borrowed, so the
 /// question is asked after GPUI has let go of it (the adapter's answer
