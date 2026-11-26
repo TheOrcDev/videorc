@@ -110,7 +110,7 @@ pub use page::{ConfigColumn, ConfigGrid, Gallery, PageStack, Track};
 pub use page_tabs::PageTabs;
 pub use panel_section::PanelSection;
 pub use pin_window_button::{PIN_WINDOW_LABEL, PinWindowButton};
-pub use platform_glyph::{PlatformGlyph, PlatformMark};
+pub use platform_glyph::{PlatformGlyph, PlatformMark, VerifiedCheck, VerifiedKind};
 pub use popover::Popover;
 pub use power_slider::{PowerSlider, PowerSliderMark};
 pub use progress::Progress;
