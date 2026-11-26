@@ -15,8 +15,9 @@ use videorc_app_core::nav::PageId;
 use videorc_app_core::studio::scenes_section::session_active;
 use videorc_kit::{
     avatar::Avatar,
+    badge::{Badge, BadgeVariant},
     button::{Button, ButtonVariant},
-    dropdown_menu::{DropdownMenu, Menu, MenuItem, MenuItemTone},
+    dropdown_menu::{DropdownMenu, Menu, MenuHeader, MenuItem, MenuItemTone},
     icon::{IconName, icon},
     status_dot::{StatusDot, StatusTone},
     theme::{TypeScale, hsla},
@@ -58,7 +59,16 @@ fn build_menu(
         copy::NOT_SIGNED_IN.to_string()
     };
     let locked = videorc_app_core::accounts::sign_out_disabled(account, live(cx));
-    let mut menu = Menu::new().label(format!("{header} · {tier}"));
+    // `account-menu-body.tsx`: a 224 px menu (`w-56`) whose first row is
+    // the name (or "Not signed in") with the plan's outline badge at the
+    // right; signed in, the 20 px face leads it.
+    let face = signed_in.then(|| initials(&header));
+    let mut head =
+        MenuHeader::new(header).end(move || Badge::new(tier).variant(BadgeVariant::Outline));
+    if let Some(face) = face {
+        head = head.leading(move || Avatar::new(face.clone()).xs());
+    }
+    let mut menu = Menu::new().width(224.).header(head);
     for row in menu_items(account) {
         menu = match row {
             Row::Account => menu.separator().item(
