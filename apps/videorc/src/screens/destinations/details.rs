@@ -244,7 +244,8 @@ impl DestinationsPanel {
             cx,
         ));
 
-        // Category pickers for Twitch / Kick when those destinations are on.
+        // Category pickers for Twitch / Kick, and X's category and
+        // announcement, when those destinations are on.
         let platforms = self.studio.platforms_now();
         let capture = self.studio.snapshot().settings.capture_doc.clone();
         let targets = videorc_app_core::livestream::targets::targets(&capture);
@@ -276,6 +277,16 @@ impl DestinationsPanel {
                         page_copy::KICK_CATEGORY,
                         kick_id.as_deref(),
                         override_draft.and_then(|o| o.kick_category_name.as_deref()),
+                        disabled || state.save_pending,
+                        window,
+                        cx,
+                    ));
+                }
+                "x" => {
+                    section = section.child(self.x_details_rows(
+                        override_draft.and_then(|o| o.x_category_id.as_deref()),
+                        override_draft.and_then(|o| o.x_category_name.as_deref()),
+                        override_draft.and_then(|o| o.x_announce),
                         disabled || state.save_pending,
                         window,
                         cx,

@@ -20,6 +20,7 @@ use crate::livestream::accounts::{
     YouTubeChannel, connect_optional_scopes, is_oauth_available, platform_label,
 };
 use crate::livestream::targets::{self, TargetPatch};
+use crate::livestream::x_categories::{XLiveCategoriesResult, XLiveCategoriesStatus};
 use crate::livestream::{ACCOUNTS_CHANGED_EVENT, PlatformsState, copy, methods};
 use crate::notices::{NoticeAction, NoticeCommand, NoticeLifetime, ToastRequest};
 use crate::user_error::UserErrorContext;
@@ -185,7 +186,10 @@ impl<B: StudioBackend> Studio<B> {
                 self.refresh_x_capability(Some(account.account_id.clone()))
                     .await;
             }
-            None => self.edit_platforms(|state| state.x_capability = None),
+            None => {
+                self.edit_platforms(|state| state.x_capability = None);
+                self.clear_x_live_categories();
+            }
         }
     }
 
@@ -527,15 +531,32 @@ impl<B: StudioBackend> Studio<B> {
                 super::backend::read_json::<XCapability>(methods::X_CAPABILITY, value)
             });
         match answer {
-            Ok(capability) => self.edit_platforms(|state| {
-                state.x_capability = Some(capability);
-                state.x_capability_loading = false;
-            }),
+            Ok(capability) => {
+                let ready = capability.native_available;
+                self.edit_platforms(|state| {
+                    state.x_capability = Some(capability);
+                    state.x_capability_loading = false;
+                });
+                // `xLiveReady`'s effect: X's categories once X Live can go
+                // live; back to idle (and empty) when it can't.
+                if ready {
+                    let status = self.platforms_now().x_live_categories_status;
+                    if matches!(
+                        status,
+                        XLiveCategoriesStatus::Idle | XLiveCategoriesStatus::Failed
+                    ) {
+                        self.load_x_live_categories(false).await;
+                    }
+                } else {
+                    self.clear_x_live_categories();
+                }
+            }
             Err(error) => {
                 self.edit_platforms(|state| {
                     state.x_capability = None;
                     state.x_capability_loading = false;
                 });
+                self.clear_x_live_categories();
                 // `reportError(error)`: no action named ("Videorc hit a
                 // problem"), as the renderer's.
                 if self.is_connected() {
@@ -554,6 +575,50 @@ impl<B: StudioBackend> Studio<B> {
                 }
             }
         }
+    }
+
+    /// `loadXLiveCategories`: X's live categories (sorted by viewership,
+    /// changing rarely) for the Stream details picker. A failed read is the
+    /// picker's to say, never a notification: nobody pressed anything.
+    pub async fn load_x_live_categories(&self, refresh: bool) {
+        let account_id = self
+            .platforms_now()
+            .account("x")
+            .map(|account| account.account_id.clone());
+        self.edit_platforms(|state| {
+            state.x_live_categories_status = XLiveCategoriesStatus::Loading;
+        });
+        let mut params = json!({ "accountId": account_id });
+        if refresh {
+            params["refresh"] = json!(true);
+        }
+        let answer = self
+            .livestream_call(methods::X_LIVE_CATEGORIES, params)
+            .await
+            .and_then(|value| {
+                super::backend::read_json::<XLiveCategoriesResult>(
+                    methods::X_LIVE_CATEGORIES,
+                    value,
+                )
+            });
+        match answer {
+            Ok(result) => self.edit_platforms(|state| {
+                state.x_live_categories = result.categories;
+                state.x_live_categories_status = XLiveCategoriesStatus::Ready;
+            }),
+            Err(_) => {
+                self.edit_platforms(|state| {
+                    state.x_live_categories_status = XLiveCategoriesStatus::Failed;
+                });
+            }
+        }
+    }
+
+    fn clear_x_live_categories(&self) {
+        self.edit_platforms(|state| {
+            state.x_live_categories.clear();
+            state.x_live_categories_status = XLiveCategoriesStatus::Idle;
+        });
     }
 
     /// `authorizeXLive`: the approval page, for the caller to open; the
