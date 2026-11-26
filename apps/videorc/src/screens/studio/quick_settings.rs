@@ -35,7 +35,7 @@ use videorc_kit::navigable_row::NavigableRow;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::popover::Popover;
 use videorc_kit::select::Select;
-use videorc_kit::shortcut_keys::{self, ShortcutKeys, ShortcutStyle};
+use videorc_kit::shortcut_keys::{ShortcutKeys, ShortcutStyle};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{Theme, size, text};
 
