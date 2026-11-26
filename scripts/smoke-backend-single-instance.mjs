@@ -1,16 +1,26 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, repoRoot, smokeAppIsGpui } from './lib/app-launcher.mjs'
+import { ownedProcessLedgerPaths } from './lib/process-census.mjs'
 import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const stateRoot = mkdtempSync(join(tmpdir(), 'videorc-backend-single-instance-'))
 const appDataDir = join(stateRoot, 'app-data')
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
-const ledgerPath = join(appDataDir, 'Videorc', 'owned-processes', 'global.json')
+const gpui = smokeAppIsGpui()
+const gpuiLedger = (name) =>
+  ownedProcessLedgerPaths({
+    appDataDir,
+    userDataDir: join(stateRoot, `user-data-${name}`),
+    workspaceRoot: repoRoot
+  }).at(-1)
+let ledgerPath = gpui
+  ? gpuiLedger('a')
+  : join(appDataDir, 'Videorc', 'owned-processes', 'global.json')
 
 let first
 let second
@@ -29,6 +39,17 @@ try {
   frozenMainPid = first.connections['backend-ready']?.parentPid ?? null
   assert.ok(processExists(frozenMainPid), 'first app main pid should be known and alive')
   process.kill(frozenMainPid, 'SIGSTOP')
+
+  if (gpui) {
+    // GPUI deliberately owns one ledger per profile, not Electron's global
+    // ledger. Seed the next isolated profile with this exact owned record to
+    // exercise recovery without weakening the app's single-instance lock or
+    // teaching it to reap another profile's processes.
+    const nextLedger = gpuiLedger('b')
+    mkdirSync(dirname(nextLedger), { recursive: true })
+    copyFileSync(ledgerPath, nextLedger)
+    ledgerPath = nextLedger
+  }
 
   let sawReapLog = false
   second = await launchIsolatedApp('b', (line) => {
@@ -75,6 +96,7 @@ try {
 function launchIsolatedApp(name, onLine) {
   return launchDevApp({
     env: {
+      VIDEORC_WORKSPACE_ROOT: repoRoot,
       VIDEORC_APP_DATA_DIR: appDataDir,
       VIDEORC_USER_DATA_DIR: join(stateRoot, `user-data-${name}`),
       VIDEORC_DISABLE_AUTO_PREVIEW: '1',
@@ -104,7 +126,7 @@ function onlyBackendPid() {
 }
 
 function readLedger() {
-  assert.equal(existsSync(ledgerPath), true, `expected global backend ledger at ${ledgerPath}`)
+  assert.equal(existsSync(ledgerPath), true, `expected owned backend ledger at ${ledgerPath}`)
   return JSON.parse(readFileSync(ledgerPath, 'utf8'))
 }
 

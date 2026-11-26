@@ -98,6 +98,7 @@ try {
   launched = await launchDevApp({
     spawnSpec: performanceAppSpawnSpec(),
     env: {
+      VIDEORC_WORKSPACE_ROOT: repoRoot,
       VIDEORC_APP_DATA_DIR: appDataDir,
       VIDEORC_USER_DATA_DIR: userDataDir,
       VIDEORC_DISABLE_AUTO_PREVIEW: '1',
