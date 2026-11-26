@@ -8,6 +8,7 @@
 mod camera_off;
 mod cards;
 mod moderation;
+mod privacy;
 mod room_person;
 
 use std::rc::Rc;
@@ -67,6 +68,7 @@ use camera_off::{CAMERA_OFF_LABEL, camera_off_avatar};
 use cards::{StageCard, card_columns, reasons_line, screen_thumb, stage_layout_thumb};
 use moderation::GuestModeration;
 use room_person::{PersonRowParts, count_label, person_row, request_row};
+use videorc_protocol::ScreenPrivacy;
 
 const STAGE_CANVAS: StageCanvas = StageCanvas {
     width: 1920,
@@ -209,6 +211,9 @@ pub struct ShowStage {
     close_confirm: DialogHandle,
     /// Mute hold, screen share and Rename/Remove/Ban for a guest's row.
     moderation: Entity<GuestModeration>,
+    /// Hide screen's backend state (`useScreenPrivacy`), mirrored here.
+    privacy: ScreenPrivacy,
+    privacy_revision: u64,
 }
 
 impl EventEmitter<OpenPage> for ShowStage {}
@@ -254,7 +259,9 @@ impl ShowStage {
         .detach();
         let moderation = cx.new(|_| GuestModeration::new(studio.clone(), runtime.clone()));
         cx.observe(&moderation, |_, _, cx| cx.notify()).detach();
-        Self {
+        let mut stage = Self {
+            privacy: ScreenPrivacy::default(),
+            privacy_revision: 0,
             moderation,
             studio,
             runtime,
@@ -267,7 +274,9 @@ impl ShowStage {
             share_pending: false,
             share_picker: DialogHandle::new(false),
             close_confirm: DialogHandle::new(false),
-        }
+        };
+        stage.watch_privacy(cx);
+        stage
     }
 
     /// Wire the talk-show host so tiles, Screens, layouts and the Program
@@ -921,6 +930,12 @@ impl ShowStage {
         let screens = room_screens(room, people, sharing, self.two_screens_picked);
         let entity = cx.entity();
         let pending = self.share_pending;
+        // Plan 254 D4: shown over the host's own screen, or while it holds.
+        let privacy = self.privacy_view();
+        let privacy_shown = sharing
+            || screens.iter().any(|screen| screen.host)
+            || privacy.hidden
+            || privacy.chip.is_some();
 
         let share_btn = if sharing {
             Button::new("show-stage-stop-share")
@@ -965,7 +980,9 @@ impl ShowStage {
             .gap(px(8.))
             .px(px(4.))
             .child(SectionLabel::new(SCREENS))
+            .children(Self::privacy_chip(&privacy, t))
             .child(div().flex_1())
+            .children(privacy_shown.then(|| self.privacy_control(&privacy, cx)))
             .child(share_btn);
         let mut body = div()
             .id("show-stage-screens")
