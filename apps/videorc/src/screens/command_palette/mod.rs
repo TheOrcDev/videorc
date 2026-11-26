@@ -12,14 +12,16 @@ use serde_json::json;
 use std::sync::Arc;
 use videorc_app_core::buddy::copy::{AVATAR_TABS, TABS as SIDEKICK_TABS};
 use videorc_app_core::livestream::go_live_copy::GO_LIVE_COMMAND;
-use videorc_app_core::protocol::SoundboardState;
+use videorc_app_core::protocol::{SoundboardState, VirtualCameraStatus};
 use videorc_app_core::shortcuts::shortcut_accelerator;
 use videorc_app_core::studio::audio_section::bound_accelerator;
 use videorc_app_core::studio::scene_on_stream::{copy as screen_copy, screen_hide_accelerator};
+use videorc_app_core::studio::virtual_camera::OutputCameraView;
 use videorc_app_core::studio::{
     StudioBackend, camera_background_view, families, inspector::StartGates,
     transport::TransportView,
 };
+use videorc_app_core::user_error::{Failure, UserErrorContext, toast_user_error};
 use videorc_app_core::{BackendClient, StopOrigin, Studio};
 use videorc_app_core::{
     nav::{self, PageId, ThemeChoice},
@@ -71,7 +73,16 @@ pub enum Command {
     AvatarTab(usize),
     /// One of Sidekick's tabs, by its index in `TABS`.
     SidekickTab(usize),
+    /// Plan 214 E2: Output → Videorc Camera's switch, to this state.
+    VideorcCamera(bool),
 }
+
+/// `VIDEORC_CAMERA_COPY.turnOn` / `.turnOff` (`virtual-camera-view.ts`).
+const CAMERA_TURN_ON: &str = "Turn Videorc Camera on";
+const CAMERA_TURN_OFF: &str = "Turn Videorc Camera off";
+/// `VIDEORC_CAMERA_SWITCH_TOAST_ID` (`use-virtual-camera.ts`): one failure
+/// toast for the switch, wherever it was pressed.
+const CAMERA_SWITCH_TOAST_ID: &str = "virtual-camera-switch";
 #[derive(Clone)]
 struct Row {
     id: String,
@@ -170,6 +181,7 @@ fn command_icon(command: &Command) -> Option<IconName> {
         // the Avatar page's glyph stands in.
         Command::AvatarTab(_) => IconName::Smiley,
         Command::SidekickTab(_) => IconName::UserSound,
+        Command::VideorcCamera(_) => IconName::VideoCamera,
     })
 }
 
@@ -194,6 +206,8 @@ pub struct CommandPalette {
     /// Soundboard pads for ⌘K Sounds (P103); refreshed when Search opens.
     board: Option<SoundboardState>,
     windows: OpenWindows,
+    /// Videorc Camera's status for its row; read when Search opens.
+    camera: Option<VirtualCameraStatus>,
 }
 impl CommandPalette {
     pub fn new(
@@ -249,7 +263,33 @@ impl CommandPalette {
             dialogs: None,
             board: None,
             windows: OpenWindows::default(),
+            camera: None,
         }
+    }
+
+    /// Videorc Camera's status (`virtualCamera.status`), for its row.
+    fn load_camera(&mut self, cx: &mut Context<Self>) {
+        if !self.studio.is_connected() {
+            return;
+        }
+        let client = self.studio.backend().clone();
+        let job = self.runtime.spawn(async move {
+            client
+                .request("virtualCamera.status", json!({}))
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value::<VirtualCameraStatus>(value).ok())
+        });
+        cx.spawn(async move |this, cx| {
+            let status = job.await.ok().flatten();
+            let _ = this.update(cx, |palette, cx| {
+                palette.camera = status;
+                if palette.handle.is_open() {
+                    palette.refresh(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     fn load_board(&mut self, cx: &mut Context<Self>) {
@@ -288,6 +328,7 @@ impl CommandPalette {
                 .update(cx, |input, cx| input.set_value("", window, cx));
             self.selected = 0;
             self.load_board(cx);
+            self.load_camera(cx);
             self.refresh(cx);
             self.handle.open(window, cx);
             cx.on_next_frame(window, |this, window, cx| {
@@ -351,6 +392,41 @@ impl CommandPalette {
                     .and_then(serde_json::Value::as_str),
             )),
         );
+        // Plan 214 E2 (`command-palette.tsx:356-380`): a mirror of Output →
+        // Videorc Camera, never where the camera is hidden, off while it
+        // can't run.
+        let camera = OutputCameraView::of(
+            self.camera.as_ref(),
+            connected,
+            crate::app::hotkeys::node_platform(),
+        );
+        if !camera.hidden {
+            rows.push(
+                Row::new(
+                    "videorc-camera",
+                    "Session",
+                    if camera.checked {
+                        CAMERA_TURN_OFF
+                    } else {
+                        CAMERA_TURN_ON
+                    },
+                    Command::VideorcCamera(!camera.checked),
+                    !camera.disabled,
+                )
+                .keywords(&[
+                    "camera",
+                    "virtual camera",
+                    "webcam",
+                    "meet",
+                    "zoom",
+                    "teams",
+                    "discord",
+                    "facetime",
+                    "other apps",
+                ])
+                .context("Output"),
+            );
+        }
         rows.push(
             Row::new(
                 "mic",
@@ -826,6 +902,27 @@ impl CommandPalette {
                                 .backend()
                                 .sounds_request("sounds.stop", json!({}))
                                 .await;
+                        }
+                        // `camera.setOn(on, { toastFailure: true })`: the
+                        // Output page follows `virtualCamera.changed`.
+                        Command::VideorcCamera(on) => {
+                            let set = studio
+                                .backend()
+                                .request("virtualCamera.set", json!({ "on": on }))
+                                .await;
+                            if let Err(error) = set {
+                                let context = UserErrorContext {
+                                    action: if on { "turn on" } else { "turn off" },
+                                    object: "Videorc Camera",
+                                };
+                                if let Some(command) = toast_user_error(
+                                    Failure::Rpc(&error),
+                                    context,
+                                    CAMERA_SWITCH_TOAST_ID,
+                                ) {
+                                    studio.post_notices(vec![command]);
+                                }
+                            }
                         }
                         _ => {}
                     }

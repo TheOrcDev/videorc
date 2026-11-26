@@ -35,7 +35,7 @@ use videorc_kit::navigable_row::NavigableRow;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::popover::Popover;
 use videorc_kit::select::Select;
-use videorc_kit::shortcut_keys::{ShortcutKeys, ShortcutStyle};
+use videorc_kit::shortcut_keys::{self, ShortcutKeys, ShortcutStyle, parse_accelerator};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{Theme, size, text};
 
@@ -626,30 +626,34 @@ impl QuickSettingsSection {
                 .child(lcd::caps(self.view.captions.clone())),
             cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Captions))),
         );
-        // ShortcutKeys from the keymap (same as the default Chat row): never
-        // a hand-typed key glyph (gpui-design-guards).
+        // One line that truncates at its end, as Electron's LCD value does
+        // ("STREAM MANAGER · ⇧…"): the name stays whole and the key is what
+        // a narrow screen cuts. Tracked text can't end in "…", so the line
+        // is plain capitals; the key is printed by the kit from the keymap's
+        // accelerator, never a hand-typed glyph (gpui-design-guards).
         let chat_value: AnyElement = if let Some(new_label) = &self.view.chat.new_label {
             div()
                 .truncate()
                 .child(lcd::caps(new_label.clone()))
                 .into_any_element()
         } else {
+            let mac = cfg!(target_os = "macos");
+            let strokes = parse_accelerator(self.view.chat.accelerator, mac);
+            let keys = shortcut_keys::label(
+                strokes
+                    .iter()
+                    .map(|stroke| (stroke.modifiers, stroke.key.as_str())),
+                mac,
+            );
+            let words = if keys.is_empty() {
+                section_copy::STREAM_MANAGER.to_string()
+            } else {
+                format!("{} · {keys}", section_copy::STREAM_MANAGER)
+            };
             div()
-                .flex()
                 .min_w_0()
-                .items_center()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .child(lcd::tracked(section_copy::STREAM_MANAGER)),
-                )
-                .child(div().child("·"))
-                .child(
-                    ShortcutKeys::accelerator(self.view.chat.accelerator)
-                        .style(ShortcutStyle::Text),
-                )
+                .truncate()
+                .child(lcd::caps(words))
                 .into_any_element()
         };
         let chat = lcd::nav_row(
