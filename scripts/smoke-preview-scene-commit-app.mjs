@@ -77,13 +77,15 @@ try {
   )
   assertCameraShapeCommit({ compositor: shapeCompositor, surface: shapeSurface, highRevision })
 
-  const marginValue = 18
+  let marginValue = 18
   const marginInputResult = gpuiApp
     ? await setGpuiMargin(smoke, marginValue)
     : await setElectronMargin(smoke, marginValue)
   if (marginInputResult?.ok === false) {
     throw new Error(`Margin input was not available: ${JSON.stringify(marginInputResult)}`)
   }
+  // GPUI's slider lands on the step nearest the press.
+  if (gpuiApp && typeof marginInputResult?.value === 'number') marginValue = marginInputResult.value
   const marginCompositor = await waitForCompositorCameraMargin(
     ws,
     marginValue,
@@ -171,16 +173,48 @@ async function setElectronMargin(smoke, marginValue) {
 }
 
 /**
- * GPUI: the Scene page's Margin is a slider (0–96, step 1); Home, then one
- * Arrow Right per point, as the keyboard sets it.
+ * GPUI: the Scene page's Margin is a slider (0–96, step 1) whose node takes
+ * no focus from a pointer click, so the press lands on its track at the
+ * wanted fraction (the 16 px thumb travels the track less its width). A
+ * pointer press rounds to a step near the wanted one: the answer is the
+ * margin the compositor committed. Once the kit slider focuses on pointer
+ * down (Radix; sent to the kit lane 11-26), this becomes click, Home, then
+ * one Arrow Right per point, and lands on 18 exactly.
  */
-async function setGpuiMargin(smoke, marginValue) {
+async function setGpuiMargin(smoke, wanted) {
   const ui = createUiDriver(smoke, { app: 'gpui' })
   const margin = { role: 'slider', name: 'Margin' }
   await ui.openTab('layout', { waitFor: margin })
-  await ui.press('Home', { selector: margin })
-  for (let step = 0; step < marginValue; step += 1) await ui.press('ArrowRight')
-  return { ok: true, value: marginValue }
+  const windowHeight = (await ui.tree({ depth: 0 }))?.bounds?.height ?? 800
+  let node = await ui.waitFor(margin)
+  for (let turn = 0; turn < 12 && node.bounds; turn += 1) {
+    if (node.bounds.y >= 0 && node.bounds.y + node.bounds.height <= windowHeight - 8) break
+    await smokeCommand(smoke, 'ui-scroll', { dy: node.bounds.y < 0 ? -240 : 240 })
+    await sleep(200)
+    node = await ui.waitFor(margin)
+  }
+  const bounds = node.bounds
+  if (!bounds) return { ok: false, reason: 'the Margin slider has no bounds' }
+  const thumb = 16
+  const before = (await request(ws, timeoutMs, 'compositor.status')).sceneLayout?.cameraMargin
+  await ui.clickAt(
+    bounds.x + thumb / 2 + (bounds.width - thumb) * (wanted / 96),
+    bounds.y + bounds.height / 2
+  )
+  let value = before
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    value = (await request(ws, timeoutMs, 'compositor.status')).sceneLayout?.cameraMargin
+    if (typeof value === 'number' && value !== before) break
+    await sleep(100)
+  }
+  if (typeof value !== 'number' || value === before || Math.abs(value - wanted) > 4) {
+    return {
+      ok: false,
+      reason: `the Margin slider committed ${value} (was ${before}), wanted about ${wanted}`
+    }
+  }
+  return { ok: true, value }
 }
 
 /**
