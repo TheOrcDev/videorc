@@ -226,11 +226,18 @@ impl SettingsScreen {
                 if next == previous {
                     continue;
                 }
+                // A new connection (or the first bootstrap) reads the
+                // backend's settings again: a read before it answers
+                // "not connected" (the overnight diagnostic, 11-26).
+                let connected_again = (next.6, next.7) != (previous.6, previous.7);
                 previous = next;
                 if entity
                     .update(cx, |this, cx| {
                         this.apply_theme(cx);
                         this.apply_shortcuts();
+                        if connected_again {
+                            this.refresh(cx);
+                        }
                         cx.notify();
                     })
                     .is_err()
@@ -411,6 +418,11 @@ impl SettingsScreen {
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.permissions.recheck();
+        // Nothing to read before the engine is connected (Electron reads
+        // once its socket is up); the connection's own change reads then.
+        if !self.studio.is_connected() {
+            return;
+        }
         if self.reading || self.busy {
             self.read_again = true;
             return;
