@@ -61,8 +61,14 @@ impl ParentElement for Empty {
 impl RenderOnce for Empty {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
+        // `max-w-sm`, as a definite width: the column centres the header, and
+        // its text is measured at the width it's drawn at. A content-sized
+        // header measured the description at the dialog's full width (two
+        // lines), then drew it at 384 px (four), and a content-sized dialog
+        // clipped the rest (L4: Markers with no player on 33914ccc3).
         let header = div()
             .flex()
+            .w_full()
             .max_w(px(384.0))
             .flex_col()
             .items_center()
