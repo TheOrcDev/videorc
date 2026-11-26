@@ -1014,12 +1014,31 @@ impl Shell {
                             self.sidekick.read(cx).cohost_reason(),
                         );
                         let status = self.backend.read(cx).value();
+                        // Electron's account menu (`app-shell.tsx`) shows the
+                        // session's words on Health, as the status bar does
+                        // ("Ready"), not the supervisor's backend line.
+                        let words = self
+                            .session
+                            .as_ref()
+                            .map(|session| session.read(cx).value().clone());
+                        let (tone, label, pulse) = match words {
+                            Some(words) => (
+                                session_tone(words.tone),
+                                words.label.to_string(),
+                                words.pulse,
+                            ),
+                            None => (
+                                status_tone(status.tone),
+                                status.text.clone(),
+                                matches!(status.tone, Tone::Busy),
+                            ),
+                        };
                         super::account_menu::row(
                             state,
                             needs_sign_in,
-                            status_tone(status.tone),
-                            status.text.clone(),
-                            matches!(status.tone, Tone::Busy),
+                            tone,
+                            label,
+                            pulse,
                             cx.entity().downgrade(),
                             t,
                         )
