@@ -893,7 +893,7 @@ impl SourcesPanel {
         muted: bool,
         theme: &videorc_kit::tokens::Theme,
     ) -> AnyElement {
-        { segmented_meter(meter, muted, theme).into_any_element() }
+        segmented_meter(meter, muted, theme).into_any_element()
     }
 
     fn push_model(&mut self, cx: &mut Context<Self>) {

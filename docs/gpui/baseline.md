@@ -17,7 +17,7 @@ The pictures live outside the repository; this folder holds their manifest.
   real account or service).
 - **Looks:** dark, light, and Increase Contrast over each. Pages and their
   tabs at 960x660, 1100x720 and 1280x800; menus, dialogs, the palette,
-  toasts, Retro LCD, the live states and first run at 1280x800; the Stream
+  toasts, the live states and first run at 1280x800; the Stream
   Manager at its four widths; Captions reader and Notes at their default
   frames. Sizes are CSS pixels; the PNGs are 2x.
 - **Windows and Linux:** their halves are the contributors' (the Windows

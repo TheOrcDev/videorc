@@ -31,7 +31,7 @@ checking and source inspection cannot prove those requirements.
 Implementation coverage to exercise in that build:
 
 - P1378–P1388: Settings navigation, tabs, appearance and chat preferences
-  (P1383 is Windows-only). The stored Retro LCD, Studio chat and Stream
+  (P1383 is Windows-only). The stored Studio chat and Stream
   Manager preferences still need their consuming screens wired.
 - P1395–P1400: usage stats and permission controls, including failures and
   the environment-disabled usage setting.

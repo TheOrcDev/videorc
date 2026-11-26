@@ -31,7 +31,7 @@ use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::channel_toggle::{ChannelToggleSize, mute_toggle};
 use videorc_kit::icon::{IconName, icon};
-use videorc_kit::list_row::{GroupedList, ListRow};
+use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::select::Select;
 use videorc_kit::shortcut_keys::ShortcutKeys;
@@ -484,12 +484,13 @@ fn gain_row(
         .items_center()
         .gap(px(12.))
         .child(label.w(px(36.)))
-        .child(div().flex().flex_1().min_w_0().items_center().child({
-            let fader = Slider::new(slider)
-                .accessibility_label(aria)
-                .disabled(disabled);
-            { fader }
-        }))
+        .child(
+            div().flex().flex_1().min_w_0().items_center().child(
+                Slider::new(slider)
+                    .accessibility_label(aria)
+                    .disabled(disabled),
+            ),
+        )
         .child(
             div()
                 .flex()

@@ -48,7 +48,7 @@ const STOP_AGENTS_COMMAND: &str = "Stop agents";
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{self, hsla};
 use videorc_kit::{
-    Alert, AlertVariant, Button, ButtonSize, ButtonVariant, GroupedList, NavigableRow,
+    Alert, AlertVariant, Button, ButtonSize, ButtonVariant, GroupedList, GroupedRow, NavigableRow,
     PanelSection, StatusDot, StatusTone,
 };
 

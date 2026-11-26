@@ -42,7 +42,7 @@ platform, and S5.0 regenerates the list before the switch.
 
 | | Lines | macOS | Windows | Linux |
 | --- | ---: | ---: | ---: | ---: |
-| Controls (P lines) | 1,528 | 1,490 | 1,440 | 1,448 |
+| Controls (P lines) | 1,527 | 1,489 | 1,439 | 1,447 |
 | Windows-only lines (W lines) | 14 | | 14 | |
 
 Not counted as lines: the backend's own behaviour (recording, streaming,
@@ -209,7 +209,6 @@ until the runtime, visual and accessibility checks above can run.
 | P112 | Space yields | Ignored while a dialog, menu, focused control or repeat owns it | `renderer/lib/studio-space-shortcut.ts:1` | [x] | [ ] | [ ] |
 | P113 | Responsive layout | Inspector sits beside preview from 720 px; narrower, transport leads | `renderer/components/tabs/studio-tab.tsx:185` | [x] | [ ] | [ ] |
 | P114 | "Session inspector" aside | Holds cloud notice, Session, Chat, Audio, Sources, Takeover | `renderer/components/tabs/studio-tab.tsx:225` | [x] | [ ] | [ ] |
-| P115 | Retro LCD switch | Settings → General Retro LCD swaps every inspector section to LCD | `renderer/components/tabs/studio-tab.tsx:72` | [x] | [ ] | [ ] |
 | P116 | "Preview" section | Holds the preview stage; untitled when docked | `renderer/components/tabs/studio-tab.tsx:480` | [x] | [ ] | [ ] |
 | P117 | Preview health alert + "Retry preview" | Degraded preview error, with retry | `renderer/components/tabs/studio-tab.tsx:437` | [x] | [ ] | [ ] |
 | P118 | "Open Health" (preview alert) | Opens Health page | `renderer/components/tabs/studio-tab.tsx:449` | [x] | [ ] | [ ] |
