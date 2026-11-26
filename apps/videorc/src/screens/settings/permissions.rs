@@ -92,7 +92,8 @@ impl SettingsScreen {
             },
         });
         let muted = hsla(t.muted_foreground);
-        let mut list = GroupedList::new();
+        // Electron's padded rows (divide-y): each divider adds its 1 px.
+        let mut list = GroupedList::new().padded_rows(true);
         for (index, row) in model.rows.iter().enumerate() {
             let action = rows
                 .iter()
