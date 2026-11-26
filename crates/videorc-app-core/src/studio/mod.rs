@@ -483,8 +483,9 @@ pub struct CaptureExclusionView {
 pub struct CaptureExclusionAnswer {
     pub ids: Vec<u32>,
     /// Why it was sent: `"session-start"` (the capture a session is about to
-    /// use starts with the list) or `"in-session"` (a running capture takes
-    /// the new list in place).
+    /// use starts with the list), `"in-session"` (a running capture takes
+    /// the new list in place) or `"screen-pick"` (an idle Screen pick moved
+    /// the capture to the picked screen or window).
     pub reason: &'static str,
     /// The capture's state after it, or `None` when the request failed.
     pub screen_state: Option<PreviewScreenState>,
@@ -2461,6 +2462,41 @@ impl<B: StudioBackend> Studio<B> {
             (pid, params)
         };
         self.send_exclusion(request.0, request.1, "session-start")
+            .await;
+    }
+
+    /// After an idle Screen pick: the renderer's `ensureNativePreviewScreen`
+    /// (`preview.screen.start` for the picked screen or window, with the
+    /// list). The idle scene reload (`scene.load_from_capture_config`) draws
+    /// the new scene but starts no capture, so without this the preview kept
+    /// showing the screen captured before the pick. Nothing is sent for Off,
+    /// or for a layout that draws no screen (the running capture is left
+    /// alone, as the renderer leaves it). An already running capture of the
+    /// same source is reused.
+    pub(super) async fn start_picked_screen_capture(&self) {
+        let _one_at_a_time = self.exclusion_lock.lock().await;
+        let request = {
+            let inner = self.lock();
+            let Connection::Connected { pid } = inner.connection else {
+                return;
+            };
+            let doc = &inner.capture.config;
+            let config = &inner.capture.view.config;
+            if doc["sources"]["captureOff"] == Value::Bool(true)
+                || !captures_screen(&config.sources)
+                || !crate::scenes::v2::layout_shows_screen(&doc["layout"])
+            {
+                return;
+            }
+            let params = PreviewScreenStartParams {
+                sources: config.sources.clone(),
+                video: config.video.clone(),
+                protected_overlay_window_ids: inner.exclusion.wanted.clone(),
+                ffmpeg_path: None,
+            };
+            (pid, params)
+        };
+        self.send_exclusion(request.0, request.1, "screen-pick")
             .await;
     }
 

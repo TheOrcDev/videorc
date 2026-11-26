@@ -2532,6 +2532,74 @@ async fn an_idle_screen_pick_is_the_screen_of_the_scene_on_stream() {
     );
 }
 
+/// L6's smart-scenes out-of-sight step on c54b5bb6d: an idle pick of the
+/// Fixture Alpha window landed in the scene, but the preview stayed on the
+/// display it captured before, because the idle scene reload starts no
+/// capture. As the renderer's `ensureNativePreviewScreen` does, the pick
+/// starts the picked screen's or window's capture (with the exclusion
+/// list); Off starts none.
+#[tokio::test]
+async fn an_idle_screen_pick_moves_the_screen_capture_to_the_pick() {
+    use videorc_app_core::studio::source_selection::SourceKind;
+    const WINDOW: &str = "window:screencapturekit:7";
+    let backend = Scripted::new();
+    backend.with(|script| {
+        script.device_ids = Some(vec![
+            "camera:1".to_string(),
+            "screen:screencapturekit:1".to_string(),
+            "screen:screencapturekit:2".to_string(),
+        ]);
+        script.windows = vec![(WINDOW.to_string(), "Fixture Alpha".to_string())];
+        script.settings.insert(
+            keys::CAPTURE_CONFIG.to_string(),
+            Value::String(capture_config_with_camera().to_string()),
+        );
+    });
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    studio.set_protected_overlay_window_ids(vec![40]).await;
+    assert_eq!(backend.count("preview.screen.start"), 0);
+
+    // A display.
+    studio
+        .select_source_device(SourceKind::Capture, Some("screen:screencapturekit:2"))
+        .await
+        .expect("the pick lands");
+    assert_eq!(backend.count("preview.screen.start"), 1);
+    {
+        let script = backend.script.lock().unwrap();
+        let start = script.screen_starts.last().expect("the capture follows");
+        assert_eq!(
+            start.sources.screen_id.as_deref(),
+            Some("screen:screencapturekit:2")
+        );
+        assert_eq!(start.sources.window_id, None);
+        assert_eq!(start.protected_overlay_window_ids, vec![40]);
+    }
+    let last = studio.snapshot().capture_exclusion.last.expect("an answer");
+    assert_eq!(last.reason, "screen-pick");
+
+    // A window: the capture moves off the display to it.
+    studio
+        .select_source_device(SourceKind::Capture, Some(WINDOW))
+        .await
+        .expect("the pick lands");
+    assert_eq!(backend.count("preview.screen.start"), 2);
+    {
+        let script = backend.script.lock().unwrap();
+        let start = script.screen_starts.last().unwrap();
+        assert_eq!(start.sources.window_id.as_deref(), Some(WINDOW));
+        assert_eq!(start.sources.screen_id, None);
+    }
+
+    // Off, and a camera pick, start no screen capture.
+    let _ = studio.select_source_device(SourceKind::Capture, None).await;
+    let _ = studio
+        .select_source_device(SourceKind::Camera, Some("camera:1"))
+        .await;
+    assert_eq!(backend.count("preview.screen.start"), 2);
+}
+
 /// S1.6b part 5b: the Studio's Sources mirror is the Camera row (plan 231
 /// D8: no Screen row, no Hide screen) with Open Sources at its end (plan
 /// 235 D4), and the Sources page's Screen item names the scene on stream.
