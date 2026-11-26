@@ -1050,10 +1050,25 @@ D's revoke is accepted. Per-join guest identities (guest id plus a nonce,
 minted by the web) are a candidate cross-repo plan, not scheduled: about 35
 web files and the desktop treat the LiveKit identity as the guest id.
 
-- Every live guest page sends media-v2 receipts. The backend's room grants
-  a participant nothing until its receipt is current for the session it is
-  in (review option D, #1895), so a page that never sends one gets no host
-  media. Checked 2026-11-24 on web main `f084d2ae`: the guest page
+**Owner decision 2026-11-26 (Q174, #2282): match Electron, guests too.**
+This reverses #1895's guest scope. A visible participant (its token is not
+`hidden`: the runner, a guest) takes the host's base media (camera,
+microphone, screen) without a receipt, as Electron's renderer room grants
+every visible participant; a replacement session under a visible identity
+keeps its base media through D's revoke. Receipts current for the present
+session still gate the auxiliary track, the HTML sheets, the program-audio
+routing (`videorc.audio-routing.v1`) and every grant to a hidden page; a
+removed or blocked identity takes nothing, visible or not, until it is
+admitted again (and a status without a room lifts no removal). Why: the
+node runner cannot send a receipt (no `canPublishData`), so under D a
+backend-hosted show never went live (`smoke:cloud-talk-show:backend-host`,
+#2283). Independent review G6y5d: equal to or stricter than Electron for
+every participant kind.
+
+- Every live guest page sends media-v2 receipts. Since Q174 a guest takes
+  the host's base media without one; the receipt still earns the auxiliary
+  track (and a program page's routing and sheets). Checked 2026-11-24 on
+  web main `f084d2ae`: the guest page
   (`components/guest/use-guest-connection.ts`) sends a v2 capability on
   connect and with every 10 s heartbeat. Before the switch, confirm again on
   the web's main and that no older guest page can still be served (a
