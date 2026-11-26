@@ -73,7 +73,8 @@ describe('release CI path-filter wiring', () => {
     assert.match(vitest, /shard: \[1, 2, 3, 4\]/)
     assert.match(vitest, /fail-fast: false/)
     assert.match(jsJob, /needs: \[scope, js-checks, js-build, js-node, js-vitest\]/)
-    assert.match(jsJob, /if: \$\{\{ always\(\) && needs\.scope\.result == 'success'/)
+    // #2271 lets superseded runs cancel without waiting for summary jobs.
+    assert.match(jsJob, /if: \$\{\{ !cancelled\(\) && needs\.scope\.result == 'success'/)
     assert.match(jsJob, /name: Require every JS gate job/)
     assert.match(jsJob, /node scripts\/vitest-shard-report\.mjs check/)
   })

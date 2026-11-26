@@ -72,16 +72,17 @@ test('filters match as electron-builder takes these patterns', () => {
 })
 
 test('the layout is where the app looks', () => {
+  const binaries = path.resolve('/build')
   const copies = packageCopies({
     root: '/repo',
-    binaries: '/build',
-    bridge: '/build/videorc-mcp',
+    binaries,
+    bridge: path.join(binaries, 'videorc-mcp'),
     ffmpeg: '/repo/vendor/ffmpeg/linux-x64'
   })
   const to = Object.fromEntries(copies.map((copy) => [copy.to, copy]))
   // main.rs: the backend beside the app; the bridge beside the backend.
-  assert.equal(to[EXECUTABLE].from, `/build/${EXECUTABLE}`)
-  assert.equal(to[BACKEND].from, `/build/${BACKEND}`)
+  assert.equal(to[EXECUTABLE].from, path.join(binaries, EXECUTABLE))
+  assert.equal(to[BACKEND].from, path.join(binaries, BACKEND))
   assert.equal(to[BRIDGE].required, false)
   // bundled.rs: electron-builder's names under resources/ beside the exe.
   for (const folder of [
@@ -97,11 +98,11 @@ test('the layout is where the app looks', () => {
   // Every required source exists in this checkout.
   for (const copy of packageCopies({
     root,
-    binaries: '/build',
-    bridge: '/build/videorc-mcp',
+    binaries,
+    bridge: path.join(binaries, 'videorc-mcp'),
     ffmpeg: '/nowhere'
   })) {
-    if (copy.required && !copy.from.startsWith('/build')) {
+    if (copy.required && path.dirname(copy.from) !== binaries) {
       assert.ok(fs.existsSync(copy.from), copy.from)
     }
   }
