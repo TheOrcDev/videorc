@@ -4,7 +4,8 @@
 
 use std::sync::Arc;
 
-use gpui::{Context, Entity, Focusable, Window, div, prelude::*, px};
+use gpui::{Context, Entity, FocusHandle, Focusable, KeyDownEvent, Window, div, prelude::*, px};
+use gpui_base::actions::Confirm;
 use gpui_base::input::InputEvent;
 use videorc_app_core::desktop::permissions::PermissionPlatform;
 use videorc_app_core::livestream::accounts::{destination_label, platform_label};
@@ -72,6 +73,9 @@ pub struct GoLiveDialog {
     /// `nonPublicPrivacyLine` per destination row (instant YouTube only).
     privacy_lines: Vec<(String, String)>,
     title_counter: String,
+    /// The dialog's own focus when there is no title to take it (no
+    /// destination on, a partial setup): its keys work before any click.
+    body_focus: FocusHandle,
 }
 
 impl GoLiveDialog {
@@ -121,6 +125,7 @@ impl GoLiveDialog {
             instant_youtube: None,
             privacy_lines: Vec::new(),
             title_counter: String::new(),
+            body_focus: cx.focus_handle(),
         };
         panel.rebuild(cx);
         panel
@@ -387,6 +392,7 @@ impl GoLiveDialog {
                 } else {
                     self.dialog.open(window, cx);
                     self.was_open = true;
+                    self.focus_on_open(window, cx);
                 }
             } else {
                 self.was_open = true;
@@ -397,6 +403,43 @@ impl GoLiveDialog {
             }
             self.was_open = false;
             self.dismissing = false;
+        }
+    }
+
+    /// Electron's first focus (B-14): the title, else the dialog itself, so
+    /// Escape cancels and ⌘↵ goes live before any click. The kit dialog
+    /// opens from render, before its own focus handler is registered, so
+    /// nothing else moves focus in; this waits a frame for the fields.
+    fn focus_on_open(&self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.on_next_frame(window, |this, window, cx| {
+            let title = this
+                .has_instant
+                .then(|| {
+                    this.inputs
+                        .as_ref()
+                        .map(|(title, _)| title.read(cx).focus_handle(cx))
+                })
+                .flatten();
+            match title {
+                Some(title) => title.focus(window, cx),
+                None => this.body_focus.focus(window, cx),
+            }
+        });
+    }
+
+    /// ⌘↵ (Electron's `onKeyDown`): the primary, wherever focus is in the
+    /// dialog, only when the button would take a click.
+    fn confirm_by_key(&self) {
+        if self.can_confirm() {
+            self.confirm();
+        }
+    }
+
+    fn can_confirm(&self) -> bool {
+        let pending = self.state.pending;
+        match &self.state.partial {
+            Some(partial) => !pending && !partial.ready_labels.is_empty(),
+            None => !pending && !self.gate_blocked,
         }
     }
 
@@ -878,16 +921,23 @@ impl Render for GoLiveDialog {
             );
         }
 
-        let can_confirm = if self.state.partial.is_some() {
-            !pending
-                && self
-                    .state
-                    .partial
-                    .as_ref()
-                    .is_some_and(|p| !p.ready_labels.is_empty())
-        } else {
-            !pending && !self.gate_blocked
-        };
+        let can_confirm = self.can_confirm();
+        // The dialog's keys, as Electron's: ⌘↵ is the primary from anywhere
+        // in it; a plain Enter does nothing (the kit dialog's Enter would
+        // close it, and a close is Cancel here). The body holds the focus
+        // when there is no title to take it.
+        let keys = entity.clone();
+        let body = body
+            .track_focus(&self.body_focus)
+            .capture_action(|_: &Confirm, _, cx| cx.stop_propagation())
+            .on_key_down(move |event: &KeyDownEvent, _, cx| {
+                let stroke = &event.keystroke;
+                if stroke.key == "enter" && (stroke.modifiers.platform || stroke.modifiers.control)
+                {
+                    cx.stop_propagation();
+                    keys.update(cx, |this, _| this.confirm_by_key());
+                }
+            });
 
         Dialog::new("go-live-dialog", &self.dialog, copy::GO_LIVE)
             .size(DialogSize::Xl)
