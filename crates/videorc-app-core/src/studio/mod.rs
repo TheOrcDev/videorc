@@ -77,6 +77,7 @@ pub mod camera_low_light;
 pub mod captions_readiness;
 pub mod capture_config;
 pub mod chat_commands_store;
+pub mod chat_overlay;
 pub mod clips;
 mod clips_actions;
 pub mod clips_ring;
@@ -233,7 +234,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 44] = [
+pub const STUDIO_EVENTS: [&str; 45] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -242,6 +243,9 @@ pub const STUDIO_EVENTS: [&str; 44] = [
     crate::client::names::RECORDING_FINALIZATION,
     // A remote's key press, for the Studio to run and ack (`remote`).
     crate::client::names::REMOTE_INTENT,
+    // Chat on stream follows the overlay layout's chat switches and rect
+    // (`chat_overlay`).
+    crate::chat::overlay::LAYOUT_EVENT,
     // The toasts' news.
     crate::client::names::STREAM_TARGETS,
     crate::client::names::REPLAY_STATE,
@@ -996,6 +1000,10 @@ pub struct Studio<B: StudioBackend> {
     remote_publish_kick: Notify,
     /// A remote intent waits; the driver runs it.
     remote_intent_kick: Notify,
+    /// Chat on stream's driver memory (`chat_overlay`).
+    chat_overlay: Mutex<chat_overlay::ChatOverlayState>,
+    /// The overlay layout changed; chat on stream looks again.
+    chat_overlay_kick: Notify,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -1110,6 +1118,8 @@ impl<B: StudioBackend> Studio<B> {
             remote: Mutex::new(remote::RemotePublisher::default()),
             remote_publish_kick: Notify::new(),
             remote_intent_kick: Notify::new(),
+            chat_overlay: Mutex::new(chat_overlay::ChatOverlayState::default()),
+            chat_overlay_kick: Notify::new(),
         }
     }
 
@@ -1157,7 +1167,8 @@ impl<B: StudioBackend> Studio<B> {
     /// drains beside the events, so an `audio.processing.update` in flight
     /// never holds them up. S1.6b part 4c-2: the vertical stream's live
     /// sends the same. The remote surface's publishes and the remote
-    /// intents run beside them too (`remote`).
+    /// intents run beside them too (`remote`), and chat on stream
+    /// (`chat_overlay`).
     pub async fn drive(self: Arc<Self>, events: broadcast::Receiver<BackendEvent>) {
         tokio::select! {
             () = self.drive_events(events) => {}
@@ -1165,6 +1176,7 @@ impl<B: StudioBackend> Studio<B> {
             () = self.drain_vertical_leg_when_kicked() => {}
             () = self.publish_remote_surface_when_kicked() => {}
             () = self.run_remote_intents_when_kicked() => {}
+            () = self.drive_chat_overlay() => {}
         }
     }
 
@@ -1269,6 +1281,7 @@ impl<B: StudioBackend> Studio<B> {
                 // The new backend holds no remote surface: the bootstrap's
                 // publish sends it again.
                 self.remote_lock().forget_connection();
+                self.forget_chat_overlay_connection();
                 self.publish();
                 self.bootstrap(generation).await;
                 // S1.6b part 5d: a session that runs on this connection.
@@ -1379,6 +1392,7 @@ impl<B: StudioBackend> Studio<B> {
                     inner.sources.forget_devices();
                 }
                 self.remote_lock().forget_connection();
+                self.forget_chat_overlay_connection();
                 self.publish();
                 // S1.6b part 5d: the engine is away: the live sync ends.
                 self.follow_live_audio().await;
@@ -1426,6 +1440,12 @@ impl<B: StudioBackend> Studio<B> {
             // S1.6b part 5a: the session's whole source authority, read again.
             BackendEvent::Untyped { event, .. } if event == live_sources::SOURCES_CHANGED_EVENT => {
                 self.kick_live_sources_read().await;
+            }
+            // Chat on stream reads the box's switches and rect from here.
+            BackendEvent::Untyped { event, payload }
+                if event == crate::chat::overlay::LAYOUT_EVENT =>
+            {
+                self.set_chat_overlay_layout(payload);
             }
             // S1.6b part 5b: the Captions row's word.
             BackendEvent::Untyped { event, payload }
