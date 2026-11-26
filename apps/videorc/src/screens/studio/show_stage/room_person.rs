@@ -22,8 +22,8 @@ use videorc_kit::kebab_menu::{KebabMenu, KebabMenuItem};
 use videorc_kit::list_row::ListRow;
 use videorc_kit::section_label::SectionLabel;
 use videorc_kit::status_dot::{StatusDot, StatusTone};
-use videorc_kit::theme::{TypeScale, faded_over, hsla, with_alpha};
-use videorc_kit::toggle_group::{ToggleGroup, ToggleItem};
+use videorc_kit::theme::{TypeScale, hsla, with_alpha};
+use videorc_kit::toggle_group::Toggle;
 use videorc_kit::tokens::{Theme, radius, text};
 use videorc_kit::tooltip::tooltip;
 
@@ -193,52 +193,6 @@ fn state_badges(person: &RoomPerson, mic: &MicView) -> Vec<AnyElement> {
     out
 }
 
-/// An `xs` Toggle (`h-6 min-w-6 px-1.5`) as a one-chip group: pressed is the
-/// chrome plate.
-fn toggle(
-    id: String,
-    label: String,
-    hint: String,
-    pressed: bool,
-    disabled: bool,
-    body: AnyElement,
-    on_toggle: Handler,
-) -> AnyElement {
-    let value = SharedString::from("on");
-    ToggleGroup::new(SharedString::from(id))
-        .xs(true)
-        .multiple(true)
-        .disabled(disabled)
-        .value(if pressed {
-            vec![value.clone()]
-        } else {
-            Vec::new()
-        })
-        .item(
-            ToggleItem::new(value, label)
-                .child(body)
-                .chip(true)
-                .tooltip(hint),
-        )
-        .on_change(move |_, window, cx| on_toggle(window, cx))
-        .into_any_element()
-}
-
-/// The row's ink for an icon in a toggle: the text's tone when pressed,
-/// muted otherwise, faded when disabled.
-fn toggle_ink(t: &Theme, pressed: bool, disabled: bool) -> gpui::Hsla {
-    let ink = if pressed {
-        t.foreground
-    } else {
-        t.muted_foreground
-    };
-    hsla(if disabled {
-        faded_over(ink, t.glass_solid, 0.5)
-    } else {
-        ink
-    })
-}
-
 /// What a Show stage row needs to draw one person.
 pub struct PersonRowParts {
     pub person: RoomPerson,
@@ -276,61 +230,42 @@ pub fn person_row(
     } = parts;
     let id = person.identity.clone();
     let silent = matches!(mic.state, MicState::Held | MicState::Off | MicState::Muted);
-    let mic_ink = if mic.state == MicState::Talking && !disabled {
-        hsla(t.success)
-    } else {
-        toggle_ink(t, mic_pressed, disabled)
-    };
-    let mic_toggle = toggle(
-        format!("show-stage-mute-{id}"),
-        mic_label.clone(),
-        mic_label,
-        mic_pressed,
-        disabled,
-        icon(
+    // `MicToggle`: the icon is the state; pressed means muted. Talking, the
+    // glyph wears the success tone.
+    let mic_toggle = {
+        let on_mic = on_mic.clone();
+        Toggle::new(
+            SharedString::from(format!("show-stage-mute-{id}")),
             if silent {
                 IconName::WaveformSlash
             } else {
                 IconName::Waveform
             },
-            16.,
-            mic_ink,
+            mic_label.clone(),
         )
-        .into_any_element(),
-        on_mic,
-    );
+        .pressed(mic_pressed)
+        .disabled(disabled)
+        .tooltip(mic_label)
+        .when(mic.state == MicState::Talking, |toggle| {
+            toggle.ink(t.success)
+        })
+        .on_change(move |_, window, cx| on_mic(window, cx))
+    };
+    // `ScreenShareToggle`: pressed means they may share; the dot means they
+    // are sharing now.
     let share_toggle = (!person.host && person.guest_id.is_some()).then(|| {
         let share = guest_screen_share(&person);
-        let pressed = share.state != ScreenShareState::Off;
-        let body = div()
-            .relative()
-            .child(icon(
-                IconName::Monitor,
-                16.,
-                toggle_ink(t, pressed, disabled),
-            ))
-            .when(share.state == ScreenShareState::Sharing, |body| {
-                // `absolute top-0.5 right-0.5 size-1.5`, on the 28×24 toggle.
-                body.child(
-                    div()
-                        .absolute()
-                        .top(px(-2.))
-                        .right(px(-4.))
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(hsla(t.success)),
-                )
-            })
-            .into_any_element();
-        toggle(
-            format!("show-stage-screen-share-{id}"),
+        let on_screen_share = on_screen_share.clone();
+        Toggle::new(
+            SharedString::from(format!("show-stage-screen-share-{id}")),
+            IconName::Monitor,
             share.action_label.clone(),
-            share.hint.clone(),
-            pressed,
-            disabled,
-            body,
-            on_screen_share,
         )
+        .pressed(share.state != ScreenShareState::Off)
+        .dot(share.state == ScreenShareState::Sharing)
+        .disabled(disabled)
+        .tooltip(share.hint.clone())
+        .on_change(move |_, window, cx| on_screen_share(window, cx))
     });
     let mut alias = div().flex().flex_none().items_center().gap(px(6.));
     alias = alias.children(connection_dot(&person));
