@@ -1096,13 +1096,9 @@ impl Shell {
     fn page_body(&self, page_error: bool, t: &Theme) -> gpui::Div {
         let page = self.page;
         let pane = div().flex_1().min_w(px(0.)).min_h(px(0.)).flex().flex_col();
-        if page == PageId::Studio && !page_error {
-            // The Studio rises into the title strip: no band, the stage and
-            // Record / Go Live line up with the traffic lights' row, and the
-            // column divider runs to the window's top edge (owner by-eye,
-            // 11-25). The page keeps its own gutter.
-            return pane.child(self.studio.clone());
-        }
+        // Every page wears the band, the Studio too: Electron's title row
+        // names the page ("Studio") over a rule (owner by-eye on the
+        // gallery, 11-26; it replaces the 11-25 order that dropped it).
         // `PaneBody`: `relative min-h-0 flex-1`, the page's own column.
         let body = div()
             .relative()
