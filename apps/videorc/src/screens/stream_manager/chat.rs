@@ -152,6 +152,9 @@ pub struct ChatPane {
     completion_index: usize,
     /// Follow the newest message (Electron's pinned follow).
     following: bool,
+    /// A past session's transcript is on screen (Library ⋯ → Open in Stream
+    /// Manager): the live chat waits until Back to live.
+    history: bool,
     unread: usize,
     incomplete: bool,
     delivery_cursor: DeliveryCursor,
@@ -240,7 +243,9 @@ impl ChatPane {
                 }
                 let chat = live_chat.borrow().clone();
                 let alive = this.update(cx, |pane, cx| {
-                    pane.apply_live_chat(&chat, cx);
+                    if !pane.history {
+                        pane.apply_live_chat(&chat, cx);
+                    }
                 });
                 if alive.is_err() {
                     break;
@@ -287,6 +292,7 @@ impl ChatPane {
             pending_draft: None,
             completion_index: 0,
             following: true,
+            history: false,
             unread: 0,
             incomplete: false,
             delivery_cursor,
@@ -773,12 +779,48 @@ impl ChatPane {
         }
     }
 
+    /// A past session's chat (`sessions.comments.history`), read-only: the
+    /// renderer's `applyLiveChatSnapshot` over the transcript, in History
+    /// mode (`openSessionCommentsWindow`).
+    pub fn show_history(
+        &mut self,
+        session_id: String,
+        messages: Vec<LiveChatMessage>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut chat = LiveChat::default();
+        chat.apply_snapshot(
+            videorc_app_core::chat::model::LiveChatSnapshotWire {
+                session_id: Some(session_id),
+                providers: Vec::new(),
+                messages,
+                updated_at: String::new(),
+            },
+            true,
+        );
+        self.history = true;
+        self.following = true;
+        self.apply_live_chat(&chat, cx);
+        self.composer = false;
+        cx.notify();
+    }
+
+    /// Back to live: the Studio's live chat again.
+    pub fn leave_history(&mut self, cx: &mut Context<Self>) {
+        if !self.history {
+            return;
+        }
+        self.history = false;
+        let chat = self.studio.live_chat_now();
+        self.apply_live_chat(&chat, cx);
+    }
+
     pub fn set_live(&mut self, live: bool, cx: &mut Context<Self>) {
         if self.live == live {
             return;
         }
         self.live = live;
-        self.composer = live && self.can_send;
+        self.composer = live && self.can_send && !self.history;
         cx.notify();
     }
 
