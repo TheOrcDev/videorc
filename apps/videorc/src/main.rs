@@ -727,6 +727,20 @@ fn main() -> Result<()> {
                 preview.update(cx, |preview, _| {
                     preview.remember_window(preview_frame.clone())
                 });
+                // Linux: the docked child sits above the window's drawing,
+                // so it hides under first run's full-window overlay and the
+                // Go Live confirmation: neither holds focus as it opens,
+                // which is how the Preview sees every other dialog.
+                #[cfg(target_os = "linux")]
+                {
+                    let first_run = first_run.clone();
+                    let go_live = go_live.clone();
+                    preview.update(cx, |preview, _| {
+                        preview.set_cover_probe(move |cx| {
+                            first_run.read(cx).is_open() || go_live.read(cx).is_showing()
+                        })
+                    });
+                }
                 *preview_slot.borrow_mut() = Some(preview.clone());
                 let session = cx.new(|cx| {
                     SessionSection::new(

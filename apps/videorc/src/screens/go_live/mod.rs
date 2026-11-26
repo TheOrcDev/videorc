@@ -126,6 +126,15 @@ impl GoLiveDialog {
         panel
     }
 
+    /// The confirmation is up. Linux's docked Preview hides under it (its
+    /// child sits above the window's drawing), and the dialog opens from
+    /// render, so focus, which tells the Preview about other dialogs, isn't
+    /// inside it yet.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn is_showing(&self) -> bool {
+        self.state.open
+    }
+
     /// Opens the confirmation as the Studio's Go Live button does (the
     /// smokes' `open-tab {dialog: "go-live"}`, the screen gallery).
     pub fn open(&self) {
