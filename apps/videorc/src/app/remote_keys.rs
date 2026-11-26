@@ -124,6 +124,18 @@ fn window_front(window: RemoteWindow, cx: &mut App) -> bool {
     }
 }
 
+/// Remove the Preview before stopping it. `Entity::update` flushes deferred
+/// window-close observers before returning, and those observers read this
+/// slot through `facts`. An `if let slot.borrow_mut().take()` keeps the
+/// mutable borrow alive through that callback and aborts a floating quit.
+/// The callback form keeps the reentrant boundary covered by the test below.
+pub(crate) fn stop_taken_preview<T>(slot: &RefCell<Option<T>>, stop: impl FnOnce(T)) {
+    let taken = slot.borrow_mut().take();
+    if let Some(preview) = taken {
+        stop(preview);
+    }
+}
+
 /// The app's windows and connected screens as the remotes see them.
 fn facts(keys: &RemoteKeys, cx: &App) -> RemoteAppFacts {
     let preview = keys.preview.borrow().as_ref().is_some_and(|preview| {
@@ -164,5 +176,28 @@ pub(crate) fn screen_moves() -> ScreenMoves {
         ScreenMoves::Wayland
     } else {
         ScreenMoves::Supported
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stop_taken_preview;
+    use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn floating_quit_observer_can_read_the_preview_slot_during_stop() {
+        let slot = RefCell::new(Some("floating preview"));
+        let stopped = Cell::new(0);
+        stop_taken_preview(&slot, |preview| {
+            assert_eq!(preview, "floating preview");
+            // Preview.stop removes its window. GPUI flushes the remote
+            // window-close observer inside Entity::update, before stop
+            // returns. This is facts()'s reentrant read, not a later read.
+            assert!(slot.borrow().is_none());
+            stopped.set(stopped.get() + 1);
+        });
+        // A second shutdown cannot stop the removed Preview again.
+        stop_taken_preview(&slot, |_| stopped.set(stopped.get() + 1));
+        assert_eq!(stopped.get(), 1);
     }
 }
