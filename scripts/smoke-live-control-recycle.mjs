@@ -15,9 +15,12 @@ import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import WebSocket from 'ws'
 
-import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppEnv, smokeAppIsGpui, stopProcess } from './lib/app-launcher.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
-import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
+import {
+  isolatedRecycleDatabasePath,
+  waitForOwnedTcpListener
+} from './lib/live-control-recycle-smoke.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import {
@@ -48,8 +51,6 @@ const stateRoot = resolve(
     mkdtempSync(join(tmpdir(), 'videorc-live-control-recycle-'))
 )
 const outputDirectory = join(stateRoot, 'recordings')
-let databasePath = join(stateRoot, 'app-data', 'videorc.sqlite3')
-let recoveryDirectory = join(stateRoot, 'app-data', 'session-finalization-recovery')
 const streamArtifactPath = join(outputDirectory, 'recycle-stream.flv')
 const streamPort = Number(process.env.VIDEORC_LIVE_CONTROL_RECYCLE_RTMP_PORT ?? 19629)
 const streamTarget = {
@@ -81,19 +82,20 @@ let streamListener
 let remote
 
 try {
+  const launchEnv = smokeAppEnv({
+    VIDEORC_SMOKE_STATE_DIR: stateRoot,
+    VIDEORC_ENABLE_SMOKE_RPC: '1',
+    VIDEORC_SMOKE_COMMAND_SERVER: '1',
+    VIDEORC_SMOKE_PREVIEW_MOTION: '1',
+    VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',
+    VIDEORC_BUNDLED_FFPROBE_PATH: realFfprobe,
+    PATH: [dirname(shimPath), process.env.PATH].filter(Boolean).join(delimiter),
+    ...finalizationBarrierEnvironment(barrier, realFfmpeg)
+  })
   launched = await launchDevApp({
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     timeoutMs,
-    env: {
-      VIDEORC_SMOKE_STATE_DIR: stateRoot,
-      VIDEORC_ENABLE_SMOKE_RPC: '1',
-      VIDEORC_SMOKE_COMMAND_SERVER: '1',
-      VIDEORC_SMOKE_PREVIEW_MOTION: '1',
-      VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',
-      VIDEORC_BUNDLED_FFPROBE_PATH: realFfprobe,
-      PATH: [dirname(shimPath), process.env.PATH].filter(Boolean).join(delimiter),
-      ...finalizationBarrierEnvironment(barrier, realFfmpeg)
-    }
+    env: launchEnv
   })
 
   const original = launched.connections['backend-ready']
@@ -109,8 +111,12 @@ try {
     {},
     { timeoutMs }
   )
-  databasePath = requiredString(isolation?.databasePath, 'isolated backend database path')
-  recoveryDirectory = join(dirname(databasePath), 'session-finalization-recovery')
+  const databasePath = isolatedRecycleDatabasePath({
+    isolation,
+    gpui: smokeAppIsGpui(launchEnv),
+    launchEnv
+  })
+  const recoveryDirectory = join(dirname(databasePath), 'session-finalization-recovery')
   oldSocket = await connectBackend(original, timeoutMs)
   streamListener = spawnRtmpListener()
   await waitForOwnedTcpListener({

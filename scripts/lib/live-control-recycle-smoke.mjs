@@ -1,5 +1,7 @@
+import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { readFileSync, readdirSync, readlinkSync } from 'node:fs'
+import { isAbsolute } from 'node:path'
 
 export function lsofShowsOwnedTcpListener(output, pid, port) {
   const fields = String(output).split(/\r?\n/)
@@ -135,4 +137,21 @@ export async function waitForOwnedTcpListener({
   throw new Error(
     `Local RTMP listener pid ${child.pid} did not bind port ${port} within ${timeoutMs}ms: ${String(diagnostics()).trim()}`
   )
+}
+
+// Electron reports isolation booleans after comparing admin health.ping with
+// its configured launch path. GPUI additionally exposes its own storage path.
+export function isolatedRecycleDatabasePath({ isolation, gpui, launchEnv }) {
+  assert.equal(isolation?.isolated, true, 'backend state must be isolated')
+  assert.equal(
+    isolation?.backendUsesConfiguredDatabase,
+    true,
+    'backend must use the configured isolated database'
+  )
+  const databasePath = gpui ? isolation.databasePath : launchEnv?.VIDEORC_DATABASE_PATH
+  assert.ok(
+    typeof databasePath === 'string' && isAbsolute(databasePath),
+    'isolated backend database path must be absolute'
+  )
+  return databasePath
 }
