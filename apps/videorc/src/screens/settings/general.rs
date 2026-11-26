@@ -75,7 +75,6 @@ impl SettingsScreen {
         let model = view::general_view(&view::GeneralInput {
             platform: crate::app::hotkeys::node_platform(),
             theme: ThemeChoice::parse(snapshot.settings.theme.as_deref()),
-            retro_lcd: settings.retro_lcd_studio(),
             studio_chat: settings.studio_chat(),
             open_stream_manager_on_live: settings.open_stream_manager_on_live(),
             stream_manager_enabled: true,
@@ -132,16 +131,6 @@ impl SettingsScreen {
                         SettingsRow::new("theme-row", c::THEME)
                             .description(model.theme_description)
                             .child(theme),
-                    )
-                    .item(
-                        SettingsRow::new("retro-row", c::RETRO_LCD)
-                            .description(c::RETRO_LCD_DESCRIPTION)
-                            .child(self.studio_switch(
-                                "retroLcdStudio",
-                                c::RETRO_LCD,
-                                model.retro_lcd,
-                                cx,
-                            )),
                     )
                     .row(scene_row),
             );

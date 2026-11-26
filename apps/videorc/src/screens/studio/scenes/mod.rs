@@ -284,9 +284,6 @@ pub struct ScenesSection {
     view: ScenesSectionView,
     /// The scene on stream's fields under the cards (none with no scene).
     on_stream: Option<SceneOnStreamView>,
-    /// Retro LCD (plan 197): the fields draw on one LCD screen (P329).
-    retro: bool,
-    /// The Screen field's Screen Recording alert, while the grant is missing.
     screen_alert: Option<ScreenRecordingAlert>,
     /// The alert's action runs.
     alert_pending: bool,
@@ -365,7 +362,6 @@ impl ScenesSection {
             permissions,
             view: ScenesSectionView::Loading,
             on_stream: None,
-            retro: false,
             screen_alert: None,
             alert_pending: false,
             privacy: ScreenPrivacy::default(),
@@ -453,16 +449,10 @@ impl ScenesSection {
                 cx,
             );
         }
-        let retro = snapshot.settings.studio.retro_lcd_studio();
-        if view != self.view
-            || on_stream != self.on_stream
-            || screen_alert != self.screen_alert
-            || retro != self.retro
-        {
+        if view != self.view || on_stream != self.on_stream || screen_alert != self.screen_alert {
             self.view = view;
             self.on_stream = on_stream;
             self.screen_alert = screen_alert;
-            self.retro = retro;
             cx.notify();
         }
     }

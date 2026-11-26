@@ -42,7 +42,7 @@ platform, and S5.0 regenerates the list before the switch.
 
 | | Lines | macOS | Windows | Linux |
 | --- | ---: | ---: | ---: | ---: |
-| Controls (P lines) | 1,559 | 1,521 | 1,470 | 1,478 |
+| Controls (P lines) | 1,528 | 1,490 | 1,440 | 1,448 |
 | Windows-only lines (W lines) | 14 | | 14 | |
 
 Not counted as lines: the backend's own behaviour (recording, streaming,
@@ -355,44 +355,6 @@ until the runtime, visual and accessibility checks above can run.
 | P218 | ⌘/Ctrl+↑/↓ | Moves focus between channel strips | `renderer/components/studio/audio-section.tsx:240` | [x] | [ ] | [ ] |
 | P219 | "Open Audio" focus target | Notifications land on mic picker | `renderer/components/studio/audio-section.tsx:82` | [x] | [ ] | [ ] |
 
-### Audio section, Retro LCD look (retro-lcd-studio.tsx RetroAudioSectionView)
-
-| # | Control | What it does | Source | macOS | Windows | Linux |
-| --- | --- | --- | --- | :-: | :-: | :-: |
-| P220 | LCD "Microphone" header | Channel title on LCD screen | `renderer/components/studio/retro-lcd-studio.tsx:336` | [x] | [ ] | [ ] |
-| P221 | Mute key "Mute"/"Muted" | Toggles mic mute, lit when muted, shortcut text | `renderer/components/studio/retro-lcd-studio.tsx:348` | [x] | [ ] | [ ] |
-| P222 | LCD "Device" picker | Chooses microphone in LCD popup | `renderer/components/studio/retro-lcd-studio.tsx:377` | [x] | [ ] | [ ] |
-| P223 | Switch status line | Live mic switch progress on screen | `renderer/components/studio/retro-lcd-studio.tsx:394` | [x] | [ ] | [ ] |
-| P224 | LCD mic meter (CLIP flag, no scale) | Level, held peak, digits, clip | `renderer/components/studio/retro-lcd-studio.tsx:406` | [x] | [ ] | [ ] |
-| P225 | Takeover hold message | "Muted by takeover" sentence | `renderer/components/studio/retro-lcd-studio.tsx:418` | [x] | [ ] | [ ] |
-| P226 | Session level unavailable message | No backend level | `renderer/components/studio/retro-lcd-studio.tsx:424` | [x] | [ ] | [ ] |
-| P227 | LCD Gain fader | Microphone gain | `renderer/components/studio/retro-lcd-studio.tsx:429` | [x] | [ ] | [ ] |
-| P228 | LCD "System audio" header + switch | Toggles system audio *(macOS; hidden Linux/older Windows)* | `renderer/components/studio/retro-lcd-studio.tsx:460` | [x] | [ ] | [ ] |
-| P229 | "Needs permission" | Opens Settings → Permissions *(macOS)* | `renderer/components/studio/retro-lcd-studio.tsx:697` | [x] | n/a | n/a |
-| P230 | "Resume" (echo) | Resumes after echo guard pause *(where shown)* | `renderer/components/studio/retro-lcd-studio.tsx:708` | [x] | [ ] | [ ] |
-| P231 | Issue word with tooltip | Short system-audio issue label *(where shown)* | `renderer/components/studio/retro-lcd-studio.tsx:714` | [x] | [ ] | [ ] |
-| P232 | LCD system audio meter + Gain | Level and gain *(where shown)* | `renderer/components/studio/retro-lcd-studio.tsx:469` | [x] | [ ] | [ ] |
-
-### Retro LCD transport, Session, Sources, Takeover (retro-lcd-studio.tsx)
-
-| # | Control | What it does | Source | macOS | Windows | Linux |
-| --- | --- | --- | --- | :-: | :-: | :-: |
-| P233 | LCD "Record" key (Space text) | Starts recording / "Stop recording" for room | `renderer/components/studio/retro-lcd-studio.tsx:132` | [x] | [ ] | [ ] |
-| P234 | LCD "Go Live"/"Checking…"/"End livestream" key | Starts or ends livestream | `renderer/components/studio/retro-lcd-studio.tsx:151` | [x] | [ ] | [ ] |
-| P235 | LCD stop key (stopLabel) | Stops active session | `renderer/components/studio/retro-lcd-studio.tsx:120` | [x] | [ ] | [ ] |
-| P236 | LCD stop note / blocked line + action | Explanations and jump to fix | `renderer/components/studio/retro-lcd-studio.tsx:169` | [x] | [ ] | [ ] |
-| P237 | Stop overrun alert | Force-stop explanation | `renderer/components/studio/retro-lcd-studio.tsx:180` | [x] | [ ] | [ ] |
-| P238 | LCD Session rows | Livestream, Output, Destinations, Stream, Sidekick, Guests, Agents | `renderer/components/studio/retro-lcd-studio.tsx:227` | [x] | [ ] | [ ] |
-| P239 | LCD Camera picker + "Open Sources" cog | Switches camera; cog opens Sources | `renderer/components/studio/retro-lcd-studio.tsx:518` | [x] | [ ] | [ ] |
-| P240 | LCD "Background" row | Opens camera background picker popover | `renderer/components/studio/retro-lcd-studio.tsx:598` | [x] | [ ] | [ ] |
-| P241 | LCD stage / system-effect lines | Background cover and OS effect notes | `renderer/components/studio/retro-lcd-studio.tsx:643` | [x] | [ ] | [ ] |
-| P242 | LCD "Captions" row | Captions status; opens Captions panel | `renderer/components/studio/retro-lcd-studio.tsx:546` | [x] | [ ] | [ ] |
-| P243 | LCD "Chat" row | "n new" or Stream Manager + key; opens it | `renderer/components/studio/retro-lcd-studio.tsx:562` | [x] | [ ] | [ ] |
-| P244 | LCD "Takeover" header + "Open Images" cog | Opens Images | `renderer/components/studio/retro-lcd-studio.tsx:741` | [x] | [ ] | [ ] |
-| P245 | LCD "None yet" / "Add in Images" | Empty takeover state; opens Images | `renderer/components/studio/retro-lcd-studio.tsx:746` | [x] | [ ] | [ ] |
-| P246 | LCD takeover press rows | Toggle takeover covering output | `renderer/components/studio/retro-lcd-studio.tsx:758` | [x] | [ ] | [ ] |
-| P247 | LCD takeover hint | What a click does / connection reason | `renderer/components/studio/retro-lcd-studio.tsx:773` | [x] | [ ] | [ ] |
-
 ### Quick settings (quick-settings.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
@@ -518,7 +480,6 @@ until the runtime, visual and accessibility checks above can run.
 | P326 | Camera line | Why camera layouts are off | `renderer/components/studio/scene-on-stream.tsx:334` | [ ] | [ ] | [ ] |
 | P327 | "Framing" Fill / Fit | Screen framing (vertical or landscape) | `renderer/components/studio/scenes-gallery.tsx:68` | [ ] | [ ] | [ ] |
 | P328 | "Vertical stream" subsection | 9:16 layout when simulcast armed | `renderer/components/studio/scene-on-stream.tsx:344` | [ ] | [ ] | [ ] |
-| P329 | LCD rows: On stream, Screen, Change screen…, Hide screen press row, Layout, Framing, Vertical stream, Vertical framing | LCD versions of the above | `renderer/components/studio/scene-on-stream.tsx:157` | [ ] | [ ] | [ ] |
 
 ### Screen privacy control (screen-privacy-control.tsx)
 
@@ -672,7 +633,6 @@ until the runtime, visual and accessibility checks above can run.
 | --- | --- | --- | --- | :-: | :-: | :-: |
 | P426 | "Audio" section description | After gain; or room-mic processing text | `renderer/components/sources/sources-audio-mixer.tsx:235` | [x] | [ ] | [ ] |
 | P427 | "Room microphone" alert | Processing detail for room mic | `renderer/components/sources/sources-audio-mixer.tsx:242` | [x] | [ ] | [ ] |
-| P428 | Retro LCD meters | Meters drawn as LCD when Retro LCD on | `renderer/components/sources/sources-audio-mixer.tsx:233` | [x] | [ ] | [ ] |
 | P429 | ⌘/Ctrl+↑/↓ | Moves focus between channel strips | `renderer/components/sources/sources-audio-mixer.tsx:148` | [x] | [ ] | [ ] |
 | P430 | "Microphone" status chip | Muted/silent/takeover/switching state | `renderer/components/sources/sources-audio-mixer.tsx:312` | [x] | [ ] | [ ] |
 | P431 | "Mute microphone" toggle | Mutes mic; shortcut tooltip | `renderer/components/sources/sources-audio-mixer.tsx:445` | [x] | [ ] | [ ] |
@@ -2019,7 +1979,6 @@ until the runtime, visual and accessibility checks above can run.
 | P1378 | Page key ⌘, | Opens Settings | `shared/sidebar-pages.ts:108` | [x] | [ ] | [ ] |
 | P1379 | Tabs "General", "Permissions", "Shortcuts", "Remote", "About" | Settings sections. Refreshes on window focus | `renderer/components/tabs/settings-tab.tsx:43` | [x] | [ ] | [ ] |
 | P1380 | "Appearance" → "Theme" (Light / Dark / System) | Sets the color theme *(all ("Mac"/"PC" wording via platformCopy))* | `renderer/components/settings/general-settings.tsx:77` | [x] | [ ] | [ ] |
-| P1381 | "Retro LCD" switch | LCD-style Studio controls | `renderer/components/settings/general-settings.tsx:87` | [x] | [ ] | [ ] |
 | P1382 | "Animate scene changes" → Scene | Link to the Scene page | `renderer/components/settings/general-settings.tsx:102` | [x] | [ ] | [ ] |
 | P1383 | "Graphics acceleration" status + "Retry on next launch" | GPU fallback status and retry *(Windows only (general-settings.tsx:107))* | `renderer/components/settings/general-settings.tsx:107` | n/a | [ ] | n/a |
 | P1384 | "Chat" → "Show 7TV emotes in chat" switch | Shows 7TV emotes | `renderer/components/settings/seventv-emotes-field.tsx:97` | [x] | [ ] | [ ] |

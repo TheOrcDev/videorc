@@ -8,7 +8,7 @@
 //!   About in the strip, as Electron's; a tab the Rust app has not got yet
 //!   ([`SettingsTab::ported`]) holds its place. The tab used last is this
 //!   device's (`ui-local.json`'s `videorc.settingsTab`, P3-D5).
-//! - **General** ([`general_view`]): Appearance (Theme, Retro LCD, the row to
+//! - **General** ([`general_view`]): Appearance (Theme, the row to
 //!   the Scene page's Animate scene changes), Chat (Chat in Studio, Open
 //!   Stream Manager when you go live, 7TV emotes and Twitch GIFs from the
 //!   backend's `liveChat.emotes` row), Setup (Run setup again…), Import
@@ -116,9 +116,6 @@ pub mod copy {
     pub const THEME_LIGHT: &str = "Light";
     pub const THEME_DARK: &str = "Dark";
     pub const THEME_SYSTEM: &str = "System";
-    pub const RETRO_LCD: &str = "Retro LCD";
-    pub const RETRO_LCD_DESCRIPTION: &str =
-        "Draws the Studio's controls on LCD screens, like a hardware recorder.";
     pub const ANIMATE_SCENE_CHANGES: &str = "Animate scene changes";
 
     pub const CHAT: &str = "Chat";
@@ -303,7 +300,6 @@ pub struct GeneralInput<'a> {
     /// `runtimeInfo.platform`: darwin, win32 or linux.
     pub platform: &'a str,
     pub theme: ThemeChoice,
-    pub retro_lcd: bool,
     pub studio_chat: bool,
     pub open_stream_manager_on_live: bool,
     /// `runtimeInfo.commentsWindowEnabled !== false`.
@@ -335,7 +331,6 @@ pub struct ElsewhereRow {
 pub struct GeneralView {
     pub theme_index: usize,
     pub theme_description: String,
-    pub retro_lcd: bool,
     pub scene_ported: bool,
     pub studio_chat: bool,
     pub stream_manager_row: bool,
@@ -379,7 +374,6 @@ pub fn general_view(input: &GeneralInput<'_>) -> GeneralView {
             ThemeChoice::System => 2,
         },
         theme_description: copy::theme_description(device_noun),
-        retro_lcd: input.retro_lcd,
         scene_ported: PageId::Layouts.ported(),
         studio_chat: input.studio_chat,
         stream_manager_row: input.stream_manager_enabled,
@@ -538,7 +532,6 @@ mod tests {
         GeneralInput {
             platform: "darwin",
             theme: ThemeChoice::Dark,
-            retro_lcd: false,
             studio_chat: true,
             open_stream_manager_on_live: false,
             stream_manager_enabled: true,

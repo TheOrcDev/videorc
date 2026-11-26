@@ -488,27 +488,3 @@ fn the_screen_recording_alert_shows_while_the_grant_is_missing() {
         None
     );
 }
-
-#[test]
-fn the_retro_privacy_row_reads_hide_screen_unless_the_room_says_more() {
-    let shown = screen_privacy_view(&ScreenPrivacy::default(), None, &Value::Null, true);
-    assert_eq!(retro_privacy_label(&shown), "Hide screen");
-    let hidden = screen_privacy_view(
-        &ScreenPrivacy {
-            hidden: true,
-            ..ScreenPrivacy::default()
-        },
-        None,
-        &Value::Null,
-        true,
-    );
-    assert_eq!(hidden.chip.as_deref(), Some("Screen hidden"));
-    assert_eq!(retro_privacy_label(&hidden), "Hide screen");
-    let room = RoomScreenPrivacy {
-        hidden: true,
-        status: Some("hiding".into()),
-        ..RoomScreenPrivacy::default()
-    };
-    let hiding = screen_privacy_view(&ScreenPrivacy::default(), Some(&room), &Value::Null, true);
-    assert_eq!(retro_privacy_label(&hiding), "Hiding · receivers pending");
-}

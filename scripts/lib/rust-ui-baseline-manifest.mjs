@@ -23,7 +23,6 @@ export const BASELINE_SCREEN_IDS = Object.freeze([
   'account-menu',
   'health',
   'studio',
-  'studio-retro',
   'stream-manager',
   'scene',
   'sources',
@@ -78,7 +77,7 @@ export const STREAM_MANAGER_SIZES = Object.freeze([
 
 /** How the shots were taken, for whoever compares against them. */
 export const BASELINE_NOTES = Object.freeze([
-  'Pages and page tabs are shot at 960x660, 1100x720 and 1280x800; menus, dialogs, the palette, toasts, Retro LCD, Chat in Studio, the live states and first run at 1280x800; the Stream Manager at 420x640, 700x640, 900x640 and 1100x700; Captions and Notes at their default frames. Sizes are CSS pixels: the PNGs are 2x.',
+  'Pages and page tabs are shot at 960x660, 1100x720 and 1280x800; menus, dialogs, the palette, toasts, Chat in Studio, the live states and first run at 1280x800; the Stream Manager at 420x640, 700x640, 900x640 and 1100x700; Captions and Notes at their default frames. Sizes are CSS pixels: the PNGs are 2x.',
   'Increase Contrast (prefers-contrast: more, by CDP media emulation) is shot over both themes. Every shot is Page.captureScreenshot of the window page, so the native window frame and traffic lights are not in it.',
   'The profile is the test pattern with the camera and the microphone off, the Demo scene working, and three saved scenes: Talking head and Side by side need a camera, so they read "Resolve sources". The clips ring is off. Destinations hold fake keys; the on-air shot streams only to a local RTMP sink.',
   'Not fixed between runs: Library session names, dates and thumbnails (two real 3 s test-pattern recordings), the Schedule dialog clock, the recording and on-air timers, and any host notice the app raises.',

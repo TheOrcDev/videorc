@@ -1,11 +1,5 @@
-//! The Studio's Audio section (`audio-section.tsx` and
-//! `RetroAudioSectionView`): Microphone and System audio on one Mixer scale
-//! (plan 201 D1), in the default look and Retro LCD. Words and state come
-//! from app-core (`audio_section`, `audio_mixer`, `audio_levels`); this
-//! module draws them on the kit and calls the Studio.
-//!
-//! ⌘/Ctrl+↑/↓ (P218) moves focus between the channel strips, as Electron's
-//! MixerChannels does for `[data-slot=channel-strip]`.
+//! Studio microphone and System audio controls, driven by app-core state.
+//! Command/Control + Up/Down moves focus between the channel strips.
 
 pub mod meter;
 
@@ -37,19 +31,18 @@ use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::channel_toggle::{ChannelToggleSize, mute_toggle};
 use videorc_kit::icon::{IconName, icon};
-use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
+use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::select::Select;
-use videorc_kit::shortcut_keys::{ShortcutKeys, ShortcutStyle};
+use videorc_kit::shortcut_keys::ShortcutKeys;
 use videorc_kit::slider::{Slider, SliderEvent, SliderState};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{Theme, text};
 
 use super::transport::{AppStudio, OpenPage};
-use crate::lcd;
 
-use meter::{lcd_meter, meta_line, segmented_meter};
+use meter::{meta_line, segmented_meter};
 
 actions!(studio_audio, [FocusPreviousStrip, FocusNextStrip]);
 
@@ -73,7 +66,6 @@ pub struct AudioSection {
     view: AudioSectionView,
     meters: AudioMeters,
     meters_view: AudioMetersView,
-    retro: bool,
     takeover_active: bool,
     room_open: bool,
     mic_gain: Entity<SliderState>,
@@ -165,7 +157,6 @@ impl AudioSection {
             view,
             meters,
             meters_view,
-            retro: snap.settings.studio.retro_lcd_studio(),
             takeover_active: false,
             room_open,
             mic_gain,
@@ -240,7 +231,6 @@ impl AudioSection {
     ) {
         let now = Instant::now();
         self.view = AudioSectionView::from_snapshot(snapshot, levels, now, self.inputs());
-        self.retro = snapshot.settings.studio.retro_lcd_studio();
         self.meters_view = self.meters.step(snapshot, levels, now);
         self.ensure_meter_ticks(cx);
         cx.notify();
@@ -450,11 +440,6 @@ fn chip_badge(label: &str, tone: &str) -> Badge {
 /// `SourceControlRow`'s value column: `min-w-[8ch]` of the 12 px mono.
 const GAIN_VALUE_MIN_PX: f32 = 58.;
 
-/// `SourceControlRow` (`Gain [——●——] 0.0 dB`): the label, the fader and the
-/// value on one line. Off its default the value is the reset (a ghost
-/// button whose tooltip says "Reset to 0.0 dB"), never a second button. On a
-/// Retro LCD screen (`LCD_FADER`) the label is dim and as wide as its word,
-/// and the value is lit, in capitals.
 #[allow(clippy::too_many_arguments)]
 fn gain_row(
     id: &'static str,
@@ -463,23 +448,11 @@ fn gain_row(
     slider: &Entity<SliderState>,
     aria: &'static str,
     disabled: bool,
-    retro: bool,
     theme: &Theme,
     on_reset: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> AnyElement {
-    let (label_ink, value_ink) = if retro {
-        (lcd::dim(theme), lcd::lit(theme))
-    } else {
-        (hsla(theme.muted_foreground), hsla(theme.muted_foreground))
-    };
-    // The retro screen tracks the value as it tracks its words.
-    let shown = || -> AnyElement {
-        if retro {
-            lcd::tracked_meta(text_value.to_string()).into_any_element()
-        } else {
-            SharedString::from(text_value.to_string()).into_any_element()
-        }
-    };
+    let (label_ink, value_ink) = (hsla(theme.muted_foreground), hsla(theme.muted_foreground));
+    let shown = || -> AnyElement { SharedString::from(text_value.to_string()).into_any_element() };
     let value: AnyElement = match reset {
         Some(reset) => div()
             .mr(px(-8.))
@@ -504,26 +477,18 @@ fn gain_row(
         .flex_none()
         .type_scale(text::META)
         .text_color(label_ink)
-        .child(if retro {
-            lcd::tracked_meta(words::GAIN).into_any_element()
-        } else {
-            SharedString::from(words::GAIN).into_any_element()
-        });
+        .child(SharedString::from(words::GAIN).into_any_element());
     div()
         .flex()
         .min_w_0()
         .items_center()
         .gap(px(12.))
-        .child(if retro { label } else { label.w(px(36.)) })
+        .child(label.w(px(36.)))
         .child(div().flex().flex_1().min_w_0().items_center().child({
             let fader = Slider::new(slider)
                 .accessibility_label(aria)
                 .disabled(disabled);
-            if retro {
-                lcd::fader(fader, theme)
-            } else {
-                fader
-            }
+            { fader }
         }))
         .child(
             div()
@@ -651,7 +616,6 @@ impl AudioSection {
             &self.mic_gain,
             words::MICROPHONE_GAIN,
             false,
-            false,
             theme,
             cx.listener(|this, _, _, _| this.reset_mic_gain()),
         ));
@@ -725,7 +689,6 @@ impl AudioSection {
                 &self.sys_gain,
                 words::SYSTEM_AUDIO_GAIN,
                 row.permission_required,
-                false,
                 theme,
                 cx.listener(|this, _, _, _| this.reset_sys_gain()),
             ));
@@ -766,251 +729,18 @@ impl AudioSection {
             .when(has_body, |column| column.child(body))
             .into_any_element()
     }
-
-    fn microphone_retro(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let mic = &self.view.microphone;
-        let muted = mic.muted;
-        // `RetroChannelHeader`: the title lit at the screen's size, its
-        // controls `gap-3` on the right.
-        let mut header = div()
-            .flex()
-            .min_h(px(32.))
-            .items_center()
-            .justify_between()
-            .gap(px(16.))
-            .py(px(6.))
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(lcd::lit(theme))
-                    .child(lcd::tracked(words::MICROPHONE)),
-            );
-        let mut controls = div().flex().items_center().gap(px(12.));
-        if let Some(accel) = mic.mute_accelerator.as_ref() {
-            controls = controls.child(
-                div()
-                    .text_color(lcd::dim(theme))
-                    .child(ShortcutKeys::accelerator(accel.clone()).style(ShortcutStyle::Text)),
-            );
-        }
-        let mute_words = if muted { words::MUTED } else { "Mute" };
-        let mute_tip = if muted {
-            words::UNMUTE_MICROPHONE
-        } else {
-            words::MUTE_MICROPHONE
-        };
-        let speaker = if muted {
-            IconName::SpeakerSlash
-        } else {
-            IconName::SpeakerHigh
-        };
-        // Dim until hovered, inverted while muted, like a lit key.
-        controls = controls.child(
-            lcd::icon_value_button(
-                "studio-lcd-mic-mute",
-                theme,
-                speaker,
-                mute_words,
-                muted,
-                false,
-                Some(SharedString::from(mute_tip)),
-                cx.listener(|this, _, _, _| this.mute_toggle()),
-            )
-            .aria_label(words::MUTE_MICROPHONE),
-        );
-        header = header.child(controls);
-
-        let disabled = mic.disabled_reason.is_some();
-        let mut body = div().flex().flex_col().child(header);
-        // `LcdDevicePicker`'s `LcdPanelRow`: the dim label, the pick right.
-        body = body.child(
-            div()
-                .flex()
-                .min_w_0()
-                .items_center()
-                .justify_between()
-                .gap(px(16.))
-                .py(px(8.))
-                .child(
-                    div()
-                        .flex_none()
-                        .text_color(lcd::dim(theme))
-                        .child(lcd::tracked("Device")),
-                )
-                .child({
-                    let entity = cx.entity();
-                    fill_select("studio-lcd-mic-picker", &mic.picker, disabled)
-                        .trigger_with(lcd::picker_trigger(theme))
-                        .on_change(move |value, _, cx| {
-                            entity.update(cx, |section, _| {
-                                section.select_microphone(value.to_string());
-                            });
-                        })
-                }),
-        );
-        if let Some(status) = mic.status.as_ref() {
-            body = body.child(lcd::message(theme, status.message.clone()));
-        }
-        body = body.child(div().py(px(4.)).child(lcd_meter(
-            self.meters_view.microphone,
-            &self.meters_view.microphone_lcd,
-            muted || mic.takeover_hold.is_some(),
-            theme,
-        )));
-        if let Some(hold) = mic.takeover_hold {
-            let hint = mic.takeover_hint.unwrap_or("");
-            body = body.child(lcd::message(
-                theme,
-                format!(
-                    "{}. {hint}",
-                    videorc_app_core::studio::takeover_microphone::TAKEOVER_MUTED_LABEL
-                ),
-            ));
-            let _ = hold;
-        }
-        if mic.level_unavailable {
-            body = body.child(lcd::message(theme, words::SESSION_LEVEL_UNAVAILABLE));
-        }
-        let reset = mic.gain_reset.clone();
-        body = body.child(div().py(px(6.)).child(gain_row(
-            "studio-lcd-mic-gain-reset",
-            &mic.gain_text,
-            reset.as_deref(),
-            &self.mic_gain,
-            words::MICROPHONE_GAIN,
-            false,
-            true,
-            theme,
-            cx.listener(|this, _, _, _| this.reset_mic_gain()),
-        )));
-        body.into_any_element()
-    }
-
-    fn system_retro(
-        &self,
-        row: &SystemAudioRowView,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut header = div()
-            .flex()
-            .min_h(px(32.))
-            .items_center()
-            .justify_between()
-            .gap(px(16.))
-            .py(px(6.))
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(lcd::lit(theme))
-                    .child(lcd::tracked(words::SYSTEM_AUDIO)),
-            );
-        // P229–P231: Needs permission / Resume / issue word beside the
-        // On/Off switch, as Electron's RetroSystemAudioValue — not an alert.
-        let mut controls = div().flex().items_center().gap(px(8.));
-        if row.permission_required {
-            let tip = row
-                .issue
-                .clone()
-                .unwrap_or_else(|| "System audio needs Screen Recording permission.".into());
-            controls = controls.child(lcd::value_button(
-                "studio-lcd-open-permissions",
-                theme,
-                "Needs permission",
-                false,
-                false,
-                Some(SharedString::from(tip)),
-                cx.listener(|_, _, _, cx| {
-                    cx.emit(OpenPage::settings(SettingsTab::Permissions));
-                }),
-            ));
-        } else {
-            if matches!(row.issue_action, Some(IssueAction::Resume)) {
-                let tip = row.issue.clone().map(SharedString::from);
-                controls = controls.child(lcd::value_button(
-                    "studio-lcd-system-audio-resume",
-                    theme,
-                    words::RESUME,
-                    false,
-                    false,
-                    tip,
-                    cx.listener(|this, _, _, _| this.resume_system_audio()),
-                ));
-            } else if let Some(chip) = row.chip {
-                let tip = row.issue.clone().map(SharedString::from);
-                let mut word = div()
-                    .id("studio-lcd-system-audio-status")
-                    .min_w_0()
-                    .truncate()
-                    .text_color(lcd::dim(theme))
-                    .child(lcd::caps(chip.label));
-                if let Some(tip) = tip {
-                    word = word.tooltip(videorc_kit::tooltip::tooltip(tip));
-                }
-                controls = controls.child(word);
-            }
-            let checked = row.checked;
-            let entity = cx.entity();
-            controls = controls.child(lcd::switch_words(
-                "studio-lcd-system-audio",
-                theme,
-                checked,
-                row.disabled,
-                words::SYSTEM_AUDIO,
-                move |_, _, cx| {
-                    entity.update(cx, |section, _| section.set_system_audio(!checked));
-                },
-            ));
-        }
-        header = header.child(controls);
-        let mut body = div().flex().flex_col().child(header);
-        if row.show_level {
-            body = body.child(div().py(px(4.)).child(lcd_meter(
-                self.meters_view.system_audio,
-                &self.meters_view.system_audio_lcd,
-                false,
-                theme,
-            )));
-        }
-        if row.idle_line {
-            body = body.child(lcd::message(theme, words::IDLE_LINE));
-        }
-        if row.show_gain {
-            let reset = row.gain_reset.clone();
-            body = body.child(div().py(px(6.)).child(gain_row(
-                "studio-lcd-sys-gain-reset",
-                &row.gain_text,
-                reset.as_deref(),
-                &self.sys_gain,
-                words::SYSTEM_AUDIO_GAIN,
-                row.permission_required,
-                true,
-                theme,
-                cx.listener(|this, _, _, _| this.reset_sys_gain()),
-            )));
-        }
-        body.into_any_element()
-    }
 }
 
 impl Render for AudioSection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_gains_on_window(window, cx);
         let theme = theme::resolve(None, window, cx);
-        let mic = if self.retro {
-            self.microphone_retro(theme, cx)
-        } else {
-            self.microphone_standard(theme, cx)
-        };
-        let system = self.view.system_audio.clone().map(|row| {
-            if self.retro {
-                self.system_retro(&row, theme, cx)
-            } else {
-                self.system_standard(&row, theme, cx)
-            }
-        });
+        let mic = self.microphone_standard(theme, cx);
+        let system = self
+            .view
+            .system_audio
+            .clone()
+            .map(|row| self.system_standard(&row, theme, cx));
         // No "Audio" heading (plan 235 D3); the Mixer keeps the name for
         // screen readers via aria-label on the channels column. Each strip
         // is a focus target so ⌘/Ctrl+↑/↓ can move between them (P218). In
@@ -1026,7 +756,6 @@ impl Render for AudioSection {
                 .id("studio-channel-strip-system-audio")
                 .track_focus(&self.sys_focus)
                 .tab_index(0)
-                .when(self.retro, |strip| strip.child(lcd::separator(theme)))
                 .child(row)
         });
         let channels = div()
@@ -1037,15 +766,7 @@ impl Render for AudioSection {
             .flex()
             .flex_col()
             .aria_label(words::AUDIO);
-        let body = if self.retro {
-            lcd::panel(
-                "studio-lcd-audio",
-                theme,
-                words::AUDIO,
-                channels.child(mic_strip).children(sys_strip),
-            )
-            .into_any_element()
-        } else {
+        let body = {
             let mut list = GroupedList::new().item(mic_strip);
             if let Some(strip) = sys_strip {
                 list = list.item(strip);

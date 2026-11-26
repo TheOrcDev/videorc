@@ -23,8 +23,8 @@ use serde_json::Value;
 
 use super::audio_levels::MicLevels;
 use super::audio_mixer::{
-    self, Chip, LcdMeterView, MeterBallistics, MeterView, MicMonitorState, SwitchInput,
-    SystemAudioIssue, copy as words,
+    self, Chip, MeterBallistics, MeterView, MicMonitorState, SwitchInput, SystemAudioIssue,
+    copy as words,
 };
 use super::live_sources::{SwitchStatusLine, switch_status_line};
 use super::source_selection::{
@@ -345,13 +345,6 @@ pub struct AudioMetersView {
     /// The soundboard's sounds as mixed (`soundsMeterInput`: only while a
     /// session runs and the levels arrive).
     pub sounds: MeterView,
-    /// The LCD meters' digits and CLIP flags, only while Retro LCD is on
-    /// (the default look prints none, so its meters change only when a
-    /// segment does).
-    pub microphone_lcd: LcdMeterView,
-    pub system_audio_lcd: LcdMeterView,
-    /// Sources Sounds meter readout while Retro LCD is on.
-    pub sounds_lcd: LcdMeterView,
 }
 
 impl AudioMeters {
@@ -384,26 +377,10 @@ impl AudioMeters {
         let microphone = self.microphone.step(microphone, now);
         let system_audio = self.system_audio.step(system, now);
         let sounds = self.sounds.step(sounds, now);
-        let retro = snapshot.settings.studio.retro_lcd_studio();
         AudioMetersView {
             microphone,
             system_audio,
             sounds,
-            microphone_lcd: if retro {
-                self.microphone.lcd_view(now)
-            } else {
-                LcdMeterView::default()
-            },
-            system_audio_lcd: if retro {
-                self.system_audio.lcd_view(now)
-            } else {
-                LcdMeterView::default()
-            },
-            sounds_lcd: if retro {
-                self.sounds.lcd_view(now)
-            } else {
-                LcdMeterView::default()
-            },
         }
     }
 

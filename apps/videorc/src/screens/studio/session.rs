@@ -48,13 +48,12 @@ const STOP_AGENTS_COMMAND: &str = "Stop agents";
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::theme::{self, hsla};
 use videorc_kit::{
-    Alert, AlertVariant, Button, ButtonSize, ButtonVariant, GroupedList, GroupedRow, NavigableRow,
+    Alert, AlertVariant, Button, ButtonSize, ButtonVariant, GroupedList, NavigableRow,
     PanelSection, StatusDot, StatusTone,
 };
 
 use super::alerts::{StudioRequest, WatchdogCards};
 use super::transport::{AppStudio, OpenPage};
-use crate::lcd;
 
 /// The Electron row's `pl-9.5`: a destination under the Destinations row.
 const NESTED_INDENT_PX: f32 = 38.;
@@ -111,7 +110,6 @@ pub struct SessionSection {
     view: SessionSectionView,
     /// The watchdog's cards; drawn only while there is one.
     watchdog: Entity<WatchdogCards>,
-    retro: bool,
     /// P165: the Guests row's value while the talk-show room is open.
     guests: Option<String>,
     /// P166: `agents.status` (answer and event), for the agents line.
@@ -144,7 +142,6 @@ impl SessionSection {
             cloud_status.as_ref(),
         );
         let guests = guests_session_row(cloud_status.as_ref());
-        let retro = snap.settings.studio.retro_lcd_studio();
         let watchdog = cx.new(|cx| WatchdogCards::new(studio.clone(), runtime.clone(), cx));
         cx.observe(&watchdog, |_, _, cx| cx.notify()).detach();
         cx.subscribe(&watchdog, |_, _, open: &OpenPage, cx| cx.emit(*open))
@@ -173,11 +170,9 @@ impl SessionSection {
                     cloud_status.as_ref(),
                 );
                 let guests = guests_session_row(cloud_status.as_ref());
-                let retro = snap.settings.studio.retro_lcd_studio();
                 let alive = this.update(cx, |section, cx| {
-                    if section.view != next || section.retro != retro || section.guests != guests {
+                    if section.view != next || section.guests != guests {
                         section.view = next;
-                        section.retro = retro;
                         section.guests = guests;
                         cx.notify();
                     }
@@ -211,7 +206,7 @@ impl SessionSection {
             runtime,
             view,
             watchdog,
-            retro,
+
             guests,
             agents: AgentsState::default(),
             agents_stopping: false,
@@ -299,41 +294,7 @@ impl SessionSection {
     ) -> Option<AnyElement> {
         let line = self.agents.session_line()?;
         let stop = cx.listener(|section, _: &ClickEvent, _, cx| section.stop_agents(cx));
-        if self.retro {
-            return Some(
-                div()
-                    .id("session-agents")
-                    .flex()
-                    .min_w_0()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(16.))
-                    .px(px(4.))
-                    .py(px(8.))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_shrink(1.)
-                            .truncate()
-                            .text_color(lcd::dim(theme))
-                            .child(line),
-                    )
-                    .child(
-                        lcd::value_button(
-                            "session-agents-stop",
-                            theme,
-                            STOP_LABEL,
-                            false,
-                            self.agents_stopping,
-                            None,
-                            stop,
-                        )
-                        .flex_shrink_0()
-                        .aria_label(STOP_AGENTS_COMMAND),
-                    )
-                    .into_any_element(),
-            );
-        }
+
         Some(
             NavigableRow::with_control(
                 "session-agents",
@@ -494,68 +455,6 @@ fn row_icon(id: &str) -> Option<IconName> {
     }
 }
 
-impl SessionSection {
-    fn lcd_row(
-        &self,
-        fact: &FactRow,
-        theme: &videorc_kit::tokens::Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        // Each value's own truncation key (`TrackedText::truncate`): the
-        // fact, and its label, which tells the destinations under the
-        // Destinations row apart (they share the fact id).
-        let value_id =
-            gpui::SharedString::from(format!("lcd-fact-value-{}-{}", fact.id, fact.label));
-        let value = match fact_tone(fact.tone) {
-            Some(tone) => div()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(StatusDot::new((fact.id, 0usize)).tone(tone))
-                .child(
-                    div()
-                        .min_w_0()
-                        .child(lcd::tracked(fact.value.clone()).truncate(value_id.clone())),
-                )
-                .into_any_element(),
-            None => div()
-                .min_w_0()
-                .child(lcd::tracked(fact.value.clone()).truncate(value_id))
-                .into_any_element(),
-        };
-        if let Some(page) = fact.opens {
-            lcd::nav_row(
-                (fact.id, fact.nested as usize),
-                theme,
-                fact.label.clone(),
-                value,
-                cx.listener(move |_, _, _, cx| cx.emit(OpenPage::of(page))),
-            )
-            .into_any_element()
-        } else {
-            div()
-                .id((fact.id, fact.nested as usize))
-                .flex()
-                .min_w_0()
-                .items_center()
-                .justify_between()
-                .gap(px(16.))
-                // `LcdPanelRow` (`gap-4 py-2`): no side padding, so the
-                // words line up with the nav rows' (`-mx-1 px-1`).
-                .py(px(8.))
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_color(lcd::dim(theme))
-                        .child(lcd::tracked(fact.label.clone())),
-                )
-                .child(div().min_w_0().text_color(lcd::lit(theme)).child(value))
-                .into_any_element()
-        }
-    }
-}
-
 impl Render for SessionSection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme::resolve(None, window, cx);
@@ -581,21 +480,7 @@ impl Render for SessionSection {
         let mut rows = self.view.rows.clone();
         rows.extend(self.guests.clone().map(guests_fact));
         let agents = self.agents_row(theme, cx);
-        let facts: AnyElement = if self.retro {
-            let mut screen = div().flex().flex_col();
-            let mut saw_live_block = false;
-            for fact in &rows {
-                let live_block =
-                    fact.nested || matches!(fact.id, "destinations" | "stream" | "sidekick");
-                if live_block && !saw_live_block {
-                    screen = screen.child(lcd::separator(theme));
-                    saw_live_block = true;
-                }
-                screen = screen.child(self.lcd_row(fact, theme, cx));
-            }
-            screen = screen.children(agents);
-            lcd::panel("studio-lcd-session", theme, "Session", screen).into_any_element()
-        } else {
+        let facts: AnyElement = {
             let mut list = GroupedList::new();
             for (index, fact) in rows.iter().enumerate() {
                 let row = self.row(fact, muted, cx);

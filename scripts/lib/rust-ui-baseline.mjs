@@ -646,13 +646,6 @@ async function shootIdleStates({ ctx, tryStep, only, missing }) {
       await ctx.shoot('toasts', type, { keepToasts: true })
     }
   })
-  await tryStep('studio-retro', 'default', async () => {
-    await setGeneralSwitch(ctx, 'Retro LCD', true)
-    await ctx.open('studio')
-    await sleep(600)
-    await ctx.shoot('studio-retro', 'default')
-    await setGeneralSwitch(ctx, 'Retro LCD', false)
-  })
   await tryStep('studio', 'chat-in-studio', async () => {
     await setGeneralSwitch(ctx, 'Chat in Studio', true)
     await ctx.open('studio')

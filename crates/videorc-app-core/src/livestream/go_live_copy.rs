@@ -10,8 +10,6 @@
 
 /// `GO_LIVE_DIALOG_TITLE`, and `goLiveConfirmLabel(1)`.
 pub const GO_LIVE: &str = "Go live";
-/// `GO_LIVE_LABEL`: the Studio transport's button and its Retro LCD twin. It
-/// opens the dialog, yet reads without the "…" (plan 235 D2, #1352).
 pub const GO_LIVE_LABEL: &str = "Go Live";
 /// `GO_LIVE_COMMAND`: ⌘K keeps the "…".
 pub const GO_LIVE_COMMAND: &str = "Go live…";

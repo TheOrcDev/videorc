@@ -16,10 +16,7 @@
 
 use std::sync::Arc;
 
-use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FontWeight, Keystroke, SharedString, Window, div,
-    prelude::*, px,
-};
+use gpui::{AnyElement, Context, Entity, EventEmitter, Window, div, prelude::*, px};
 use videorc_app_core::nav::PageId;
 use videorc_app_core::settings_page::SettingsTab;
 use videorc_app_core::studio::cloud::CloudState;
@@ -32,14 +29,12 @@ use videorc_app_core::studio::session::{END_LIVESTREAM_LABEL, StopConfirmation};
 use videorc_app_core::studio::transport::{RecordButtonState, TransportView, stop_overrun_copy};
 use videorc_app_core::{BackendClient, StopOrigin, Studio, StudioSnapshot};
 use videorc_kit::icon::{IconName, icon};
-use videorc_kit::shortcut_keys;
 use videorc_kit::theme::{self, TypeScale, faded_over, hsla};
 use videorc_kit::tokens::{size, text};
 use videorc_kit::{Alert, AlertVariant, Button, ButtonSize, ButtonVariant, ShortcutKeys};
 
 use super::space::SPACE;
 use crate::app::bridge::Mirror;
-use crate::lcd;
 
 /// The Studio the app drives: the core's driver on the typed client.
 pub type AppStudio = Studio<BackendClient>;
@@ -51,8 +46,6 @@ pub struct SessionControls {
     pub transport: TransportView,
     /// The End livestream question, while it waits.
     pub stop_question: Option<StopConfirmation>,
-    /// Settings → General → Retro LCD: the transport draws as LCD keys.
-    pub retro: bool,
 }
 
 impl SessionControls {
@@ -62,7 +55,6 @@ impl SessionControls {
             // app doesn't hold yet (S1.6c, #1814); none of them is on.
             transport: TransportView::from_snapshot(snapshot, &StartGates::default(), false),
             stop_question: snapshot.session.stop_confirmation.clone(),
-            retro: snapshot.settings.studio.retro_lcd_studio(),
         }
     }
 }
@@ -290,10 +282,6 @@ impl Transport {
     }
 }
 
-/// The glyph before a transport button's words (`record-button.tsx`,
-/// `go-live-button.tsx`): Record or Broadcast while it starts, Stop once it
-/// stops a session, all at Phosphor's fill weight (`record-button.tsx:80`,
-/// `go-live-button.tsx:74`, `retro-lcd-studio.tsx:138,157`).
 fn record_glyph(face: &RecordFace) -> IconName {
     if face.shortcut {
         IconName::RecordFill
@@ -315,21 +303,6 @@ fn go_live_glyph(face: &GoLiveFace) -> IconName {
 /// focus, so the chip reads the same constant the binding is made from.
 fn space_keys() -> ShortcutKeys {
     ShortcutKeys::keystrokes(SPACE)
-}
-
-/// Space on the retro Record key, in the screen's caps: Electron's LCD
-/// uppercases everything on it, the `ShortcutKeys variant="text"` too
-/// ("RECORD SPACE"). The words are the kit's, only the case is the screen's.
-fn retro_space_label() -> SharedString {
-    let words = Keystroke::parse(SPACE)
-        .map(|stroke| {
-            shortcut_keys::label(
-                [(stroke.modifiers, stroke.key.as_str())],
-                cfg!(target_os = "macos"),
-            )
-        })
-        .unwrap_or_default();
-    lcd::caps(words)
 }
 
 impl Transport {
@@ -471,147 +444,6 @@ impl Transport {
             })
             .into_any_element()
     }
-
-    /// Retro LCD transport (P233–P237): Record / Go Live / Stop as keys on
-    /// one screen, with the stop note and blocked line as screen messages.
-    fn render_retro(
-        &self,
-        theme: &videorc_kit::tokens::Theme,
-        view: &TransportView,
-        outputs: Option<&TalkShowOutputs>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let record = RecordFace::of(view, outputs);
-        let stops = record.stops;
-        let stops_cloud = record.stops_cloud;
-        let go_live = GoLiveFace::of(view, outputs);
-        let local_active = view.active;
-        let talk_show = outputs.is_some();
-
-        let record_ink = lcd::record_tone(theme);
-        let ink = lcd::lit(theme);
-        let keys = if local_active && !talk_show {
-            // Single stop key while a local session holds the transport.
-            div()
-                .flex()
-                .flex_wrap()
-                .gap(px(8.))
-                .py(px(8.))
-                .child(lcd::key(
-                    "session-record",
-                    theme,
-                    record.label,
-                    lcd::KeyTone::Record,
-                    record.disabled,
-                    Some(icon(IconName::StopFill, 14., record_ink).into_any_element()),
-                    None,
-                    cx.listener(move |this, _, _, _| this.stop(StopOrigin::Button)),
-                ))
-        } else {
-            // `ShortcutKeys variant="text"` at 70 %: the key in the key's
-            // own ink, quieter than its words.
-            let shortcut = record.shortcut.then(|| {
-                div()
-                    .opacity(0.7)
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(lcd::key_tracked(retro_space_label()))
-                    .into_any_element()
-            });
-            let record_icon = record_glyph(&record);
-            let mut row = div()
-                .flex()
-                .flex_wrap()
-                .gap(px(8.))
-                .py(px(8.))
-                .child(lcd::key(
-                    "session-record",
-                    theme,
-                    record.label,
-                    lcd::KeyTone::Record,
-                    record.disabled,
-                    Some(icon(record_icon, 14., record_ink).into_any_element()),
-                    shortcut,
-                    cx.listener(move |this, _, _, _| {
-                        if stops_cloud {
-                            this.stop_cloud_recording();
-                        } else if stops {
-                            this.stop(StopOrigin::Button);
-                        } else {
-                            this.record();
-                        }
-                    }),
-                ));
-            if let Some(go_live) = go_live {
-                let ends = go_live.ends_livestream;
-                let glyph = go_live_glyph(&go_live);
-                row = row.child(lcd::key(
-                    "go-live-button",
-                    theme,
-                    go_live.label,
-                    lcd::KeyTone::Ink,
-                    go_live.disabled,
-                    Some(icon(glyph, 14., ink).into_any_element()),
-                    None,
-                    cx.listener(move |this, _, _, _| {
-                        if ends {
-                            this.stop(StopOrigin::Button);
-                        } else {
-                            this.go_live();
-                        }
-                    }),
-                ));
-            }
-            row
-        };
-
-        let mut screen = div().flex().flex_col().child(keys);
-        if let Some(note) = view.stop_note.filter(|_| local_active) {
-            screen = screen.child(lcd::message(theme, note));
-        }
-        if let Some(reason) = view.blocked_reason.clone().filter(|_| !local_active) {
-            let jump = view.blocked_jump;
-            let mut blocked = div()
-                .id("session-blocked-reason")
-                .flex()
-                .flex_col()
-                .items_start()
-                .gap(px(4.))
-                .child(lcd::message(theme, reason));
-            if let Some(jump) = jump {
-                blocked = blocked.child(lcd::action_button(
-                    "session-blocked-jump",
-                    theme,
-                    jump.label,
-                    cx.listener(move |_, _, _, cx| cx.emit(OpenPage::of(jump.page))),
-                ));
-            }
-            screen = screen.child(blocked);
-        }
-
-        div()
-            .id("session-transport")
-            .flex()
-            .flex_col()
-            .gap(px(12.))
-            .p(px(size::GUTTER))
-            .border_b_1()
-            .border_color(hsla(theme.border))
-            .child(lcd::panel(
-                "studio-lcd-transport",
-                theme,
-                "Session controls",
-                screen,
-            ))
-            .when(view.stop_overrun, |section| {
-                section.child(
-                    Alert::new("session-stop-overrun")
-                        .variant(AlertVariant::Warning)
-                        .title(stop_overrun_copy::TITLE)
-                        .description(stop_overrun_copy::DESCRIPTION),
-                )
-            })
-            .into_any_element()
-    }
 }
 
 impl Render for Transport {
@@ -620,11 +452,7 @@ impl Render for Transport {
         let controls = self.controls.read(cx).value().clone();
         let view = &controls.transport;
         let outputs = self.talk_show.read(cx).value().transport_outputs();
-        if controls.retro {
-            self.render_retro(theme, view, outputs.as_ref(), cx)
-        } else {
-            self.render_default(theme, view, outputs.as_ref(), cx)
-        }
+        self.render_default(theme, view, outputs.as_ref(), cx)
     }
 }
 
