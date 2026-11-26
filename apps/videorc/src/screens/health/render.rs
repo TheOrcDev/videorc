@@ -362,7 +362,9 @@ impl Render for HealthScreen {
             .flex_col()
             .items_start()
             .gap(px(8.))
-            .when(shown > 0, |list| list.child(checks))
+            // Electron's chips sit in `<li>`s whose line box puts the 22 px
+            // badge 4 px lower than the gap alone: the row, and all below it.
+            .when(shown > 0, |list| list.child(checks.mt(px(4.))))
             .child(
                 Button::new("health-show-checks")
                     .label(if self.show_all {
