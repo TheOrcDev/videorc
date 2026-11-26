@@ -682,8 +682,30 @@ impl PreviewInputs<'_> {
     fn screen_state(&self) -> &str {
         self.screen.text("state").unwrap_or("source-missing")
     }
+    /// The Preview's state. The GPUI app shows the preview surface (the
+    /// native layer on macOS, the CPU ring's presenter on Linux) and never
+    /// starts Electron's `preview.live` JPEG fallback, whose idle state is
+    /// always `unavailable`. So when that fallback isn't running, the
+    /// surface's own state speaks (ogre, 2026-11-26: "Preview · Unavailable"
+    /// while the Preview presented).
     fn live_state(&self) -> &str {
-        self.live.text("state").unwrap_or("unavailable")
+        preview_state(self.live.text("state"), self.surface.text("state"))
+    }
+}
+
+/// [`PreviewInputs::live_state`] as a pure rule: the JPEG fallback when it
+/// runs, else the surface (`PreviewSurfaceState`'s words in the fallback's
+/// vocabulary; a closed Preview's stopped surface reads neutral).
+fn preview_state<'a>(live: Option<&'a str>, surface: Option<&'a str>) -> &'a str {
+    if live == Some("live") {
+        return "live";
+    }
+    match surface {
+        Some("live") => "live",
+        Some("starting") => "connecting",
+        Some("stopped") => "stopped",
+        Some("failed" | "unavailable") => "unavailable",
+        _ => live.unwrap_or("unavailable"),
     }
 }
 
