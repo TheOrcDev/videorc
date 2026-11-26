@@ -1,0 +1,24 @@
+[package]
+name = "spike-native-view-windows"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Plan 260 spike WC-0.2 (S0.2a): route (a) on Windows, a DirectComposition native view beneath GPUI, presented on its own thread"
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+spike-summary.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui_windows.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Threading",
+] }
