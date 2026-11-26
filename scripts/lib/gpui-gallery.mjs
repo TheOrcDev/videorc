@@ -405,6 +405,17 @@ export const SCREENS = Object.freeze([
     sections: ['Library page']
   },
   {
+    id: 'library-player',
+    title: 'Library ⌘0, a session in the player (Markers)',
+    deck: 'pages',
+    open: page('library'),
+    // Electron's shooter: the row's ⋯, then Markers, which opens the player.
+    clicks: [{ names: ['Session actions'], role: 'button' }, { names: ['Markers'] }],
+    close: 'Escape',
+    baseline: { screen: 'library-player', state: 'default' },
+    sections: ['Library page']
+  },
+  {
     id: 'stream-manager-window',
     title: 'Stream Manager window ⇧⌘J, 1100 px band',
     deck: 'livestream',
