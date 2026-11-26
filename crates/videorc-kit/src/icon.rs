@@ -185,6 +185,14 @@ pub enum IconName {
     FacebookLogo,
     /// Kick platform mark (Simple Icons, CC0).
     KickLogo,
+    /// Twitch's mark at Phosphor's fill weight (`ChatPlatformIcon`).
+    TwitchLogoFill,
+    /// TikTok's mark at Phosphor's fill weight (`ChatPlatformIcon`).
+    TiktokLogoFill,
+    /// Instagram's mark at Phosphor's fill weight (`ChatPlatformIcon`).
+    InstagramLogoFill,
+    /// Facebook's mark at Phosphor's fill weight.
+    FacebookLogoFill,
     /// `StopIcon` at Phosphor's fill weight.
     StopFill,
     /// `StudioIcon` at Phosphor's fill weight: the Studio slab and its row on the Studio page.
@@ -295,6 +303,10 @@ impl IconName {
             IconName::LockKey => IconName::LockFill,
             IconName::PushPin => IconName::PushPinFill,
             IconName::Stop => IconName::StopFill,
+            IconName::TwitchLogo => IconName::TwitchLogoFill,
+            IconName::TiktokLogo => IconName::TiktokLogoFill,
+            IconName::InstagramLogo => IconName::InstagramLogoFill,
+            IconName::FacebookLogo => IconName::FacebookLogoFill,
             other => other,
         }
     }
@@ -391,6 +403,10 @@ impl IconName {
             IconName::InstagramLogo => include_bytes!("../icons/instagram-logo.svg"),
             IconName::TiktokLogo => include_bytes!("../icons/tiktok-logo.svg"),
             IconName::FacebookLogo => include_bytes!("../icons/facebook-logo.svg"),
+            IconName::TwitchLogoFill => include_bytes!("../icons/twitch-logo-fill.svg"),
+            IconName::TiktokLogoFill => include_bytes!("../icons/tiktok-logo-fill.svg"),
+            IconName::InstagramLogoFill => include_bytes!("../icons/instagram-logo-fill.svg"),
+            IconName::FacebookLogoFill => include_bytes!("../icons/facebook-logo-fill.svg"),
             IconName::KickLogo => include_bytes!("../icons/kick-logo.svg"),
             IconName::StopFill => include_bytes!("../icons/stop-fill.svg"),
             IconName::VideoCameraFill => include_bytes!("../icons/video-camera-fill.svg"),
