@@ -161,7 +161,9 @@ So you know what "expected" means today:
 
 ## 5. The order of work
 
-Do these in order. Each numbered block is one report. If a block is
+Do these in order: A, then S0.2b from block D (the preview hand-over
+tests, which the Windows Preview decision waits on), then B, C, the rest
+of D, E and F. Each block is one report. If a block is
 `BLOCKED` at its first step, report it and move to the next block.
 
 ### A. The GPUI app starts on Windows (highest value)
@@ -340,8 +342,9 @@ minutes. Tell the person before each 👤 block how long you need them.
 
 One report per block, saved as `report.md` in its run folder, and posted
 by the person (or by you, if they've set up `gh` and say so) as a comment
-on the issue or pull request the maintainers name. If none was named,
-hand `report.md` and the evidence folder to the person.
+on the tracking issue,
+[#2464 Plan 260: Windows test runs of the GPUI app](https://github.com/TheOrcDev/videorc/issues/2464),
+unless the maintainers name another issue or pull request.
 
 ````markdown
 ### <block or slice> run <N>, <yyyy-mm-dd>
