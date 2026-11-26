@@ -6149,7 +6149,7 @@ async fn window_keys_reach_the_app_and_without_it_ask_for_an_update() {
     studio.set_remote_app_listener(Some(listener));
     let app = tokio::spawn(async move {
         let key = keys.recv().await.expect("a key");
-        let action = key.action;
+        let action = key.action.clone();
         key.answer(accepted());
         action
     });
