@@ -8,6 +8,8 @@ name: CI
 # the release job and in local `pnpm smoke:local-gates`.
 
 on:
+  # Verify an exact branch head while its PR stays draft.
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
