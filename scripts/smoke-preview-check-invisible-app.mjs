@@ -527,8 +527,16 @@ async function runPass({ name, clips, record = false }) {
       })()
     : null
   try {
-    if (gpuiApp) await command('studio-performance-check')
-    else await evaluate('await window.__videorcSmokeScenePresets.checkComputer(); return true')
+    if (gpuiApp) {
+      // The Output page's "Check this computer" sizes the ladder's ceiling
+      // to the window's display, as Electron's checkComputer() does with
+      // screen.width * devicePixelRatio; the command can't see the display.
+      const display = (await command('main-window-id'))?.display
+      await command(
+        'studio-performance-check',
+        display ? { displayWidth: display.width, displayHeight: display.height } : {}
+      )
+    } else await evaluate('await window.__videorcSmokeScenePresets.checkComputer(); return true')
   } catch (error) {
     fail(name, 'setup', `requestPerformanceCheck failed: ${error.message}`)
   }
