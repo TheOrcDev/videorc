@@ -65,9 +65,11 @@ import {
 } from './lib/gpui-gallery.mjs'
 import { parseParity } from './lib/gpui-parity.mjs'
 import {
+  BASELINE_CHAT_ROWS,
   BASELINE_SEED_TIME,
   baselineCaptureConfigPatch,
   baselineFixtureFiles,
+  baselineLiveChatStart,
   baselineScenes,
   baselineUiSettings,
   baselineWorkingScene,
@@ -242,6 +244,24 @@ async function launch({ bins, stateDir }) {
   })
 }
 
+/** The fake chat's rows from every platform are in (as `rust-ui-baseline.mjs` waits). */
+async function waitForChat(rpc) {
+  const deadline = Date.now() + 25_000
+  for (;;) {
+    const snapshot = await rpc('liveChat.status', {})
+    const messages = snapshot?.messages ?? []
+    const platforms = new Set(messages.map((message) => message.platform))
+    if (
+      ['youtube', 'twitch', 'x'].every((platform) => platforms.has(platform)) &&
+      messages.length >= 3 * BASELINE_CHAT_ROWS
+    ) {
+      return
+    }
+    if (Date.now() > deadline) throw new Error('The fake chat rows did not arrive.')
+    await sleep(250)
+  }
+}
+
 /** The baseline's profile on the GPUI app: the same backend seed and UI settings. */
 async function seedProfile({ app, stateDir }) {
   const smoke = app.connections['preview-motion-ready']
@@ -396,6 +416,20 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
     smoke = app.connections['preview-motion-ready']
     ui = createUiDriver(smoke, { app: 'gpui' })
     ws = await connectBackend(app.connections['backend-ready'], 60_000)
+    // The Electron baseline's seed starts the three-platform fake chat
+    // (`rust-ui-baseline.mjs` seedProfile): its rows fill the Stream Manager,
+    // and its session's people and report show on Sidekick → Community and
+    // Reports. Start the same chat here, so both apps shoot the same profile.
+    // The rows live in the running backend, so a restart starts them again.
+    try {
+      const status = await rpc('liveChat.status', {})
+      if ((status?.messages?.length ?? 0) < 3 * BASELINE_CHAT_ROWS) {
+        await rpc('liveChat.start', baselineLiveChatStart())
+        await waitForChat(rpc)
+      }
+    } catch (error) {
+      log(`the fake chat rows did not start: ${error.message}`)
+    }
     await command('resize-window', WINDOW)
     // GPUI stops drawing a window macOS reports as covered, so a shot behind
     // other windows showed the screen before it (010616c0d's first runs).
