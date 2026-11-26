@@ -551,8 +551,12 @@ impl ChatPane {
         self.mention_names = mention_names;
         self.can_send = can_send;
         self.sign_in_rows = pane::chat_sign_in_rows(&chat.providers);
-        self.composer = self.live && can_send;
         self.session_id = chat.session_id.clone();
+        // Electron's chat pane: `live = !inHistory && Boolean(snapshot.sessionId)`:
+        // a chat with a session is live (composer, highlights, row actions,
+        // times on hover), whether or not the stream is on air.
+        self.live = !self.history && self.session_id.is_some();
+        self.composer = self.live && can_send;
         if session_changed {
             self.requesting.clear();
         }
@@ -823,7 +827,11 @@ impl ChatPane {
         self.apply_live_chat(&chat, cx);
     }
 
+    /// The window's on-air state. The pane's own `live` follows its chat's
+    /// session (Electron's chat pane), so this only covers a pane that
+    /// has no chat yet.
     pub fn set_live(&mut self, live: bool, cx: &mut Context<Self>) {
+        let live = live || (!self.history && self.session_id.is_some());
         if self.live == live {
             return;
         }
@@ -1322,6 +1330,8 @@ impl Render for ChatPane {
         div()
             .id("chat-pane")
             .size_full()
+            .flex_1()
+            .min_h(px(0.))
             .flex()
             .flex_col()
             .aria_label(CHAT_PANE)

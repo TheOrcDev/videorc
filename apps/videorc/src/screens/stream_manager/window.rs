@@ -784,7 +784,17 @@ impl StreamManager {
                 .min_h(px(0.))
                 .flex()
                 .flex_col()
-                .child(div().flex_1().min_h(px(0.)).child(self.chat.clone()))
+                // A flex column, so the chat fills the space between the stats
+                // and the status bar and its list scrolls inside it (the
+                // chat's own height pushed the status bar out of the window).
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .flex()
+                        .flex_col()
+                        .child(self.chat.clone()),
+                )
                 .children(nudge)
                 .into_any_element(),
             Pane::Activity => self.activity.clone().into_any_element(),
