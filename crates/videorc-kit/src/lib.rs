@@ -151,4 +151,6 @@ pub fn init(cx: &mut gpui::App) {
     gpui_base::LayoutDirection::Ltr.set_global(cx);
     gpui_base::init(cx);
     segmented_control::init(cx);
+    // The macOS mono face (SF Mono) from the system's own file.
+    theme::load_system_mono(cx);
 }
