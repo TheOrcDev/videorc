@@ -46,7 +46,6 @@ use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::page_tabs::PageTabs;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
-use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
 use videorc_kit::switch::Switch;
 use videorc_kit::theme::{self, FONT, TypeScale, hsla};
 use videorc_kit::tokens::{size, text};
@@ -128,6 +127,38 @@ pub struct DestinationsPanel {
     category_picker: Option<category::CategoryPicker>,
     thumbnail_field: thumbnail::Field,
     schedule: Option<schedule::ScheduleEditor>,
+}
+
+/// Electron's vertical `Field` in an open destination's card (Server URL,
+/// Stream key): the label, the control row filling the card (the input
+/// grows, a Save button beside it), the description under it. A side-by-side
+/// settings row squeezed the input to an empty square.
+fn card_field(
+    t: &videorc_kit::tokens::Theme,
+    id: String,
+    label: impl Into<SharedString>,
+    description: Option<String>,
+    disabled: bool,
+    control: impl IntoElement,
+) -> impl IntoElement {
+    div()
+        .id(SharedString::from(id))
+        .flex()
+        .flex_col()
+        .gap(px(12.))
+        .child(videorc_kit::label::Label::new(label.into()).disabled(disabled))
+        .child(control)
+        .when_some(
+            description.filter(|d| !d.is_empty()),
+            |field, description| {
+                field.child(
+                    div()
+                        .type_scale(text::META)
+                        .text_color(hsla(t.muted_foreground))
+                        .child(description),
+                )
+            },
+        )
 }
 
 impl DestinationsPanel {
@@ -678,13 +709,14 @@ impl DestinationsPanel {
                 for label in labels {
                     control = control.option(Segment::new(label.clone(), label.clone()));
                 }
-                detail = detail.child(
-                    SettingsRow::new(
-                        format!("dest-auth-row-{}", dest.id),
-                        page_copy::CONNECT_WITH,
-                    )
-                    .child(control),
-                );
+                detail = detail.child(card_field(
+                    t,
+                    format!("dest-auth-row-{}", dest.id),
+                    page_copy::CONNECT_WITH,
+                    None,
+                    dest.disabled,
+                    control,
+                ));
             }
             if dest.quality.options.len() > 1 {
                 let quality = dest.quality.clone();
@@ -881,83 +913,71 @@ impl DestinationsPanel {
             }
             if let Some(manual) = &dest.manual {
                 if let Some(mode) = dest.url_mode {
-                    detail = detail.child(
-                        SettingsRow::new(format!("dest-url-mode-{}", dest.id), page_copy::URL_MODE)
-                            .child(
-                                SegmentedControl::new(format!("dest-url-mode-control-{}", dest.id))
-                                    // Electron fills it (`w-full`, or a vertical Field's `*:w-full`).
-                                    .full(true)
-                                    .small(true)
-                                    .accessibility_label(page_copy::URL_MODE)
-                                    .disabled(dest.disabled)
-                                    .value(Some(SharedString::from(if mode == 1 {
-                                        "full"
-                                    } else {
-                                        "server"
-                                    })))
-                                    .option(Segment::new(
-                                        "server",
-                                        page_copy::URL_MODE_SERVER_AND_KEY,
-                                    ))
-                                    .option(Segment::new("full", page_copy::URL_MODE_FULL_URL))
-                                    .on_change({
-                                        let entity = entity.clone();
-                                        let id = id.clone();
-                                        move |value, _, cx| {
-                                            entity.update(cx, |this, _| {
-                                                this.set_url_mode(
-                                                    id.clone(),
-                                                    value.as_ref() == "full",
-                                                )
-                                            })
-                                        }
-                                    }),
-                            ),
-                    );
+                    detail = detail.child(card_field(
+                        t,
+                        format!("dest-url-mode-{}", dest.id),
+                        page_copy::URL_MODE,
+                        None,
+                        dest.disabled,
+                        SegmentedControl::new(format!("dest-url-mode-control-{}", dest.id))
+                            // Electron fills it (`w-full`, or a vertical Field's `*:w-full`).
+                            .full(true)
+                            .small(true)
+                            .accessibility_label(page_copy::URL_MODE)
+                            .disabled(dest.disabled)
+                            .value(Some(SharedString::from(if mode == 1 {
+                                "full"
+                            } else {
+                                "server"
+                            })))
+                            .option(Segment::new("server", page_copy::URL_MODE_SERVER_AND_KEY))
+                            .option(Segment::new("full", page_copy::URL_MODE_FULL_URL))
+                            .on_change({
+                                let entity = entity.clone();
+                                let id = id.clone();
+                                move |value, _, cx| {
+                                    entity.update(cx, |this, _| {
+                                        this.set_url_mode(id.clone(), value.as_ref() == "full")
+                                    })
+                                }
+                            }),
+                    ));
                 }
                 if let Some(url_input) = self.manual_url_drafts.get(&dest.id) {
-                    detail = detail.child(
-                        SettingsGroup::new().row(
-                            SettingsRow::new(
-                                format!("dest-server-{}", dest.id),
-                                manual.server_label.clone(),
-                            )
-                            .description(manual.server_description.clone().unwrap_or_default())
+                    detail = detail.child(card_field(
+                        t,
+                        format!("dest-server-{}", dest.id),
+                        manual.server_label.clone(),
+                        manual.server_description.clone(),
+                        dest.disabled,
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.))
-                                    .child(
-                                        Input::new(
-                                            format!("dest-server-input-{}", dest.id),
-                                            url_input,
-                                        )
-                                        .accessibility_label(manual.server_label.clone())
+                                Input::new(format!("dest-server-input-{}", dest.id), url_input)
+                                    .accessibility_label(manual.server_label.clone())
+                                    .disabled(dest.disabled)
+                                    .invalid(manual.server_issue.is_some()),
+                            )
+                            .when(manual.save_url, |row| {
+                                let entity = entity.clone();
+                                let id = id.clone();
+                                let url_input = url_input.clone();
+                                row.child(
+                                    Button::new(format!("dest-save-url-{}", dest.id))
+                                        .label(page_copy::SAVE_URL)
+                                        .variant(ButtonVariant::Outline)
                                         .disabled(dest.disabled)
-                                        .invalid(manual.server_issue.is_some()),
-                                    )
-                                    .when(manual.save_url, |row| {
-                                        let entity = entity.clone();
-                                        let id = id.clone();
-                                        let url_input = url_input.clone();
-                                        row.child(
-                                            Button::new(format!("dest-save-url-{}", dest.id))
-                                                .label(page_copy::SAVE_URL)
-                                                .variant(ButtonVariant::Outline)
-                                                .disabled(dest.disabled)
-                                                .on_click(move |_, _, cx| {
-                                                    let url =
-                                                        url_input.read(cx).value().to_string();
-                                                    entity.update(cx, |this, _| {
-                                                        this.save_manual_url(id.clone(), url)
-                                                    })
-                                                }),
-                                        )
-                                    }),
-                            ),
-                        ),
-                    );
+                                        .on_click(move |_, _, cx| {
+                                            let url = url_input.read(cx).value().to_string();
+                                            entity.update(cx, |this, _| {
+                                                this.save_manual_url(id.clone(), url)
+                                            })
+                                        }),
+                                )
+                            }),
+                    ));
                     if let Some(issue) = &manual.server_issue {
                         detail = detail.child(
                             div()
@@ -968,47 +988,39 @@ impl DestinationsPanel {
                     }
                 }
                 if let Some(key_input) = self.manual_key_drafts.get(&dest.id) {
-                    detail = detail.child(
-                        SettingsGroup::new().row(
-                            SettingsRow::new(
-                                format!("dest-key-{}", dest.id),
-                                page_copy::ROW_STREAM_KEY,
-                            )
-                            .description(manual.key_description.clone().unwrap_or_default())
+                    detail = detail.child(card_field(
+                        t,
+                        format!("dest-key-{}", dest.id),
+                        page_copy::ROW_STREAM_KEY,
+                        manual.key_description.clone(),
+                        dest.disabled,
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.))
-                                    .child(
-                                        Input::new(
-                                            format!("dest-key-input-{}", dest.id),
-                                            key_input,
-                                        )
-                                        .accessibility_label(manual.key_placeholder.clone())
-                                        .disabled(dest.disabled),
-                                    )
-                                    .when(manual.save_key, |row| {
-                                        let entity = entity.clone();
-                                        let id = id.clone();
-                                        let key_input = key_input.clone();
-                                        row.child(
-                                            Button::new(format!("dest-save-key-{}", dest.id))
-                                                .label(page_copy::SAVE_KEY)
-                                                .variant(ButtonVariant::Outline)
-                                                .disabled(dest.disabled)
-                                                .on_click(move |_, _, cx| {
-                                                    let key =
-                                                        key_input.read(cx).value().to_string();
-                                                    entity.update(cx, |this, _| {
-                                                        this.save_manual_key(id.clone(), key)
-                                                    })
-                                                }),
-                                        )
-                                    }),
-                            ),
-                        ),
-                    );
+                                Input::new(format!("dest-key-input-{}", dest.id), key_input)
+                                    .accessibility_label(manual.key_placeholder.clone())
+                                    .disabled(dest.disabled),
+                            )
+                            .when(manual.save_key, |row| {
+                                let entity = entity.clone();
+                                let id = id.clone();
+                                let key_input = key_input.clone();
+                                row.child(
+                                    Button::new(format!("dest-save-key-{}", dest.id))
+                                        .label(page_copy::SAVE_KEY)
+                                        .variant(ButtonVariant::Outline)
+                                        .disabled(dest.disabled)
+                                        .on_click(move |_, _, cx| {
+                                            let key = key_input.read(cx).value().to_string();
+                                            entity.update(cx, |this, _| {
+                                                this.save_manual_key(id.clone(), key)
+                                            })
+                                        }),
+                                )
+                            }),
+                    ));
                     if let Some(restore) = &manual.restore {
                         let entity = entity.clone();
                         let id = id.clone();
