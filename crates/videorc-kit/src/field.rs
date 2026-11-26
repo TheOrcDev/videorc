@@ -46,6 +46,9 @@ pub struct Field {
     /// the label at a 16 px line (Output's Windows encoder).
     compact: bool,
     error: Option<SharedString>,
+    /// What follows the description inside the Field (a check line, the
+    /// alerts): it pulls the description up 4 px, as `nth-last-2:-mt-1`.
+    footer: SmallVec<[AnyElement; 2]>,
     invalid: bool,
     children: SmallVec<[AnyElement; 2]>,
     appearance: Option<Appearance>,
@@ -63,6 +66,7 @@ impl Field {
             description_above: false,
             compact: false,
             error: None,
+            footer: SmallVec::new(),
             invalid: false,
             children: SmallVec::new(),
             appearance: None,
@@ -118,6 +122,15 @@ impl Field {
         self
     }
 
+    /// An element after the description, inside the Field (Output's check
+    /// line and alerts under the preset). With anything after it, the
+    /// description sits 4 px closer to the control, as Electron's
+    /// `FieldDescription` does (`nth-last-2:-mt-1`).
+    pub fn footer(mut self, element: impl IntoElement) -> Self {
+        self.footer.push(element.into_any_element());
+        self
+    }
+
     /// Destructive refusal after the control (shadcn FieldError order).
     pub fn error(mut self, error: impl Into<SharedString>) -> Self {
         self.error = Some(error.into());
@@ -151,7 +164,8 @@ impl RenderOnce for Field {
             let words = div()
                 .min_w(px(0.0))
                 .text_size(px(14.0))
-                .line_height(px(20.0))
+                // `FieldLabel`'s `leading-snug`: 1.375 × 14.
+                .line_height(px(19.25))
                 .font_weight(FontWeight::MEDIUM)
                 // Electron keeps the label in the foreground; the error
                 // line below carries the refusal.
@@ -187,8 +201,13 @@ impl RenderOnce for Field {
         });
 
         let compact = self.compact;
+        // `nth-last-2:-mt-1` / `last:mt-0`: a description with something
+        // after it in the Field sits 4 px closer to what is above it.
+        let followed = self.error.is_some() || !self.footer.is_empty();
+        let pull_up = followed && !self.description_above;
         let description = self.description.map(|description| {
             div()
+                .when(pull_up, |line| line.mt(px(-4.0)))
                 .type_scale(text::META)
                 .line_height(px(if compact { 16.0 } else { 18.0 }))
                 .text_color(hsla(t.muted_foreground))
@@ -222,6 +241,7 @@ impl RenderOnce for Field {
                         .children(description),
                 )
                 .children(self.children)
+                .children(self.footer)
                 .children(error),
             // shadcn: label → control → description → error
             FieldOrientation::Vertical => div()
@@ -234,6 +254,7 @@ impl RenderOnce for Field {
                 .children(label_row)
                 .children(self.children)
                 .children(description)
+                .children(self.footer)
                 .children(error),
             FieldOrientation::Horizontal => {
                 let side = div()
@@ -244,6 +265,7 @@ impl RenderOnce for Field {
                     .gap(px(if compact { 2.0 } else { 4.0 }))
                     .children(label_row)
                     .children(description)
+                    .children(self.footer)
                     .children(error);
                 div()
                     .id(self.id)

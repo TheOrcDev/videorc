@@ -162,8 +162,16 @@ impl RenderOnce for Slider {
                     Direction::Down,
                 )),
         };
+        // A press focuses the slider, as Radix's thumb does on pointer down,
+        // so the arrow keys move it next; the focus ring stays keyboard-only.
+        let press_focus = focus.clone();
         let thumb = gpui_base::SliderThumb::new(&self.state)
             .disabled(disabled)
+            .when(!disabled, |thumb| {
+                thumb.on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                    press_focus.focus(window, cx);
+                })
+            })
             .absolute()
             .top(px(-6.0))
             .left(px(thumb_left))
@@ -213,6 +221,12 @@ impl RenderOnce for Slider {
         slider.flex().w_full().items_center().child(
             gpui_base::SliderTrack::new(&self.state)
                 .disabled(disabled)
+                .when(!disabled, |track| {
+                    let focus = focus.clone();
+                    track.on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                        focus.focus(window, cx);
+                    })
+                })
                 .flex()
                 .items_center()
                 .w_full()
