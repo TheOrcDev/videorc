@@ -181,21 +181,28 @@ fn room_screens() -> Value {
     );
     if let Some(participants) = obj.get_mut("participants").and_then(|v| v.as_array_mut()) {
         for person in participants {
-            let identity = person.get("identity").and_then(|v| v.as_str());
+            let identity = person
+                .get("identity")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
             let Some(entry) = person.as_object_mut() else {
                 continue;
             };
-            if identity == Some(HOST) || identity == Some("g_ada") {
+            if identity.as_deref() == Some(HOST) || identity.as_deref() == Some("g_ada") {
                 entry.insert("screen".into(), json!(true));
             }
-            if identity == Some("g_ada") {
+            if identity.as_deref() == Some("g_ada") {
                 entry.insert("onStage".into(), json!(true));
             }
         }
     }
     if let Some(guests) = obj.get_mut("guests").and_then(|v| v.as_array_mut()) {
         for guest in guests {
-            if guest.get("guestId").and_then(|v| v.as_str()) == Some("g_ada")
+            let id = guest
+                .get("guestId")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            if id.as_deref() == Some("g_ada")
                 && let Some(entry) = guest.as_object_mut()
             {
                 entry.insert("screenShareAllowed".into(), json!(true));

@@ -452,7 +452,7 @@ impl StudioSmoke {
                     if let Some(targets) =
                         streaming.get_mut("targets").and_then(|v| v.as_array_mut())
                     {
-                        for target in targets {
+                        for target in targets.iter_mut() {
                             let id = target.get("id").and_then(|v| v.as_str());
                             if id == Some("youtube-vertical")
                                 && let Some(entry) = target.as_object_mut()

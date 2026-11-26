@@ -4985,7 +4985,10 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     const smokeWindow = window as Window & {
       __videorcSmokeSetTalkShowRoomOpen?: (open: boolean) => boolean
       /** Plan 260 C4 gallery / Electron baseline: synthetic CloudStatus (no LiveKit). */
-      __videorcSmokeSeedShowStage?: (status: CloudStatus | null, opts?: { cameraOff?: boolean }) => boolean
+      __videorcSmokeSeedShowStage?: (
+        status: CloudStatus | null,
+        opts?: { cameraOff?: boolean }
+      ) => boolean
       __videorcSmokeSelectFirstCamera?: () => string | null
       __videorcSmokeSelectFirstScreen?: (
         sourceId?: string
