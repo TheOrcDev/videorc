@@ -474,10 +474,13 @@ fn gain_row(
     } else {
         (hsla(theme.muted_foreground), hsla(theme.muted_foreground))
     };
-    let shown = if retro {
-        lcd::caps(text_value.to_string())
-    } else {
-        SharedString::from(text_value.to_string())
+    // The retro screen tracks the value as it tracks its words.
+    let shown = || -> AnyElement {
+        if retro {
+            lcd::tracked_meta(text_value.to_string()).into_any_element()
+        } else {
+            SharedString::from(text_value.to_string()).into_any_element()
+        }
     };
     let value: AnyElement = match reset {
         Some(reset) => div()
@@ -492,21 +495,21 @@ fn gain_row(
                         div()
                             .font_family(videorc_kit::FONT_MONO)
                             .text_color(value_ink)
-                            .child(shown),
+                            .child(shown()),
                     )
                     .on_click(on_reset),
             )
             .into_any_element(),
-        None => div().child(shown).into_any_element(),
+        None => div().child(shown()).into_any_element(),
     };
     let label = div()
         .flex_none()
         .type_scale(text::META)
         .text_color(label_ink)
         .child(if retro {
-            lcd::caps(words::GAIN)
+            lcd::tracked_meta(words::GAIN).into_any_element()
         } else {
-            SharedString::from(words::GAIN)
+            SharedString::from(words::GAIN).into_any_element()
         });
     div()
         .flex()

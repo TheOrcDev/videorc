@@ -56,6 +56,17 @@ pub fn tracked(words: impl Into<SharedString>) -> TrackedText {
     TrackedText::new(caps(words), SCREEN_TEXT_PX, SCREEN_TRACKING_EM).glow(true)
 }
 
+/// The screen's small lines (the fader's GAIN and its value, `text-xs`), in
+/// capitals with the screen's tracking: Electron's panel tracks every word
+/// it prints, values too. Only for words that always fit: tracked text never
+/// ends in "…".
+pub fn tracked_meta(words: impl Into<SharedString>) -> TrackedText {
+    TrackedText::new(caps(words), META_TEXT_PX, SCREEN_TRACKING_EM).glow(true)
+}
+
+/// `text-xs` on the screen.
+const META_TEXT_PX: f32 = 12.;
+
 /// A key's words, in capitals with the keys' tracking.
 pub fn key_tracked(words: impl Into<SharedString>) -> TrackedText {
     TrackedText::new(caps(words), KEY_TEXT_PX, KEY_TRACKING_EM).glow(true)
@@ -645,9 +656,12 @@ fn value_button_with(
     if let Some(tip) = tip {
         button = button.tooltip(tooltip(tip));
     }
+    // The panel tracks its values too (`LCD_PANEL`'s `tracking-[0.08em]`):
+    // a value button's words are short and always fit (On, Off, Mute,
+    // Resume, Needs permission).
     button
         .children(glyph.map(|glyph| icon(glyph, 14., ink)))
-        .child(div().truncate().child(caps(label)))
+        .child(tracked(label))
 }
 
 /// On/Off switch drawn as lit words (LcdPanelSwitch).
