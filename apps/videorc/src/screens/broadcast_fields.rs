@@ -92,6 +92,8 @@ pub fn broadcast_info_fields(
 
     let privacy = fields.privacy.map(|privacy| {
         let mut control = SegmentedControl::new(SharedString::from(format!("{id}-privacy")))
+            // Electron fills it (`w-full`, or a vertical Field's `*:w-full`).
+            .full(true)
             .accessibility_label(page_copy::PRIVACY)
             .disabled(fields.disabled)
             .value(Some(SharedString::from(privacy_value(privacy))))

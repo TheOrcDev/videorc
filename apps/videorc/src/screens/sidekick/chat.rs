@@ -292,6 +292,8 @@ pub fn render_chat(
         .unwrap_or("friendly");
 
     let mut tone_control = SegmentedControl::new("reply-tone")
+        // Electron fills it (`w-full`, or a vertical Field's `*:w-full`).
+        .full(true)
         .small(true)
         .accessibility_label(REPLY_TONE)
         .value(Some(tone))
@@ -469,6 +471,8 @@ pub fn render_chat(
     let rules_field = field_stack(CHAT_RULES, RULES_HELP, rules_rest, theme);
 
     let mut sensitivity_control = SegmentedControl::new("flag-sensitivity")
+        // Electron fills it (`w-full`, or a vertical Field's `*:w-full`).
+        .full(true)
         .small(true)
         .accessibility_label(FLAG_SENSITIVITY)
         .value(Some(sensitivity))
@@ -491,6 +495,8 @@ pub fn render_chat(
     });
 
     let mut show_control = SegmentedControl::new("put-comments")
+        // Electron fills it (`w-full`, or a vertical Field's `*:w-full`).
+        .full(true)
         .small(true)
         .accessibility_label(PUT_COMMENTS)
         .value(Some(show_value))

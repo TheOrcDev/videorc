@@ -121,7 +121,8 @@ impl SegmentedControl {
             disabled_reason: None,
             manual: false,
             small: false,
-            fit: false,
+            // Electron's SegmentedControl is `w-fit` unless told otherwise.
+            fit: true,
             ground: None,
             accessibility_label: None,
             on_change: None,
@@ -163,15 +164,22 @@ impl SegmentedControl {
         self
     }
 
-    /// Electron's default `w-fit` (CSS `fit-content`): the track hugs its
-    /// segments, each as wide as its words (Community's Show), but never
-    /// wider than its column; in a column narrower than its words it shares
-    /// the width and wraps like the default (Stream quality at 330 px). Without it the track fills
-    /// its column (`w-full`) and the segments share it as Chrome does: equal
-    /// shares, a segment never narrower than its words, and a line that
-    /// cannot hold them wraps (Stream quality).
+    /// `w-fit` (CSS `fit-content`), Electron's default and the kit's: the
+    /// track hugs its segments, each as wide as its words, but never wider
+    /// than its column; in a column narrower than its words the segments
+    /// share it and wrap. `fit(false)` is [`Self::full`]`(true)`.
     pub fn fit(mut self, fit: bool) -> Self {
         self.fit = fit;
+        self
+    }
+
+    /// `w-full`: the track fills its column and the segments share it as
+    /// Chrome does (equal shares, none narrower than its words, wrapping a
+    /// line that can't hold them). Electron fills with `className="w-full"`
+    /// and inside a vertical Field (`*:w-full`, which wins over a `w-fit`),
+    /// so a control there needs it.
+    pub fn full(mut self, full: bool) -> Self {
+        self.fit = !full;
         self
     }
 

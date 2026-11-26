@@ -650,6 +650,8 @@ impl DestinationsPanel {
             }
             if let Some((labels, selected)) = &dest.auth_mode {
                 let mut control = SegmentedControl::new(format!("dest-auth-{}", dest.id))
+                    // Electron fills it (`w-full`, or a vertical Field's `*:w-full`).
+                    .full(true)
                     .small(true)
                     .accessibility_label(page_copy::CONNECT_WITH)
                     .disabled(dest.disabled)
@@ -877,6 +879,8 @@ impl DestinationsPanel {
                         SettingsRow::new(format!("dest-url-mode-{}", dest.id), page_copy::URL_MODE)
                             .child(
                                 SegmentedControl::new(format!("dest-url-mode-control-{}", dest.id))
+                                    // Electron fills it (`w-full`, or a vertical Field's `*:w-full`).
+                                    .full(true)
                                     .small(true)
                                     .accessibility_label(page_copy::URL_MODE)
                                     .disabled(dest.disabled)

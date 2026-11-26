@@ -1850,6 +1850,8 @@ impl Render for OutputPanel {
         let mut quality_fields = FieldGroup::new().child(preset_field);
         let entity = cx.entity();
         let mut resolution = SegmentedControl::new("output-resolution")
+            // Electron fills it (`w-full`, or a vertical Field's `*:w-full`).
+            .full(true)
             .accessibility_label("Resolution")
             .disabled(model.quality_locked)
             .value(selected_resolution);

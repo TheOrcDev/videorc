@@ -75,6 +75,8 @@ pub(super) fn quality_control(
     // sides, a 28 px track): at that size its three options wrap onto two
     // rows of the Output quality column, as Electron's do.
     let mut control = SegmentedControl::new(id)
+        // Electron fills it (`w-full`, or a vertical Field's `*:w-full`).
+        .full(true)
         .accessibility_label(page_copy::OUTPUT_QUALITY)
         .disabled(disabled)
         .value(selected.map(SharedString::from))
