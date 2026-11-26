@@ -412,13 +412,23 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
     // the page through DevTools, which can't hold the native Preview layer:
     // their Studio says "Preview is closed". Close the docked Preview here
     // too, so every screen shot over the Studio compares in the same state.
+    // ⌘P's own handler (`preview-toggle-open`) closes it whatever the row
+    // shows; the state says whether it is open, before and after.
     if (!values['preview-open']) {
       await command('open-tab', { tab: 'studio' }).catch(() => {})
       await sleep(SETTLE_MS)
-      await ui
-        .click({ name: 'Close', role: 'button' }, { timeoutMs: 3_000 })
-        .catch((error) => log(`could not close the docked Preview: ${error.message}`))
-      await sleep(600)
+      try {
+        let state = await command('preview-window-state')
+        for (let tries = 0; state && !state.closed && tries < 2; tries += 1) {
+          await command('preview-toggle-open')
+          await sleep(800)
+          state = await command('preview-window-state')
+        }
+        if (!state?.closed) log(`the docked Preview stayed open: ${JSON.stringify(state)}`)
+      } catch (error) {
+        log(`could not close the docked Preview: ${error.message}`)
+      }
+      await sleep(400)
     }
   }
   const stop = async () => {
