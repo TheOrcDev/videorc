@@ -7,6 +7,10 @@ and with the [Windows code plan](260-gpui-rewrite-windows-code.md) (the
 Windows code slices). You do not need to know Videorc's internals: every
 step below says what to run, what you should see, and what to send back.
 
+Testing with an AI agent (Claude Code, Codex) on your PC? Give it
+[260-gpui-rewrite-windows-tester-agent.md](260-gpui-rewrite-windows-tester-agent.md):
+its brief, in order, with the steps it needs you for marked.
+
 **Your run counts as the physical Windows pass.** Videorc has no Windows PC
 of its own. The owner decided on 2026-11-23 that all three platforms switch
 to the GPUI app together, with Windows tested on a real PC and no waiver,
