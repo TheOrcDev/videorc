@@ -62,7 +62,8 @@
     "selectable-text",
     "media-card",
     "page",
-    "channel-toggle"
+    "channel-toggle",
+    "power-slider"
   ],
   "keepLocal": []
 }
