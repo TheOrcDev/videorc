@@ -2281,18 +2281,9 @@ impl<B: StudioBackend> Studio<B> {
                         // carries the ring when Record or Go Live takes over
                         // from buffer-only capture. The saved switch alone
                         // must not rearm a ring that failed or was disarmed.
-                        params.replay =
-                            inner
-                                .clips
-                                .ring
-                                .armed()
-                                .then_some(videorc_protocol::ReplayParams {
-                                    seconds: inner
-                                        .clips
-                                        .smoke_seconds
-                                        .unwrap_or(clips::REPLAY_RING_SECONDS),
-                                    auto: !view.capture.replay_buffer.explicit,
-                                });
+                        params.replay = inner
+                            .clips
+                            .session_replay_params(view.capture.replay_buffer.explicit);
                         params
                     },
                 ),
