@@ -622,8 +622,8 @@ impl QuickSettingsSection {
             t,
             section_copy::CAPTIONS,
             div()
-                .truncate()
-                .child(lcd::caps(self.view.captions.clone())),
+                .min_w_0()
+                .child(lcd::tracked(self.view.captions.clone()).truncate("lcd-captions-value")),
             cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Captions))),
         );
         // One line that truncates at its end, as Electron's LCD value does
@@ -633,8 +633,8 @@ impl QuickSettingsSection {
         // accelerator, never a hand-typed glyph (gpui-design-guards).
         let chat_value: AnyElement = if let Some(new_label) = &self.view.chat.new_label {
             div()
-                .truncate()
-                .child(lcd::caps(new_label.clone()))
+                .min_w_0()
+                .child(lcd::tracked(new_label.clone()).truncate("lcd-chat-new"))
                 .into_any_element()
         } else {
             let mac = cfg!(target_os = "macos");
@@ -652,8 +652,7 @@ impl QuickSettingsSection {
             };
             div()
                 .min_w_0()
-                .truncate()
-                .child(lcd::caps(words))
+                .child(lcd::tracked(words).truncate("lcd-chat-value"))
                 .into_any_element()
         };
         let chat = lcd::nav_row(

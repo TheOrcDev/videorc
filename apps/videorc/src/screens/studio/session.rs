@@ -501,6 +501,11 @@ impl SessionSection {
         theme: &videorc_kit::tokens::Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // Each value's own truncation key (`TrackedText::truncate`): the
+        // fact, and its label, which tells the destinations under the
+        // Destinations row apart (they share the fact id).
+        let value_id =
+            gpui::SharedString::from(format!("lcd-fact-value-{}-{}", fact.id, fact.label));
         let value = match fact_tone(fact.tone) {
             Some(tone) => div()
                 .min_w_0()
@@ -511,14 +516,12 @@ impl SessionSection {
                 .child(
                     div()
                         .min_w_0()
-                        .truncate()
-                        .child(lcd::caps(fact.value.clone())),
+                        .child(lcd::tracked(fact.value.clone()).truncate(value_id.clone())),
                 )
                 .into_any_element(),
             None => div()
                 .min_w_0()
-                .truncate()
-                .child(lcd::caps(fact.value.clone()))
+                .child(lcd::tracked(fact.value.clone()).truncate(value_id))
                 .into_any_element(),
         };
         if let Some(page) = fact.opens {
