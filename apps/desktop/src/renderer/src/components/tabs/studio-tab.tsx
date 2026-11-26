@@ -4,12 +4,7 @@ import { PANE_STABLE_GUTTER } from '@/components/pane'
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
 import { QuickSettings } from '@/components/studio/quick-settings'
-import {
-  RetroQuickSettings,
-  RetroSessionPanel,
-  RetroSessionTransport,
-  RetroTakeoverSection
-} from '@/components/studio/retro-lcd-studio'
+
 import { SessionPanel, SessionTransport, TakeoverSection } from '@/components/studio/session-panel'
 import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -28,6 +23,8 @@ import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { shouldIgnoreGoLiveAction } from '@/lib/go-live-flow'
 import { OPEN_HEALTH_LABEL, openHealth } from '@/lib/health-door'
 import type { SettingsTabId } from '@/lib/settings-tabs'
+import { connectionBlockedReason } from '@/lib/state-labels'
+import { studioChatShows } from '@/lib/studio-chat'
 import { studioHealth } from '@/lib/studio-health'
 import {
   STUDIO_CONTAINER,
@@ -42,8 +39,6 @@ import {
   sessionStopControl
 } from '@/lib/studio-session-view'
 import { spaceShortcutBlocked } from '@/lib/studio-space-shortcut'
-import { studioChatShows } from '@/lib/studio-chat'
-import { connectionBlockedReason } from '@/lib/state-labels'
 
 const StudioDashboardBottomRow = lazy(async () => ({
   default: (await import('@/components/studio/studio-dashboard-bottom-row'))
@@ -68,10 +63,9 @@ const CloudResumeNotice = lazy(async () => ({
 
 export function StudioTab(): ReactElement {
   const studio = useStudioCore()
-  // Settings → General → Retro LCD (plan 197): the inspector on LCD screens.
-  const retro = studio.settings.retroLcdStudio === true
-  const Transport = retro ? RetroSessionTransport : SessionTransport
-  const InspectorSession = retro ? RetroSessionPanel : SessionPanel
+
+  const Transport = SessionTransport
+  const InspectorSession = SessionPanel
   const { recording } = useStudioRecordingState()
   // No cloud read here: a room snapshot (a guest starts talking) would
   // re-render the whole page. The transport reads it (PH-12).
@@ -242,8 +236,7 @@ export function StudioTab(): ReactElement {
           {/* Chat in Studio (plan 204, owner 2026-10-27): while on air and
               switched on, the livestream's chat under Session, where the
               streamer glances most, and a click puts a message on stream.
-              The same section in both looks (owner: no Retro LCD screen in
-              the first version). The inspector keeps its width, so the
+              The inspector keeps its width, so the
               docked preview's slot never moves when it appears. */}
           {studioChatShows({ settings: studio.settings, recording }) ? (
             <Suspense fallback={<StudioChatSectionFallback />}>
@@ -254,14 +247,14 @@ export function StudioTab(): ReactElement {
               with its Gain, between Session and Sources (plan 201 D1; the
               Microphone section since the owner call of 2026-10-02): a check
               that runs all the time. */}
-          <Suspense fallback={<AudioSectionFallback retro={retro} />}>
+          <Suspense fallback={<AudioSectionFallback />}>
             <AudioSection />
           </Suspense>
           {/* Sources (Screen and Camera) and Captions: compact mirrors editing
               the same captureConfig, each with a way to its page. Output is
               the Session row above (plan 174 S3.3, B-15). */}
-          {retro ? <RetroQuickSettings /> : <QuickSettings />}
-          {retro ? <RetroTakeoverSection /> : <TakeoverSection />}
+          {<QuickSettings />}
+          {<TakeoverSection />}
         </aside>
       </div>
     </div>
@@ -371,19 +364,7 @@ function StudioChatSectionFallback(): ReactElement {
   )
 }
 
-/**
- * The Audio section's height while its chunk loads: the picker, two level
- * bars and two Gain faders, or with Retro LCD the Microphone screen (about
- * 150 px).
- */
-function AudioSectionFallback({ retro }: { retro: boolean }): ReactElement {
-  if (retro) {
-    return (
-      <PanelSection>
-        <Skeleton className="h-36 rounded-row" />
-      </PanelSection>
-    )
-  }
+function AudioSectionFallback(): ReactElement {
   return (
     <PanelSection title="Audio">
       <Skeleton className="h-control rounded-chip" />

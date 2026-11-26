@@ -5,19 +5,11 @@ const ScenesSection = lazy(() => import('@/components/scene-presets'))
 import { PanelSection } from '@/components/panel-section'
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control'
 import { Skeleton } from '@/components/ui/skeleton'
-import { useStudioCore } from '@/hooks/use-studio'
 import type { LayoutPreset, VerticalScreenFraming } from '@/lib/backend'
 import { layoutPresetOrientation } from '@/lib/capture'
 import { LAYOUT_PRESET_LABELS } from '@/lib/layout-labels'
 import { cn } from '@/lib/utils'
 
-// Plan 231 D8: Studio's Scenes section is the home of scenes. Its header, the
-// cards, their reorder and the scene on stream's own fields (Screen, Layout,
-// Fill or Fit, Vertical stream layout) are one lazy chunk
-// (`components/scene-presets.tsx`), loaded right after this below-the-fold
-// row: none of it is in the Studio's first paint. Both looks share it; with
-// Retro LCD the fields sit on a screen (plan 197).
-// Names come from the one layout table (plan 174 S1.4, V-X3).
 const scene = (id: LayoutPreset): { id: LayoutPreset; label: string } => ({
   id,
   label: LAYOUT_PRESET_LABELS[id]
@@ -39,12 +31,9 @@ const SCREEN_FRAMING_OPTIONS: SegmentedControlOption<VerticalScreenFraming>[] = 
 ]
 
 export function ScenesGallery(): ReactElement {
-  const { settings } = useStudioCore()
-  // Settings → General → Retro LCD (plan 197): the same section in its look.
-  const look = settings.retroLcdStudio === true ? 'lcd' : 'default'
   return (
     <Suspense fallback={<ScenesSectionFallback />}>
-      <ScenesSection look={look} />
+      <ScenesSection />
     </Suspense>
   )
 }

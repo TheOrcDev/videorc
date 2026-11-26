@@ -1,18 +1,11 @@
 import type { ReactElement } from 'react'
-import { LCD_VALUE_BUTTON } from '@/components/lcd-panel'
+
 import { Button } from '@/components/ui/button'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { SessionSourceKind } from '@/lib/backend'
 
 /** Both picker surfaces describe the same backend operation and recovery. */
-export function SourceSwitchStatus({
-  kind,
-  look = 'default'
-}: {
-  kind: SessionSourceKind
-  /** `lcd`: on a Studio screen (plan 197), so its one action is the screen's too. */
-  look?: 'default' | 'lcd'
-}): ReactElement | null {
+export function SourceSwitchStatus({ kind }: { kind: SessionSourceKind }): ReactElement | null {
   const {
     sourceSelectionState: state,
     sourceSwitchReason,
@@ -60,19 +53,9 @@ export function SourceSwitchStatus({
     <span className="flex flex-col items-start gap-1" role="status">
       <span>{message}</span>
       {(state.checking || state.outputPending) && state.error ? (
-        look === 'lcd' ? (
-          <button
-            className={LCD_VALUE_BUTTON}
-            type="button"
-            onClick={() => void retrySourceStatus()}
-          >
-            Check again
-          </button>
-        ) : (
-          <Button variant="outline" onClick={() => void retrySourceStatus()}>
-            Check again
-          </Button>
-        )
+        <Button variant="outline" onClick={() => void retrySourceStatus()}>
+          Check again
+        </Button>
       ) : null}
     </span>
   )

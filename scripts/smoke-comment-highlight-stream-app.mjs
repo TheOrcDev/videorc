@@ -445,7 +445,6 @@ async function runScenario(ws, smoke, scenario, index) {
       // seconds on a slow host, and before the capture they ran the 10 s
       // highlight out mid-capture (plan 0009). The section still shows.
       await recordStudioChatEvidence(smoke, scenarioDirectory)
-      await shootStudioChatRetroLcd(smoke, scenarioDirectory)
       await hideAndUndoStudioChat(smoke)
     }
     const stopped = await request(ws, timeoutMs, 'session.stop', {})
@@ -1010,31 +1009,6 @@ async function shootStudio(smoke, theme, name) {
      return document.documentElement.classList.contains('${theme}')`
   )
   return (await smokeCommand(smoke, 'capture-page', { name: `studio-chat-${name}` }))?.file
-}
-
-/**
- * Retro LCD keeps the section in its default look (owner answer 3): one shot
- * of it among the LCD screens, then Retro LCD back off. After the take-off, so
- * the card's 10 s lifetime never meets the detour through Settings.
- */
-async function shootStudioChatRetroLcd(smoke, scenarioDirectory) {
-  // The id is on the Switch's hidden checkbox input (Base UI).
-  const retro = `await openTab('settings', '#retro-lcd-studio')
-     const toggle = document.querySelector('#retro-lcd-studio')
-     if (toggle.checked !== params.on) toggle.click()
-     await sleep(150)
-     await openTab('studio', ${JSON.stringify(STUDIO_CHAT)})
-     await sleep(400)
-     const checked = document.querySelector('#retro-lcd-studio')?.checked
-     return checked === undefined ? null : String(checked)`
-  await studioEval(smoke, retro, { on: true })
-  const file = await shootStudio(smoke, 'dark', 'retro-dark')
-  await studioEval(smoke, retro, { on: false })
-  writeFileSync(
-    join(scenarioDirectory, 'studio-chat-retro-lcd.json'),
-    JSON.stringify({ file }, null, 2)
-  )
-  console.log(`[studio] Retro LCD shot ${file}`)
 }
 
 /** A click on the live row takes it off (owner call, D10). */

@@ -37,7 +37,7 @@ const page = vi.hoisted(() => {
 })
 
 const core = {
-  settings: { retroLcdStudio: false },
+  settings: {},
   canStop: false,
   startRequestPending: false,
   stopRequestPending: false,
@@ -97,12 +97,6 @@ vi.mock('@/components/studio/quick-settings', () => ({
     page.renders.quickSettings += 1
     return null
   }
-}))
-vi.mock('@/components/studio/retro-lcd-studio', () => ({
-  RetroQuickSettings: none,
-  RetroSessionPanel: none,
-  RetroSessionTransport: none,
-  RetroTakeoverSection: none
 }))
 vi.mock('@/components/preview-stage', () => ({ PreviewStage: none }))
 vi.mock('@/lib/studio-health', () => ({ studioHealth: () => ({ tone: 'ok' }) }))

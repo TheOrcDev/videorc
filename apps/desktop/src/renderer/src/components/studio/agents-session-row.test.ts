@@ -7,9 +7,6 @@ import type { AgentSummary, AgentsStatus } from '@/lib/backend'
 
 import { AgentsSessionRow } from './agents-session-row'
 
-// Plan 209 D12: the Studio's Session line while an agent is connected, with
-// Stop, in the default look and on the Retro LCD screen.
-
 const mocked = vi.hoisted(() => ({
   status: null as AgentsStatus | null,
   stop: vi.fn(async () => undefined)
@@ -88,13 +85,5 @@ describe('AgentsSessionRow (plan 209 D12)', () => {
     mocked.status = status([agent({}), agent({ id: 'a2', name: 'Cursor' })])
     await render()
     expect(container.textContent).toContain('2 agents connected')
-  })
-
-  it('draws the same line on the Retro LCD screen', async () => {
-    mocked.status = status([agent({})])
-    await render('lcd')
-    expect(container.textContent).toContain('Claude Desktop connected')
-    await act(async () => stopButton()!.click())
-    expect(mocked.stop).toHaveBeenCalledOnce()
   })
 })

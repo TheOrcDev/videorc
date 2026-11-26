@@ -2,14 +2,14 @@ import { useCallback, useMemo, useState } from 'react'
 
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
-import { slotAsset } from '@/lib/background-assets'
 import type { CameraBackground } from '@/lib/backend'
+import { slotAsset } from '@/lib/background-assets'
 import {
-  cameraBackgroundFor,
-  cameraBackgroundIsEffect,
   cameraBackgroundChoiceId,
   cameraBackgroundChoices,
+  cameraBackgroundFor,
   cameraBackgroundForChoice,
+  cameraBackgroundIsEffect,
   cameraBackgroundValueLabel,
   platformBackgroundReason,
   ROOM_BACKGROUND_UNAVAILABLE,
@@ -18,7 +18,6 @@ import {
   type CameraBackgroundImage
 } from '@/lib/camera-background-view'
 
-/** What every Background control shows and does (Studio, Retro LCD, Scene page, ⌘K). */
 export interface CameraBackgroundControl {
   /** False with no camera: there is nothing to put a background behind. */
   available: boolean

@@ -86,9 +86,7 @@ registry item on Base UI, with its docs and examples there.
   `pnpm ui:sync --local <item>`. A token or utility a component needs goes in
   `styles.css` here and in videorc-ui's theme.
 - **Videorc's own compositions stay here,** built from synced parts: the
-  root boundary (`components/app-error-boundary.tsx`), the Retro LCD Studio's
-  kit (`components/lcd-panel.tsx`, `components/lcd-device-picker.tsx`), and
-  every screen.
+  root boundary (`components/app-error-boundary.tsx`), every screen.
 - **Base UI's API, not Radix's:** `render={<X />}` instead of `asChild`
   (`nativeButton={false}` when X isn't a button); menu items take
   `onClick`; ToggleGroup and Accordion values are arrays (`multiple`), a
@@ -298,13 +296,7 @@ for the owner, not a design choice.
   name for screen readers); Takeover keeps its title, because its buttons
   are only takeover names. A group's way to its page is one cog with its
   tooltip: "Open Sources" at the end of the Camera row, "Open Assets" in
-  Takeover's header. Both looks.
-- **Retro LCD is an option, off by default** (2026-10-25, plan 197). Settings
-  → General → Appearance → Retro LCD draws the Studio inspector on audiocn
-  LCD screens (`components/lcd-panel.tsx`, `studio/retro-lcd-studio.tsx`)
-  and every level meter as the LCD meter. Off, the Studio and its meters are
-  this skill's rows, buttons and the segmented bar. A Studio change lands in
-  both looks; neither replaces the other.
+  Takeover's header.
 
 ## The window family
 
@@ -686,8 +678,7 @@ links home.
   Camera row's "Background · Strong blur" trigger, opening a 320 px popover
   with the live "What viewers see" picture (the processed camera from the
   store, never a raw feed), the tiles in Blur, Images and Screen behind you,
-  the lock line and Settings (the home); the Retro LCD shows the pick on the
-  screen and opens the same picker. ⌘K: "Blur background" or "Turn off
+  the lock line and Settings (the home). ⌘K: "Blur background" or "Turn off
   background effect", the green-screen switch and "Background settings". A
   pick applies at once and the stage confirms it, so no toast; the stage's
   cover and system effects are lines under the trigger, never toasts. The
@@ -697,7 +688,7 @@ links home.
   `camera-background-orc-art.tsx`), never a cartoon person; the Camera row's
   16 px trigger picture draws the same art for the current pick, from a lazy
   chunk (an empty ground until it loads), so the Orc's WebPs stay out of the
-  launch bundle. The Retro LCD row is text on the screen, with no picture. While a
+  launch bundle. While a
   room is open (until plan 258 S8) the effect tiles are disabled with
   "Background effects come to rooms in a later update."; Off and the two
   screens stay.
@@ -722,7 +713,7 @@ links home.
   shows a Chat section under Session while on air (plan 204): a small
   avatar, the name, the words and the platform mark per row, a click that
   shows the message on stream through the same highlight, and nothing
-  else. It keeps its default look under Retro LCD for now.
+  else.
 - **Health**: no sidebar row. The status bar state, "Open Health" on a
   degraded alert or an error toast, Settings → About and ⌘K open it. The
   support bundle's one home is Health (`SupportBundleButton`).
@@ -733,8 +724,7 @@ One verb pair on every surface (plan 174 D3; the table in
 `docs/ui-copy.md`, strings in `lib/go-live-copy.ts`):
 
 - The Studio buttons read "Record" and **"Go Live"**: it opens a dialog, and
-  still has no "…", the owner's exception (2026-11-14, plan 235 D2). Its
-  Retro LCD key reads the same.
+  still has no "…", the owner's exception (2026-11-14, plan 235 D2).
 - The Go Live dialog's title and primary button read **"Go live"** ("Go
   live on 3 destinations" when it starts more than one).
 - Stopping a livestream is **"End livestream"**, with the line "Your
@@ -1306,9 +1296,7 @@ Rows, forms and choices
 - `DevicePicker` (`components/device-picker.tsx`):
   `kind label devices value onChange noneLabel? discoveryPending? searchable? groupByKind? trigger? description? statusInTrigger? disabled? labelHidden?`.
   `trigger="field"` is a labelled form control, `"inline"` a row's
-  right-aligned value. On a Retro LCD screen it is `LcdDevicePicker`
-  (`components/lcd-device-picker.tsx`, `rowLabel?`): the same words and list
-  on the screen.
+  right-aligned value.
 - `ListRow`, `GroupedList` and `ListRowButton` (`components/list-row.tsx`),
   `NavigableRow` (`components/navigable-row.tsx`), `SectionLabel`
   (`components/section-label.tsx`) and `PanelSection`
@@ -1399,7 +1387,7 @@ Words, numbers and navigation
 | Views and page tabs          | `Tabs`                                                                      |
 | Filter chips (multi-select)  | `ToggleGroup`                                                               |
 | A boolean                    | `Switch`                                                                    |
-| A screen, camera, microphone | `DevicePicker` (`LcdDevicePicker` on a Retro LCD screen)                    |
+| A screen, camera, microphone | `DevicePicker`                                                              |
 | Buttons                      | `Button` ghost/outline/secondary; `default` chrome primary; 28 px default   |
 | Record and its stop button   | `Button` `variant="record"`, `data-lit` while running (never Delete)        |
 | Why a control is disabled    | `DisabledReason`, or `SegmentedControl`'s `disabledReason`                  |
@@ -1413,13 +1401,11 @@ Words, numbers and navigation
 | Scroll regions               | `PaneBody` or `ScrollArea type="scroll"`                                    |
 | Menus / popovers             | `DropdownMenu` / `Popover` on `glass-float`                                 |
 | Toasts                       | `toast` from `lib/toast.ts`; type colours the icon                          |
-| Audio levels                 | `MicLevelMeter`: segmented bar; LCD meter with Retro LCD                    |
+| Audio levels                 | `MicLevelMeter`: segmented bar                                              |
 | Audio controls               | audiocn `fader` in Sources rows (`SourceItem`) and the Studio Audio section |
 
 The Microphone and System audio Gain faders have one definition for both
-pages, `components/audio/gain-faders.tsx`. Retro LCD skins them from outside
-with `LCD_FADER` in `components/lcd-panel.tsx`, inside the Audio screen
-(plan 201 D5).
+pages, `components/audio/gain-faders.tsx`.
 
 Missing a primitive? Add it to videorc-ui (a stock shadcn component is
 ported there onto Base UI and Videorc's tokens), then `pnpm ui:sync <item>`

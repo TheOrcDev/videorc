@@ -1,29 +1,29 @@
+import type {
+  CommentsSnapshotDelta,
+  CommentsViewSnapshot,
+  OverlayLayout
+} from '../../../shared/backend'
 import { chatDeliveryProgress, deliveryCursor } from '../../../shared/chat-delivery'
 import {
   applyCommentsSnapshotDelta,
   hydrateCommentsSnapshot,
   reconcileBrokerCommentsSnapshot
 } from '../../../shared/comments-snapshot-delta'
-import type {
-  CommentsSnapshotDelta,
-  CommentsViewSnapshot,
-  OverlayLayout
-} from '../../../shared/backend'
+import { editVerticalStreamLayout } from '../components/studio/vertical-stream-layout-control'
 import {
   SCENE_LIBRARY_KEY,
   WORKING_SCENE_KEY,
   normalizeSceneVisual,
   sameSceneVisual
 } from '../lib/scene-presets'
-import { SCENES_KEY, type Scene as StoredScene, type SceneLibrary } from '../lib/scenes'
-import { editVerticalStreamLayout } from '../components/studio/vertical-stream-layout-control'
+import { SCENES_KEY, type SceneLibrary, type Scene as StoredScene } from '../lib/scenes'
 // Loaded up front so the Studio's first-launch migration (its own chunk)
 // resolves inside the mount's `act`, as a stored library does.
-import { defaultScenes } from '../lib/scenes-migration'
+import { Window as TestWindow } from 'happy-dom'
 import { act, createElement, useEffect, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { Window as TestWindow } from 'happy-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { defaultScenes } from '../lib/scenes-migration'
 
 const toastSpies = vi.hoisted(() => ({
   dismiss: vi.fn(),
@@ -50,10 +50,13 @@ vi.mock('@/lib/caption-overlay', async (importOriginal) => ({
   ) => (vertical ? { pngBase64: 'cG5n', verticalPngBase64: 'cG5n' } : { pngBase64: 'cG5n' })
 }))
 
-import { offersHandOff } from '@/lib/cloud-handoff-view'
-import { notifications } from '@/lib/notifications'
-import { revealInFileManagerLabel } from '@/lib/platform'
 import { LayoutTab } from '@/components/tabs/layout-tab'
+import { bannerSnapRect } from '@/lib/banner-place'
+import { offersHandOff } from '@/lib/cloud-handoff-view'
+import { resolveStreamOutputTopologyRequest } from '@/lib/go-live-output'
+import { notifications } from '@/lib/notifications'
+import { DEFAULT_OVERLAY_LAYOUT, overlaySnapRect } from '@/lib/overlay-layout'
+import { revealInFileManagerLabel } from '@/lib/platform'
 import { newScenes } from '@/lib/scene-app-picker'
 import { sourceVisibilityFromScene } from '@/lib/scene-presets'
 import { isMediaAccessSnapshotReady, systemAccessRows } from '@/lib/system-access'
@@ -77,8 +80,8 @@ import type {
   CommentsSendCommand,
   CommentsSendOperation,
   CompositorStatus,
-  DeviceList,
   Device,
+  DeviceList,
   HealthEvent,
   LayoutPreset,
   LayoutSettings,
@@ -95,13 +98,13 @@ import type {
   ResourceSelection,
   Scene,
   SceneCommitStatus,
+  SessionChatTotals,
   SessionLogEntry,
   SessionSources,
+  SessionSummary,
+  SourceSelection,
   SourceSwitchOperation,
   SourceSwitchParams,
-  SourceSelection,
-  SessionSummary,
-  SessionChatTotals,
   StreamOutputTopologyProbeResult,
   StreamScreen,
   StreamingSettings,
@@ -109,22 +112,36 @@ import type {
   VideorcAccountSnapshot,
   VideorcApi
 } from '../../../shared/backend'
-import { resolveStreamOutputTopologyRequest } from '@/lib/go-live-output'
 import { SCREEN_IMAGE_REFUSALS } from '../../../shared/screen-image-files'
-import { DEFAULT_OVERLAY_LAYOUT, overlaySnapRect } from '@/lib/overlay-layout'
-import { bannerSnapRect } from '@/lib/banner-place'
+import type {
+  WindowsLiveAudioSmokeRequest,
+  WindowsLiveAudioSmokeState
+} from '../../../shared/windows-live-audio-smoke'
+import {
+  ORIENTATION_DEFAULT_PRESET,
+  STORAGE_KEYS,
+  buildCameraSources,
+  buildCaptureSources,
+  buildMicrophoneSources,
+  defaultCaptureConfig,
+  videoPresets,
+  type CaptureConfig
+} from '../lib/capture'
+import { DEFAULT_BASIC_ENTITLEMENTS, STREAMING_LIMITS } from '../lib/entitlements'
+import { deriveNoiseCleanupView } from '../lib/noise-cleanup-view'
+import { SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY } from '../lib/screen-takeover-microphone'
+import type { SessionStopOrigin } from '../lib/session-stop'
+import { uiSettingsStorage } from '../lib/ui-settings-storage'
 import { BackgroundAssetsProvider } from './use-background-assets'
 import { useFrameSource } from './use-frame-source'
-import { useStudioMicMeterSource } from './use-studio-mic-sources'
-import { StudioMicVisualProvider, useStudioMicVisualLifecycle } from './use-studio-mic-visual'
 import {
+  STREAM_OUTPUT_SPLIT_UNAVAILABLE_REASON,
   StudioProvider,
   buildStreamOutputTopologyProbeParams,
   resolvedStreamingProfileEntitlementGate,
-  STREAM_OUTPUT_SPLIT_UNAVAILABLE_REASON,
   streamOutputTopologyBlockReason,
-  streamOutputTopologySplitRejected,
   streamOutputTopologyProbeRequestKey,
+  streamOutputTopologySplitRejected,
   useStudioAudio,
   useStudioBanners,
   useStudioCaptions,
@@ -139,25 +156,8 @@ import {
   type StudioCoreContextValue,
   type StudioRecordingContextValue
 } from './use-studio'
-import { DEFAULT_BASIC_ENTITLEMENTS, STREAMING_LIMITS } from '../lib/entitlements'
-import type { SessionStopOrigin } from '../lib/session-stop'
-import {
-  buildCameraSources,
-  buildCaptureSources,
-  buildMicrophoneSources,
-  defaultCaptureConfig,
-  ORIENTATION_DEFAULT_PRESET,
-  STORAGE_KEYS,
-  videoPresets,
-  type CaptureConfig
-} from '../lib/capture'
-import { deriveNoiseCleanupView } from '../lib/noise-cleanup-view'
-import { SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY } from '../lib/screen-takeover-microphone'
-import { uiSettingsStorage } from '../lib/ui-settings-storage'
-import type {
-  WindowsLiveAudioSmokeRequest,
-  WindowsLiveAudioSmokeState
-} from '../../../shared/windows-live-audio-smoke'
+import { useStudioMicMeterSource } from './use-studio-mic-sources'
+import { StudioMicVisualProvider, useStudioMicVisualLifecycle } from './use-studio-mic-visual'
 
 type BackendCommand = { id: string; method: string; params?: unknown }
 type DeferredBackendResponse = {
@@ -10709,6 +10709,39 @@ describe('real StudioProvider lifecycle', () => {
   // never stored its settings. The next launch saves the migrated keys from
   // the library again (the library is not made again), and lets them go once
   // the settings hold them.
+  it('boots from legacy Retro LCD settings and persists only supported preferences', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    uiSettingsStorage().setItem(
+      STORAGE_KEYS.settings,
+      JSON.stringify({
+        retroLcdStudio: true,
+        studioChat: true
+      })
+    )
+    const observations: StudioObservation[] = []
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.length > 0)
+    expect(observations.at(-1)!.core.settings.studioChat).toBe(true)
+    expect(observations.at(-1)!.core.settings).not.toHaveProperty('retroLcdStudio')
+    await waitForObservation(
+      () => !uiSettingsStorage().getItem(STORAGE_KEYS.settings)!.includes('retroLcdStudio')
+    )
+    expect(toastSpies.error).not.toHaveBeenCalled()
+  })
+
   it('replays a shortcut migration whose settings were never stored (review #5)', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend

@@ -1,11 +1,11 @@
 import {
   AlertIcon,
-  type AppIcon,
+  BuddyPageIcon,
   FrameIcon,
   ImageIcon,
   InfoIcon,
   LivestreamIcon,
-  BuddyPageIcon
+  type AppIcon
 } from '@/components/icons'
 import {
   lazy,
@@ -17,18 +17,17 @@ import {
   type ReactNode
 } from 'react'
 
-import { LCD_STATUS_DOT, LcdPanelNavRow, type StudioLook } from '@/components/lcd-panel'
 import { CohostPresenceDot } from '@/components/cohost-status'
-import { AgentsSessionRow } from '@/components/studio/agents-session-row'
-import { OpenPageCog } from '@/components/studio/open-page-cog'
+import { GoLiveButton } from '@/components/go-live-button'
 import { GroupedList } from '@/components/list-row'
 import { NavigableRow, NavigableRowHintLines } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
+import { RecordButton, type RecordButtonState } from '@/components/record-button'
 import { StatusDot } from '@/components/status-dot'
+import { AgentsSessionRow } from '@/components/studio/agents-session-row'
+import { OpenPageCog } from '@/components/studio/open-page-cog'
 import { SessionRuntimeAlert } from '@/components/studio/session-runtime-alert'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { GoLiveButton } from '@/components/go-live-button'
-import { RecordButton, type RecordButtonState } from '@/components/record-button'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
@@ -41,30 +40,33 @@ import {
   useStudioRecording,
   useStudioShell
 } from '@/hooks/use-studio'
+import { providerStreamOutputPlanOptions, streamOutputVideosForTargets } from '@/lib/capture'
 import { cohostPresenceView } from '@/lib/cohost-presence'
 import { activeCohostAlerts, cohostAlertLabel } from '@/lib/cohost-view'
-import { providerStreamOutputPlanOptions, streamOutputVideosForTargets } from '@/lib/capture'
+import { GO_LIVE_CHECKING_LABEL, GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
 import { liveDestinationsView, streamHealthFact } from '@/lib/live-session-view'
 import { openStudioAudio } from '@/lib/section-doors'
-import { MICROPHONE_SILENT_CODE } from '@/lib/session-runtime-notice'
+import { sessionOutputSummary } from '@/lib/session-output-video'
+import {
+  activitySavesRecording,
+  MICROPHONE_SILENT_CODE,
+  type SessionRuntimeNotice
+} from '@/lib/session-runtime-notice'
+import type { SessionStartFailure } from '@/lib/session-start-failure'
+import type { SettingsTabId } from '@/lib/settings-tabs'
+import { shortcutAccelerator } from '@/lib/shortcuts'
+import { connectionBlockedReason } from '@/lib/state-labels'
+import { classifyStreamHealthAttribution } from '@/lib/stream-health-attribution'
+import {
+  cameraCaptureNotice,
+  STOP_FINALIZE_OVERRUN_ALERT,
+  streamingSummary
+} from '@/lib/studio-session-view'
 import { topWatchdogAlert, visibleWatchdogAlerts } from '@/lib/watchdog-rank'
 import {
   dashboardCloudFromStatus,
   type LiveDashboardCloud
 } from '../../../../shared/live-dashboard'
-import { sessionOutputSummary } from '@/lib/session-output-video'
-import { classifyStreamHealthAttribution } from '@/lib/stream-health-attribution'
-import { GO_LIVE_CHECKING_LABEL, GO_LIVE_LABEL, RECORD_LABEL } from '@/lib/go-live-copy'
-import { activitySavesRecording, type SessionRuntimeNotice } from '@/lib/session-runtime-notice'
-import type { SessionStartFailure } from '@/lib/session-start-failure'
-import type { SettingsTabId } from '@/lib/settings-tabs'
-import { shortcutAccelerator } from '@/lib/shortcuts'
-import {
-  STOP_FINALIZE_OVERRUN_ALERT,
-  cameraCaptureNotice,
-  streamingSummary
-} from '@/lib/studio-session-view'
-import { connectionBlockedReason } from '@/lib/state-labels'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 /**
@@ -356,16 +358,12 @@ const GuestsSessionRow = lazy(async () => ({
 }))
 
 /** The Guests row while the room is open, in either look (plan 224 D16). */
-export function GuestsSessionSlot({
-  look = 'default'
-}: {
-  look?: StudioLook
-}): ReactElement | null {
+export function GuestsSessionSlot(): ReactElement | null {
   const { cloudStatus } = useStudioCloud()
   if (cloudStatus?.room?.phase !== 'open') return null
   return (
     <Suspense fallback={null}>
-      <GuestsSessionRow look={look} />
+      <GuestsSessionRow />
     </Suspense>
   )
 }
@@ -467,18 +465,11 @@ export function SessionNotices({
   )
 }
 
-/**
- * A session fact that goes to its page: the inspector's `NavigableRow`, or the
- * same fact on a Retro LCD screen (plan 197). The icon and indent are the
- * inspector's alone.
- */
 function FactRow({
-  look,
   icon,
   className,
   ...props
 }: {
-  look: StudioLook
   icon?: AppIcon
   className?: string
   label: string
@@ -486,11 +477,7 @@ function FactRow({
   hint?: ReactNode
   onNavigate: () => void
 }): ReactElement {
-  return look === 'lcd' ? (
-    <LcdPanelNavRow {...props} />
-  ) : (
-    <NavigableRow className={className} icon={icon} {...props} />
-  )
+  return <NavigableRow className={className} icon={icon} {...props} />
 }
 
 /**
@@ -505,8 +492,7 @@ function useSessionCloud(): LiveDashboardCloud | null {
 }
 
 /** A status dot's words: the row's text, or lit on the screen. */
-const dotClassName = (look: StudioLook): string =>
-  look === 'lcd' ? LCD_STATUS_DOT : 'text-sm text-foreground'
+const dotClassName = (): string => 'text-sm text-foreground'
 
 /**
  * The destinations while on air (plan 174 S3.2, B-4): one quiet "3 of 3 on
@@ -514,11 +500,7 @@ const dotClassName = (look: StudioLook): string =>
  * ("Twitch · Stopped"), each a door to the Destinations page. Nothing until the
  * backend has reported the session's legs: never an unmeasured zero.
  */
-export function LiveDestinationRows({
-  look = 'default'
-}: {
-  look?: StudioLook
-}): ReactElement | null {
+export function LiveDestinationRows(): ReactElement | null {
   const { streamTargets } = useStudioCore()
   const { openStudioPanel } = useWorkspaceNav()
   // Plan 184 C7: through Videorc Cloud the feed legs fold into one row.
@@ -530,13 +512,12 @@ export function LiveDestinationRows({
   return (
     <>
       <FactRow
-        look={look}
         icon={LivestreamIcon}
         label="Destinations"
         value={
           <span data-testid="session-destinations-summary">
             <StatusDot
-              className={dotClassName(look)}
+              className={dotClassName()}
               label={view.summary}
               tone={view.kind === 'quiet' ? 'live' : 'warn'}
             />
@@ -547,17 +528,12 @@ export function LiveDestinationRows({
       {view.kind === 'problems'
         ? view.problems.map((problem) => (
             <FactRow
-              look={look}
               key={problem.targetId}
               className="pl-9.5"
               label={problem.label}
               value={
                 <span data-testid="session-destination-problem">
-                  <StatusDot
-                    className={dotClassName(look)}
-                    label={problem.word}
-                    tone={problem.tone}
-                  />
+                  <StatusDot className={dotClassName()} label={problem.word} tone={problem.tone} />
                 </span>
               }
               onNavigate={() => openStudioPanel('live')}
@@ -573,7 +549,7 @@ export function LiveDestinationRows({
  * 174 S3.2, B-4): "Healthy" quietly, the earliest failing stage in a few
  * words when not. It opens Health, where the numbers behind it live.
  */
-export function LiveStreamHealthRow({ look = 'default' }: { look?: StudioLook }): ReactElement {
+export function LiveStreamHealthRow(): ReactElement {
   const { streamTargets } = useStudioCore()
   const {
     diagnosticStats,
@@ -595,12 +571,11 @@ export function LiveStreamHealthRow({ look = 'default' }: { look?: StudioLook })
   )
   return (
     <FactRow
-      look={look}
       icon={AlertIcon}
       label="Stream"
       value={
         <span data-testid="session-stream-health">
-          <StatusDot className={dotClassName(look)} label={fact.label} tone={fact.tone} />
+          <StatusDot className={dotClassName()} label={fact.label} tone={fact.tone} />
         </span>
       }
       onNavigate={() => setActive('diagnostics')}
@@ -620,7 +595,7 @@ export function LiveStreamHealthRow({ look = 'default' }: { look?: StudioLook })
 /** Where the Buddy row goes (plan 213 B2): its last hint line and the end of its name. */
 export const COHOST_ROW_OPENS = `Open ${WINDOW_NAMES.streamManager}`
 
-export function CohostSessionRow({ look = 'default' }: { look?: StudioLook }): ReactElement {
+export function CohostSessionRow(): ReactElement {
   const { cohostState } = useStudioChat()
   const { openCommentsWindow } = useStudioShell()
   const [nowMs, setNowMs] = useState(() => Date.now())
@@ -637,7 +612,6 @@ export function CohostSessionRow({ look = 'default' }: { look?: StudioLook }): R
 
   return (
     <FactRow
-      look={look}
       icon={BuddyPageIcon}
       label="Sidekick"
       hint={<NavigableRowHintLines lines={hintLines} />}
@@ -645,7 +619,7 @@ export function CohostSessionRow({ look = 'default' }: { look?: StudioLook }): R
         <>
           {alertLabels.length > 0 ? (
             <span data-testid="session-buddy-alert">
-              <StatusDot className={dotClassName(look)} label={alertLabels[0]} tone="warn" />
+              <StatusDot className={dotClassName()} label={alertLabels[0]} tone="warn" />
             </span>
           ) : (
             <span className="flex min-w-0 items-center gap-1.5">
@@ -727,11 +701,6 @@ export function TakeoverSection(): ReactElement {
   )
 }
 
-/**
- * The takeovers that can go on air, the one on air, and the line that says
- * what a click does: shared by the inspector's buttons and the Retro LCD
- * screen's rows (plan 197).
- */
 export function useTakeovers() {
   const { activateScreen, activeScreen, clearActiveScreen, screens, wsStatus } = useStudioCore()
   const ready = screens.filter((screen) => screen.status !== 'missing')

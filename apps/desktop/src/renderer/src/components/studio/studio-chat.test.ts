@@ -294,9 +294,8 @@ describe('StudioChatSection', () => {
     )
     const setSettings = mocked.core.setSettings as ReturnType<typeof vi.fn>
     const hide = setSettings.mock.calls.at(-1)?.[0] as (current: object) => object
-    expect(hide({ studioChat: true, retroLcdStudio: true })).toEqual({
-      studioChat: false,
-      retroLcdStudio: true
+    expect(hide({ studioChat: true })).toEqual({
+      studioChat: false
     })
     expect(mocked.toastInfo).toHaveBeenCalledTimes(1)
     const [title, options] = mocked.toastInfo.mock.calls[0] as [

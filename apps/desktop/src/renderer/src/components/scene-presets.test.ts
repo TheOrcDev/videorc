@@ -1,10 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement } from 'react'
-import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { uiSettingsStorage } from '@/lib/ui-settings-storage'
 import type { LayoutPreset } from '@/lib/backend'
-import { normalizeSceneVisual, type VisualSources } from '@/lib/scene-presets'
 import { defaultCaptureConfig } from '@/lib/capture'
 import {
   FOLLOW_SETTINGS_STORAGE_KEY,
@@ -12,7 +7,12 @@ import {
   resetFollowSettingsForTest
 } from '@/lib/follow-settings'
 import { openAddScene, openScenes } from '@/lib/scene-add-request'
+import { normalizeSceneVisual, type VisualSources } from '@/lib/scene-presets'
 import type { Scene } from '@/lib/scenes'
+import { uiSettingsStorage } from '@/lib/ui-settings-storage'
+import { act, createElement } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ScenesSection } from './scene-presets'
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
 vi.mock('@/hooks/use-studio', () => ({
@@ -93,8 +93,8 @@ afterEach(async () => {
   localStorage.removeItem(FOLLOW_SETTINGS_STORAGE_KEY)
   resetFollowSettingsForTest()
 })
-async function render(props: Parameters<typeof ScenesSection>[0] = {}): Promise<void> {
-  await act(async () => root.render(createElement(ScenesSection, props)))
+async function render(): Promise<void> {
+  await act(async () => root.render(createElement(ScenesSection)))
 }
 async function click(label: string): Promise<void> {
   const button = [...document.querySelectorAll('button')].find(

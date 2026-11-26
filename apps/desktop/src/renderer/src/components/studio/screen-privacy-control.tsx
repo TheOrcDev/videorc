@@ -10,13 +10,6 @@ import {
 } from '@/lib/screen-privacy-view'
 import { toastUserError } from '@/lib/user-error'
 
-// Plan 210 S8b: the Studio's one Hide screen state, for every Studio surface
-// that shows the control: the scene on stream's Screen field and its Retro
-// LCD row (plan 231 D8), and the Show stage's Screens while a room replaces
-// the Preview (plan 254 D4). A mirror reads and acts through this hook, never
-// a second state. Its own small module, so the Show stage's chunk takes the
-// control without the Scenes section's.
-
 /** What every Studio Hide screen control shows and does. */
 export interface ScreenPrivacyControl {
   /** Plan 249: the room's own privacy state, while it says more than Hidden. */

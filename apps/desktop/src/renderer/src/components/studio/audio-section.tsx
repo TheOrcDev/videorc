@@ -3,13 +3,11 @@ import type { ReactElement, ReactNode } from 'react'
 
 import { MicrophoneGainFader, SystemAudioGainFader } from '@/components/audio/gain-faders'
 import { DevicePicker } from '@/components/device-picker'
-import { LCD_MESSAGE, type StudioLook } from '@/components/lcd-panel'
 import { GroupedList } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { SourceItem } from '@/components/sources/source-item'
 import { StatusBadge } from '@/components/status-badge'
 import { MicLevelMeter } from '@/components/studio/mic-level-meter'
-import { RetroAudioSectionView } from '@/components/studio/retro-lcd-studio'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -34,23 +32,23 @@ import {
   systemAudioMeterInput,
   type MeterInput
 } from '@/lib/mic-meter-input'
+import { systemAudioStatus } from '@/lib/source-status'
+import { micSignalLabel, type MicMonitorState } from '@/lib/state-labels'
+import {
+  SYSTEM_AUDIO_IDLE_LINE,
+  requestSystemAudioResume,
+  systemAudioIdleReason,
+  systemAudioIssueCopy,
+  systemAudioRowDevice,
+  systemAudioSwitchView,
+  type SystemAudioSwitchView
+} from '@/lib/system-audio'
 import {
   TAKEOVER_MUTED_HINT,
   TAKEOVER_MUTED_LABEL,
   useTakeoverMicrophoneHold,
   type TakeoverMicrophoneHold
 } from '@/lib/takeover-microphone'
-import { systemAudioStatus } from '@/lib/source-status'
-import { micSignalLabel, type MicMonitorState } from '@/lib/state-labels'
-import {
-  SYSTEM_AUDIO_IDLE_LINE,
-  requestSystemAudioResume,
-  systemAudioRowDevice,
-  systemAudioIdleReason,
-  systemAudioIssueCopy,
-  systemAudioSwitchView,
-  type SystemAudioSwitchView
-} from '@/lib/system-audio'
 import { cn } from '@/lib/utils'
 
 /**
@@ -104,8 +102,7 @@ export function AudioSection(): ReactElement {
   const microphones = microphonePickerDevices(deviceList.devices)
   const audio = captureConfig.audio
   const platform = runtimeInfo?.platform
-  // Settings → General → Retro LCD (plan 197): the same section on a screen.
-  const retro = settings.retroLcdStudio === true
+
   // The same writes the Sources mixer and the hotkeys make: the session
   // applies them live (use-studio's live audio processing sync).
   const setAudio = (update: (current: AudioSettings) => AudioSettings): void =>
@@ -134,7 +131,7 @@ export function AudioSection(): ReactElement {
     platform,
     selectedDevice: selectedMicrophone,
     selectedName: captureConfig.sources.microphoneName,
-    switchStatus: <SourceSwitchStatus kind="microphone" look={retro ? 'lcd' : 'default'} />,
+    switchStatus: <SourceSwitchStatus kind="microphone" />,
     value: captureConfig.sources.microphoneId,
     onChange: (microphoneId) =>
       void switchSourceDeviceLive(
@@ -146,8 +143,7 @@ export function AudioSection(): ReactElement {
       void requestRemoteMicrophoneMute(microphoneMuted ? 'mute' : 'unmute')
   }
 
-  // Retro LCD (plan 201 S3) draws the same rows from the same props.
-  const View = retro ? RetroAudioSectionView : AudioSectionView
+  const View = AudioSectionView
   return (
     <View
       microphone={microphone}
@@ -166,7 +162,6 @@ export function AudioSection(): ReactElement {
                 <SystemAudioClipsLine
                   audioBusActive={audioBusActive}
                   checked={systemAudio.checked}
-                  look={retro ? 'lcd' : 'default'}
                 />
               ),
               sessionActive: isSessionActive,
@@ -192,17 +187,14 @@ export function AudioSection(): ReactElement {
  */
 function SystemAudioClipsLine({
   audioBusActive,
-  checked,
-  look
+  checked
 }: {
   audioBusActive: boolean
   checked: boolean
-  look: StudioLook
 }): ReactElement | null {
   const clips = useStudioReplay()
   return (
     <SystemAudioIdleLine
-      look={look}
       reason={systemAudioIdleReason({
         audioBusActive,
         checked,
@@ -218,19 +210,13 @@ function SystemAudioClipsLine({
  * for a moment and comes back, so nothing jumps.
  */
 export function SystemAudioIdleLine({
-  reason,
-  look = 'default'
+  reason
 }: {
   reason: 'clips-off' | null
-  /** On a Retro LCD screen, a sentence in the screen's dim ink. */
-  look?: StudioLook
 }): ReactElement | null {
   if (reason !== 'clips-off') return null
   return (
-    <p
-      className={look === 'lcd' ? LCD_MESSAGE : 'text-xs text-muted-foreground'}
-      data-videorc-studio-system-audio-idle=""
-    >
+    <p className={'text-xs text-muted-foreground'} data-videorc-studio-system-audio-idle="">
       {SYSTEM_AUDIO_IDLE_LINE}
     </p>
   )

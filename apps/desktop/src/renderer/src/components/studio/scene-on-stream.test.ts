@@ -188,14 +188,6 @@ const buttonNamed = (text: string): HTMLButtonElement | undefined =>
   [...document.querySelectorAll<HTMLButtonElement>('button')].find(
     (entry) => entry.textContent === text
   )
-async function pick(triggerLabel: string, id: string): Promise<void> {
-  const trigger = document.querySelector<HTMLElement>(`button[aria-label="${triggerLabel}"]`)!
-  await act(async () => trigger.click())
-  await act(async () =>
-    document.querySelector<HTMLElement>(`[cmdk-item][data-value="${id}"]`)!.click()
-  )
-}
-
 describe('the scene on stream’s Screen (plan 231 D8)', () => {
   it('says which scene is on stream and what it shows, in the scene’s words', async () => {
     core()
@@ -492,69 +484,5 @@ describe('the scene on stream’s Layout (plan 231 D8, D11, D19)', () => {
     expect(vertical.querySelector('[data-slot="screen-framing-control"]')?.textContent).toContain(
       'Framing'
     )
-  })
-})
-
-describe('Retro LCD: the scene on stream on a screen (plan 197, plan 231 S6)', () => {
-  const pressRow = (): HTMLButtonElement =>
-    [...container.querySelectorAll<HTMLButtonElement>('[data-slot="lcd-panel-press-row"]')].find(
-      (row) => row.textContent?.startsWith('Hide screen')
-    )!
-
-  it('puts On stream, Screen, Hide screen and Layout on one screen', async () => {
-    core()
-    await render(() => fields({ look: 'lcd' }))
-    const screen = container.querySelector(
-      '[data-slot="scene-on-stream"] [data-slot="lcd-display"]'
-    )!
-    expect(screen).not.toBeNull()
-    expect(screen.textContent).toContain('On stream')
-    expect(screen.textContent).toContain('Figma')
-    // The scene's words, and Change screen… as the screen's action.
-    expect(screen.textContent).toContain('Figma · front window')
-    const change = [...screen.querySelectorAll<HTMLButtonElement>('button')].find((button) =>
-      button.textContent?.includes('Change screen…')
-    )!
-    await act(async () => change.click())
-    expect(onChangeScreen).toHaveBeenCalledExactlyOnceWith()
-    expect(screen.querySelector('button[aria-label="Layout"]')?.textContent).toContain(
-      'Screen + camera'
-    )
-  })
-
-  it('saves a layout chosen on the screen into the scene on stream', async () => {
-    const { applyCameraPreset } = core()
-    await render(() => fields({ look: 'lcd' }))
-    await pick('Layout', 'screen-only')
-    expect(applyCameraPreset).toHaveBeenCalledExactlyOnceWith({ layoutPreset: 'screen-only' })
-  })
-
-  it('hides from the screen’s own row: Off, then On lit while hidden', async () => {
-    const { hideScreen } = core({ privacy: { hidden: false } })
-    await render(() => fields({ look: 'lcd' }))
-    expect(pressRow().textContent).toBe('Hide screenOff')
-    expect(pressRow().getAttribute('aria-pressed')).toBe('false')
-    await act(async () => pressRow().focus())
-    expect(tooltip()).toContain('Hide screen')
-    expect(document.querySelector('[data-slot="tooltip-content"] kbd')?.textContent).toBe('⌃⌥H')
-    await act(async () => pressRow().click())
-    expect(hideScreen).toHaveBeenCalledTimes(1)
-
-    const shown = core({ privacy: { hidden: true, reason: 'you' } })
-    await render(() => fields({ look: 'lcd' }))
-    expect(pressRow().textContent).toBe('Hide screenOn')
-    expect(pressRow().getAttribute('aria-pressed')).toBe('true')
-    await act(async () => pressRow().click())
-    expect(shown.showScreen).toHaveBeenCalledTimes(1)
-  })
-
-  it('says why a hide is refused on the screen', async () => {
-    core({ privacy: { hidden: false, unavailable: SCREEN_HIDE_UNAVAILABLE } })
-    await render(() => fields({ look: 'lcd' }))
-    expect(pressRow().disabled).toBe(true)
-    const wrapper = pressRow().closest<HTMLElement>('[data-slot="disabled-reason"]')!
-    expect(
-      document.getElementById(wrapper.getAttribute('aria-describedby') ?? '')?.textContent
-    ).toBe(SCREEN_HIDE_UNAVAILABLE)
   })
 })

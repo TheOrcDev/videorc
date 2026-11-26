@@ -1,38 +1,20 @@
-import { useId, useRef, useState, type ReactElement, type ReactNode } from 'react'
+import { type ReactElement, type ReactNode } from 'react'
 
-import {
-  LCD_LIST_GROUP,
-  LCD_LIST_ITEM,
-  LCD_MESSAGE,
-  LCD_VALUE_BUTTON,
-  LcdPanel,
-  LcdPanelAction,
-  LcdPanelPressRow,
-  LcdPanelRow,
-  LcdPanelValue,
-  LcdPixelChevron,
-  LcdPopupScreen,
-  type StudioLook
-} from '@/components/lcd-panel'
 import { SectionLabel } from '@/components/section-label'
 import { SourcePermissionAlerts } from '@/components/sources/source-permission-alerts'
-import { ScreenFramingControl, VERTICAL_SCENES } from '@/components/studio/scenes-gallery'
+import { ScreenFramingControl } from '@/components/studio/scenes-gallery'
 import {
   ScreenHiddenChip,
-  type ScreenPrivacyControl,
-  useScreenPrivacyControl
+  useScreenPrivacyControl,
+  type ScreenPrivacyControl
 } from '@/components/studio/screen-privacy-control'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import {
-  editVerticalStreamLayout,
   LayoutChoice,
   VerticalStreamLayoutControl
 } from '@/components/studio/vertical-stream-layout-control'
 import { Button } from '@/components/ui/button'
-import { Command, CommandGroup, CommandItem, CommandList } from '@/components/ui/command'
 import { DisabledReason } from '@/components/ui/disabled-reason'
-import { LcdDisplaySeparator } from '@/components/ui/lcd-display'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   Select,
   SelectContent,
@@ -48,8 +30,6 @@ import type { LayoutPreset, VerticalScreenFraming } from '@/lib/backend'
 import {
   hasSelectedCameraSource,
   hasSelectedScreenSource,
-  layoutPresetNeedsCamera,
-  layoutPresetNeedsScreen,
   layoutPresetOrientation,
   simulcastArmed,
   sourceStandIn
@@ -64,7 +44,6 @@ import {
 } from '@/lib/scene-section'
 import { SCREEN_HIDDEN_LABEL, screenPrivacyActionLabel } from '@/lib/screen-privacy-view'
 import { standInLine } from '@/lib/source-status'
-import { cn } from '@/lib/utils'
 
 // Plan 231 D8: under the cards, the scene on stream's own fields. This is
 // the answer to "the relation between screen and scene": the Screen the
@@ -80,18 +59,15 @@ import { cn } from '@/lib/utils'
  * the screen first, and Cancel keeps the old layout.
  */
 export function SceneOnStreamFields({
-  look = 'default',
   changeScreenReason = null,
   onChangeScreen
 }: {
-  look?: StudioLook
   /** Why Change screen… can't change the scene on stream now, or null. */
   changeScreenReason?: string | null
   onChangeScreen: (options?: { forLayout?: LayoutPreset }) => void
 }): ReactElement | null {
   const studio = useStudioCore()
-  const { sceneOnStream, captureConfig, applyCameraPreset, sceneLibraryActions, deviceList } =
-    studio
+  const { sceneOnStream, captureConfig, applyCameraPreset, deviceList } = studio
   const privacy = useScreenPrivacyControl()
   const { sources } = captureConfig
   const standIn = sourceStandIn(sources, 'capture', deviceList.devices)
@@ -141,88 +117,6 @@ export function SceneOnStreamFields({
       Change screen…
     </Button>
   )
-
-  if (look === 'lcd') {
-    const vertical = sceneOnStream.layouts.vertical
-    const verticalChoices = VERTICAL_SCENES.map((scene) => ({
-      value: scene.id,
-      label: scene.label,
-      disabled:
-        (layoutPresetNeedsCamera(scene.id) && !hasCamera) ||
-        (layoutPresetNeedsScreen(scene.id) && (sceneOnStream.shows.kind === 'none' || !hasScreen))
-    }))
-    const readOnly = sceneLibraryActions.readOnly
-    return (
-      <div className="flex flex-col gap-2" data-slot="scene-on-stream">
-        <LcdPanel aria-label={`On stream: ${sceneOnStream.name}`}>
-          <LcdPanelRow label="On stream">
-            <LcdPanelValue data-testid="scene-on-stream-name">{sceneOnStream.name}</LcdPanelValue>
-          </LcdPanelRow>
-          <LcdDisplaySeparator />
-          <LcdPanelRow label="Screen">
-            <LcdPanelValue>{words}</LcdPanelValue>
-            <DisabledReason reason={changeScreenReason}>
-              <LcdPanelAction
-                disabled={changeScreenReason !== null}
-                onClick={() => onChangeScreen()}
-              >
-                Change screen…
-              </LcdPanelAction>
-            </DisabledReason>
-          </LcdPanelRow>
-          {note ? <p className={LCD_MESSAGE}>{note}</p> : null}
-          <div aria-live="polite" className={cn(LCD_MESSAGE, 'empty:sr-only')}>
-            <SourceSwitchStatus kind="capture" look="lcd" />
-          </div>
-          {standIn ? (
-            <p className={LCD_MESSAGE} data-slot="source-stand-in">
-              {standInLine(standIn)}
-            </p>
-          ) : null}
-          <RetroScreenPrivacyRow control={privacy} />
-          <LcdDisplaySeparator />
-          <LcdChoicePicker
-            choices={choices}
-            label="Layout"
-            placeholder={freeform ? 'Freeform' : undefined}
-            value={freeform ? undefined : layout.layoutPreset}
-            onChange={chooseLayout}
-          />
-          {cameraLine ? <p className={LCD_MESSAGE}>{cameraLine}</p> : null}
-          {framing ? (
-            <LcdChoicePicker
-              choices={FRAMING_CHOICES}
-              label="Framing"
-              value={framing.value}
-              onChange={framing.onChange}
-            />
-          ) : null}
-          {verticalStream ? (
-            <>
-              <LcdDisplaySeparator />
-              <LcdChoicePicker
-                choices={verticalChoices}
-                disabled={readOnly}
-                label="Vertical stream"
-                value={vertical.layoutPreset}
-                onChange={(layoutPreset) => void editVerticalStreamLayout(studio, { layoutPreset })}
-              />
-              <LcdChoicePicker
-                choices={FRAMING_CHOICES}
-                disabled={readOnly}
-                label="Vertical framing"
-                value={vertical.verticalScreenFraming}
-                onChange={(verticalScreenFraming) =>
-                  void editVerticalStreamLayout(studio, { verticalScreenFraming })
-                }
-              />
-            </>
-          ) : null}
-        </LcdPanel>
-        <SourcePermissionAlerts className="px-0 pt-0" only="screen-recording" />
-      </div>
-    )
-  }
 
   return (
     // A nested section under the cards (the design skill's rhythm): a
@@ -351,11 +245,6 @@ export function SceneOnStreamFields({
   )
 }
 
-const FRAMING_CHOICES: { value: VerticalScreenFraming; label: string }[] = [
-  { value: 'fill', label: 'Fill' },
-  { value: 'fit', label: 'Fit' }
-]
-
 /** One field: its name and value on the left, its control on the right, its lines under them. */
 function SceneField({
   field,
@@ -436,124 +325,5 @@ export function HideScreenButton({ control }: { control: ScreenPrivacyControl })
         </ShortcutTooltip>
       )}
     </span>
-  )
-}
-
-/**
- * Hide screen on the Retro LCD's scene screen (plan 210 S8b): a row that
- * covers something, like a takeover's. Off dim, On lit while the screen is
- * hidden, and its key on hover. Only a hide is ever refused, with its reason.
- */
-export function RetroScreenPrivacyRow({
-  control
-}: {
-  control: ScreenPrivacyControl
-}): ReactElement {
-  const { hidden, accelerator, platform, disabledReason, toggle } = control
-  const row = (
-    <LcdPanelPressRow
-      disabled={disabledReason !== null}
-      label={control.statusLabel ?? 'Hide screen'}
-      pressed={hidden}
-      onPressedChange={toggle}
-    />
-  )
-  return disabledReason ? (
-    <DisabledReason className="flex flex-col" reason={disabledReason}>
-      {row}
-    </DisabledReason>
-  ) : (
-    <ShortcutTooltip
-      accelerator={accelerator}
-      className="flex flex-col"
-      label={screenPrivacyActionLabel(hidden)}
-      platform={platform}
-    >
-      {row}
-    </ShortcutTooltip>
-  )
-}
-
-/**
- * A short list of choices on an LCD screen (the layout, Fill or Fit): the
- * value lit with a pixel chevron, and its list a small screen in the opaque
- * popup, as `LcdDevicePicker` draws a device's.
- */
-function LcdChoicePicker<T extends string>({
-  label,
-  value,
-  choices,
-  placeholder,
-  disabled = false,
-  onChange
-}: {
-  label: string
-  value: T | undefined
-  choices: readonly { value: T; label: string; disabled?: boolean }[]
-  /** What the value reads while no choice is the current one (Freeform). */
-  placeholder?: string
-  disabled?: boolean
-  onChange: (value: T) => void
-}): ReactElement {
-  const id = useId()
-  const popupId = `${id}-popup`
-  const listRef = useRef<HTMLDivElement>(null)
-  const [open, setOpen] = useState(false)
-  const current = choices.find((choice) => choice.value === value)
-  return (
-    <LcdPanelRow htmlFor={id} label={label}>
-      <Popover open={open} onOpenChange={setOpen}>
-        <PopoverTrigger
-          disabled={disabled}
-          id={id}
-          render={
-            <button
-              aria-controls={open ? popupId : undefined}
-              aria-expanded={open}
-              aria-haspopup="listbox"
-              aria-label={label}
-              className={cn(LCD_VALUE_BUTTON, 'data-popup-open:bg-(--lcd-display-ink-unlit)')}
-              data-slot="lcd-choice-trigger"
-              role="combobox"
-              type="button"
-            />
-          }
-        >
-          <span className="min-w-0 truncate">{current?.label ?? placeholder}</span>
-          <LcdPixelChevron />
-        </PopoverTrigger>
-        <PopoverContent
-          align="end"
-          className="w-60 gap-0 p-1"
-          id={popupId}
-          // The list takes focus: its keys move the highlight.
-          initialFocus={listRef}
-        >
-          <LcdPopupScreen>
-            <Command defaultValue={value} shouldFilter={false}>
-              <CommandList label={label} ref={listRef}>
-                <CommandGroup className={LCD_LIST_GROUP}>
-                  {choices.map((choice) => (
-                    <CommandItem
-                      key={choice.value}
-                      className={LCD_LIST_ITEM}
-                      data-checked={choice.value === value}
-                      disabled={choice.disabled && choice.value !== value}
-                      value={choice.value}
-                      onSelect={() => {
-                        setOpen(false)
-                        if (choice.value !== value) onChange(choice.value)
-                      }}
-                    >
-                      <span className="min-w-0 flex-1 truncate">{choice.label}</span>
-                    </CommandItem>
-                  ))}
-                </CommandGroup>
-              </CommandList>
-            </Command>
-          </LcdPopupScreen>
-        </PopoverContent>
-      </Popover>
-    </LcdPanelRow>
   )
 }
