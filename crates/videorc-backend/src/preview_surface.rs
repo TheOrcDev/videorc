@@ -14,7 +14,7 @@ use crate::native_preview_host::{
     NativePreviewHostLifecycle, NativePreviewHostLifecycleUpdate,
 };
 use crate::protocol::{
-    CompositorSceneSourceKind, CompositorSceneSourceStatus, CompositorState,
+    CompositorSceneSourceKind, CompositorSceneSourceStatus, CompositorState, DiagnosticBottleneck,
     MainOwnedPreviewSurfaceBounds, MainOwnedPreviewSurfaceBoundsParams, PreviewSurfaceBacking,
     PreviewSurfaceBoundsParams, PreviewSurfaceCreateParams, PreviewSurfacePresentParams,
     PreviewSurfaceSource, PreviewSurfaceState, PreviewSurfaceStatus, PreviewTransport, Scene,
@@ -908,6 +908,12 @@ async fn destroy_preview_surface_with_reconcile_hook(
             next.preview_repeated_frames = 0;
             next.preview_latency_ms = None;
             next.preview_dropped_frames = 0;
+            // The retired compositor may never publish another sample. Clear
+            // its last Preview warning with the metrics, but keep unrelated
+            // capture, recording and audio warnings intact.
+            if next.bottleneck == DiagnosticBottleneck::Preview {
+                next.bottleneck = DiagnosticBottleneck::None;
+            }
             next.updated_at = Utc::now().to_rfc3339();
             *diagnostics = next.clone();
             state.emit_event(
@@ -2975,6 +2981,7 @@ mod tests {
             diagnostics.preview_target_fps = Some(60.0);
             diagnostics.preview_surface_backing = PreviewSurfaceBacking::ElectronBrowserWindow;
             diagnostics.preview_source_pixels_present = true;
+            diagnostics.bottleneck = DiagnosticBottleneck::Preview;
         }
 
         release.open();
@@ -2994,6 +3001,7 @@ mod tests {
             PreviewSurfaceBacking::ElectronBrowserWindow
         );
         assert!(diagnostics.preview_source_pixels_present);
+        assert_eq!(diagnostics.bottleneck, DiagnosticBottleneck::Preview);
         drop(diagnostics);
 
         destroy_preview_surface(&state)
@@ -5119,6 +5127,60 @@ mod tests {
         assert_eq!(status.input_to_present_latency_ms, Some(20));
         assert_eq!(diagnostics.preview_dropped_frames, 7);
         assert_eq!(diagnostics.preview_input_to_present_latency_ms, Some(20));
+    }
+
+    #[tokio::test]
+    async fn destroy_surface_clears_only_the_preview_bottleneck() {
+        // A compositor's last diagnostic sample can report dropped Preview
+        // frames just before closing. Once its run stops, no later compositor
+        // sample arrives to clear that classification for Health.
+        for bottleneck in [
+            DiagnosticBottleneck::Preview,
+            DiagnosticBottleneck::None,
+            DiagnosticBottleneck::Capture,
+            DiagnosticBottleneck::Render,
+            DiagnosticBottleneck::Encoder,
+            DiagnosticBottleneck::Audio,
+            DiagnosticBottleneck::Device,
+            DiagnosticBottleneck::Unknown,
+        ] {
+            let state = test_state();
+            let mut events = state.events.subscribe();
+            {
+                let mut diagnostics = state.diagnostics.lock().await;
+                diagnostics.bottleneck = bottleneck.clone();
+                diagnostics.preview_transport = PreviewTransport::ElectronProofSurface;
+                diagnostics.preview_dropped_frames = 3;
+            }
+
+            let status = destroy_preview_surface(&state)
+                .await
+                .expect("preview surface lifecycle available");
+            assert_eq!(status.state, PreviewSurfaceState::Stopped);
+            let expected = if bottleneck == DiagnosticBottleneck::Preview {
+                DiagnosticBottleneck::None
+            } else {
+                bottleneck
+            };
+            let diagnostics = state.diagnostics.lock().await;
+            assert_eq!(diagnostics.bottleneck, expected);
+            assert_eq!(diagnostics.preview_dropped_frames, 0);
+            assert_eq!(diagnostics.preview_transport, PreviewTransport::Unavailable);
+            drop(diagnostics);
+
+            // The live Health page consumes the event, not just the stored
+            // diagnostics returned by a later diagnostics.stats request.
+            let mut published = None;
+            while let Ok(event) = events.try_recv() {
+                if event.event == "diagnostics.stats" {
+                    published = Some(event.payload);
+                }
+            }
+            assert_eq!(
+                published.expect("destroy publishes diagnostics")["bottleneck"],
+                serde_json::to_value(expected).expect("bottleneck serializes")
+            );
+        }
     }
 
     #[tokio::test]
