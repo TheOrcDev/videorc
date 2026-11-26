@@ -168,8 +168,14 @@ impl RenderOnce for Slider {
         let thumb = gpui_base::SliderThumb::new(&self.state)
             .disabled(disabled)
             .when(!disabled, |thumb| {
-                thumb.on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                    press_focus.focus(window, cx);
+                // Capture phase: the thumb's own bubble-phase press stops
+                // propagation (gpui-base starts its drag there) before a
+                // bubble listener here would run, so a press on the thumb
+                // never focused (L6, Scene Margin on 638dbecea).
+                thumb.capture_any_mouse_down(move |event, window, cx| {
+                    if event.button == gpui::MouseButton::Left {
+                        press_focus.focus(window, cx);
+                    }
                 })
             })
             .absolute()
@@ -223,8 +229,10 @@ impl RenderOnce for Slider {
                 .disabled(disabled)
                 .when(!disabled, |track| {
                     let focus = focus.clone();
-                    track.on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-                        focus.focus(window, cx);
+                    track.capture_any_mouse_down(move |event, window, cx| {
+                        if event.button == gpui::MouseButton::Left {
+                            focus.focus(window, cx);
+                        }
                     })
                 })
                 .flex()

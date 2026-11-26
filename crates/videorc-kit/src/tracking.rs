@@ -156,10 +156,10 @@ impl RenderOnce for TrackedText {
         let glow = self.glow.then(|| {
             let t = crate::theme::resolve(None, window, cx);
             // Faint enough that the letter-spaced labels keep Electron's
-            // weight: stronger copies read as a bold face (L7's 2x crops on
-            // 0127cb4cc). Electron's light glow barely shows on the pale
-            // screen, so light stays at half of dark's.
-            if crate::theme::is_dark(t) { 0.28 } else { 0.12 }
+            // crisp medium weight: stronger copies read as a bold, blurred
+            // face (L7's 2x crops on 0127cb4cc and 301eabc92). Electron's
+            // light glow barely shows on the pale screen.
+            if crate::theme::is_dark(t) { 0.2 } else { 0.12 }
         });
         let fit = self.truncate.as_ref().map(|id| fit_state(id, window, cx));
         let (natural, cut) = fit
