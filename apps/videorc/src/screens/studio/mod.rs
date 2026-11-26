@@ -726,7 +726,12 @@ impl StudioPage {
     /// keys on the mode it opens in again; without the native surface, "Open
     /// preview" and "Retry preview" (`preview-stage.tsx:648-664`). Every
     /// platform: Open in its own window only where the Preview can float.
-    fn stage_buttons(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn stage_buttons(
+        &self,
+        centred: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let view = stage_view(self.preview.read(cx));
         if view.docked || view.buttons.is_empty() {
             return None;
@@ -777,9 +782,87 @@ impl StudioPage {
             div()
                 .flex()
                 .flex_wrap()
-                .justify_end()
+                .map(|row| {
+                    if centred {
+                        row.justify_center()
+                    } else {
+                        row.justify_end()
+                    }
+                })
                 .items_center()
                 .gap(px(8.))
+                .children(buttons)
+                .into_any_element(),
+        )
+    }
+
+    /// Whether the closed Preview's card is the stage (`DetachedPreviewCard`,
+    /// closed, with the native surface): its two homes, Show here and Open
+    /// in its own window.
+    fn closed_card_shown(&self, cx: &App) -> bool {
+        let preview = self.preview.read(cx);
+        preview.is_closed()
+            && stage_view(preview)
+                .buttons
+                .iter()
+                .any(|button| button.action == PreviewAction::OpenDocked)
+    }
+
+    /// `DetachedPreviewCard` while the Preview is closed
+    /// (`preview-stage.tsx:557-637`): over the whole stage, a `bg-inset`
+    /// panel with the camera glyph (`CameraIcon size-8 duotone`, muted), the
+    /// closed words (`PREVIEW_CLOSED_COPY`: `text-sm font-medium`, then the
+    /// detail in `text-xs` muted), and both homes centred under them
+    /// (`gap-3` between the three, `gap-2` between the buttons). The
+    /// native surface is hidden while closed, so the card covers the slot.
+    fn closed_card(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.closed_card_shown(cx) {
+            return None;
+        }
+        let theme = theme::resolve(None, window, cx);
+        let copy = words::LIVES_IN_ITS_OWN_WINDOW;
+        let buttons = self.stage_buttons(true, window, cx);
+        Some(
+            div()
+                .id("studio-preview-closed-card")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .rounded(px(radius::PANEL))
+                .bg(hsla(theme.inset))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(12.))
+                .px(px(24.))
+                .child(icon(
+                    IconName::VideoCameraDuotone,
+                    32.,
+                    hsla(theme.muted_foreground),
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .line_height(px(20.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(hsla(theme.foreground))
+                                .child(copy.title),
+                        )
+                        .child(
+                            div()
+                                .type_scale(text::META)
+                                .text_color(hsla(theme.muted_foreground))
+                                .child(copy.detail),
+                        ),
+                )
                 .children(buttons)
                 .into_any_element(),
         )
@@ -796,8 +879,12 @@ impl StudioPage {
             let preview = self.preview.read(cx);
             (preview.is_closed(), preview.can_float())
         };
+        if closed && self.closed_card_shown(cx) {
+            // The closed card holds its own buttons (`closed_card`).
+            return None;
+        }
         if closed || !can_float {
-            return self.stage_buttons(window, cx);
+            return self.stage_buttons(false, window, cx);
         }
         let fix = self.permission_fix(cx);
         let preview = self.preview.read(cx);
@@ -1018,7 +1105,8 @@ impl Render for StudioPage {
                         )
                         // P135: over the slot's "Opening preview…" until the
                         // first frame (`preview-stage.tsx:373-380`).
-                        .child(self.preview_startup.clone()),
+                        .child(self.preview_startup.clone())
+                        .children(self.closed_card(window, cx)),
                 )
                 .into_any_element()
         };
