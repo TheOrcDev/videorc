@@ -306,6 +306,8 @@ impl SettingsScreen {
         if pairing.addresses.len() > 1 {
             let mut networks = SegmentedControl::new("pair-network")
                 .accessibility_label("Network")
+                // Electron's default w-fit, centred (phone-remote-section.tsx).
+                .fit(true)
                 .small(true)
                 .value(Some(pairing.address.clone()));
             for address in &pairing.addresses {
