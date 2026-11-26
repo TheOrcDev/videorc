@@ -366,12 +366,16 @@ impl RenderOnce for ListRow {
             }
             Some(on_click) => {
                 let ring = focus_ring(t);
+                // The content paints the selected accent; the button must
+                // not paint it again (two layers read darker / lighter than
+                // Electron's single `bg-accent`).
                 gpui_base::Button::new(self.id)
                     .disabled(self.disabled)
                     .w_full()
                     .rounded(px(corner))
-                    .when(self.selected, |row| row.bg(hsla(t.accent)))
-                    .when(interactive, |row| {
+                    // A selected row's content already wears the accent;
+                    // hovering it must not add a second layer.
+                    .when(interactive && !self.selected, |row| {
                         row.hover(|style| style.bg(hsla(t.accent)))
                     })
                     .when(self.disabled, |row| row.opacity(0.5))
@@ -394,6 +398,8 @@ impl RenderOnce for ListRow {
 pub struct GroupedList {
     id: Option<ElementId>,
     label: Option<SharedString>,
+    /// " · n" after the label at normal weight.
+    label_count: Option<SharedString>,
     /// Screen-reader name when there is no visible section label.
     accessibility_label: Option<SharedString>,
     rows: SmallVec<[AnyElement; 4]>,
@@ -405,6 +411,7 @@ impl GroupedList {
         GroupedList {
             id: None,
             label: None,
+            label_count: None,
             accessibility_label: None,
             rows: SmallVec::new(),
             appearance: None,
@@ -414,6 +421,13 @@ impl GroupedList {
     /// Stable ID for an unnamed group, or repeated groups with the same label.
     pub fn id(mut self, id: impl Into<ElementId>) -> Self {
         self.id = Some(id.into());
+        self
+    }
+
+    /// A count after the label at normal weight (Sidekick Reports'
+    /// "Moments · 1", `font-normal tabular-nums`).
+    pub fn label_count(mut self, count: impl Into<SharedString>) -> Self {
+        self.label_count = Some(count.into());
         self
     }
 
@@ -475,10 +489,14 @@ impl RenderOnce for GroupedList {
                 )
             })
         });
+        let label_count = self.label_count;
         let root = div().flex().flex_col().gap(px(6.0));
         let root = root
             .children(self.label.map(|label| {
-                let label = SectionLabel::new(label);
+                let label = match label_count {
+                    Some(count) => SectionLabel::new(label).count(count),
+                    None => SectionLabel::new(label),
+                };
                 div().px(px(4.0)).child(match appearance {
                     Some(appearance) => label.appearance(appearance),
                     None => label,

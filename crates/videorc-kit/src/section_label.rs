@@ -12,6 +12,8 @@ use crate::{
 #[derive(IntoElement)]
 pub struct SectionLabel {
     words: SharedString,
+    /// " · n" after the words at normal weight (Reports' "Moments · 1").
+    count: Option<SharedString>,
     appearance: Option<Appearance>,
 }
 
@@ -19,8 +21,16 @@ impl SectionLabel {
     pub fn new(words: impl Into<SharedString>) -> Self {
         SectionLabel {
             words: words.into(),
+            count: None,
             appearance: None,
         }
+    }
+
+    /// A count after the words, `<span className="font-normal tabular-nums">
+    /// · {n}</span>`: the same colour, normal weight.
+    pub fn count(mut self, count: impl Into<SharedString>) -> Self {
+        self.count = Some(count.into());
+        self
     }
 
     /// Draws in this appearance instead of the window's (the gallery).
@@ -34,8 +44,14 @@ impl RenderOnce for SectionLabel {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
         div()
+            .flex()
             .type_scale(text::LABEL)
             .text_color(hsla(t.subtle))
             .child(self.words)
+            .children(self.count.map(|count| {
+                div()
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .child(SharedString::from(format!("\u{a0}· {count}")))
+            }))
     }
 }
