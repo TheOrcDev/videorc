@@ -90,7 +90,9 @@ pub use checkbox::{Checkbox, CheckboxChecked};
 pub use collapsible::Collapsible;
 pub use context_menu::ContextMenu;
 pub use dialog::{Dialog, DialogHandle, DialogSize};
-pub use dropdown_menu::{DropdownMenu, Menu, MenuAlign, MenuItem, MenuItemTone, MenuShortcut};
+pub use dropdown_menu::{
+    DropdownMenu, Menu, MenuAlign, MenuHeader, MenuItem, MenuItemTone, MenuShortcut,
+};
 pub use empty::Empty;
 pub use field::{Field, FieldError, FieldGroup, FieldGroupVariant, FieldOrientation};
 pub use hover_card::HoverCard;
