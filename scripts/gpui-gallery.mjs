@@ -383,21 +383,6 @@ function electronOnly({ screens, baselineDir, parsed }) {
   }
 }
 
-/**
- * Merges `patch` into the JSON object the settings store keeps under `key`;
- * answers a function that puts the old value back.
- */
-async function patchSetting(rpc, { key, patch }) {
-  const current = await rpc('ui.settings.get', { keys: [key] })
-  const stored = current?.entries?.[key]
-  const parsed = typeof stored === 'string' ? JSON.parse(stored) : (stored ?? {})
-  await rpc('ui.settings.set', { put: { [key]: JSON.stringify({ ...parsed, ...patch }) } })
-  return () =>
-    stored === undefined
-      ? rpc('ui.settings.set', { delete: [key] })
-      : rpc('ui.settings.set', { put: { [key]: stored } })
-}
-
 async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed }) {
   const jxa = join(stateDir, 'windows.js')
   writeFileSync(jxa, WINDOWS_JXA)
@@ -508,10 +493,6 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
         parity: rowsFor(parsed, screen),
         shots: []
       }
-      // A look the app keeps in a setting (Retro LCD): on for this screen,
-      // then back as it was. The app applies store changes live.
-      const restore = screen.settings ? await patchSetting(rpc, screen.settings) : null
-      if (restore) await sleep(SETTLE_MS)
       if (screen.seed) {
         await command(screen.seed.command, screen.seed.params ?? {})
         await sleep(SETTLE_MS)
@@ -611,7 +592,6 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
         )
         await sleep(SETTLE_MS)
       }
-      if (restore) await restore().catch((error) => log(`${screen.id}: ${error.message}`))
       if (screen.toast) await sleep(TOAST_MS + 500)
       if (screen.restart) {
         await stop()

@@ -35,13 +35,12 @@ use videorc_kit::navigable_row::NavigableRow;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::popover::Popover;
 use videorc_kit::select::Select;
-use videorc_kit::shortcut_keys::{self, ShortcutKeys, ShortcutStyle, parse_accelerator};
+use videorc_kit::shortcut_keys::{ShortcutKeys, ShortcutStyle};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::{Theme, size, text};
 
 use super::background::{image_tiles, picker_body, thumbnail};
 use super::transport::{AppStudio, OpenPage};
-use crate::lcd;
 
 /// Indent under the Camera row (`pl-9.5` ≈ 38 px).
 const FOOTER_INDENT_PX: f32 = 38.;
@@ -116,8 +115,6 @@ pub struct QuickSettingsSection {
     door_cursor: DeliveryCursor,
     popover_open: bool,
     choose_image: DialogHandle,
-    /// Settings → General → Retro LCD: Sources / Captions / Chat on screens.
-    retro: bool,
 }
 
 impl EventEmitter<OpenPage> for QuickSettingsSection {}
@@ -140,7 +137,6 @@ impl QuickSettingsSection {
         };
         let snap = snapshot.borrow().clone();
         let view = section_view(&snap, &health, &chat, door_cursor);
-        let retro = snap.settings.studio.retro_lcd_studio();
         cx.spawn(async move |this, cx| {
             loop {
                 let open = tokio::select! {
@@ -154,7 +150,6 @@ impl QuickSettingsSection {
                 let snap = snapshot.borrow_and_update().clone();
                 let health = telemetry.borrow_and_update().clone();
                 let chat = live_chat.borrow_and_update().clone();
-                let retro = snap.settings.studio.retro_lcd_studio();
                 let alive = this.update(cx, |section, cx| {
                     section.chat = chat;
                     section.telemetry = health;
@@ -164,9 +159,8 @@ impl QuickSettingsSection {
                         &section.chat,
                         section.door_cursor,
                     );
-                    if section.view != next || section.retro != retro {
+                    if section.view != next {
                         section.view = next;
-                        section.retro = retro;
                         cx.notify();
                     }
                 });
@@ -185,7 +179,6 @@ impl QuickSettingsSection {
             door_cursor,
             popover_open: false,
             choose_image: DialogHandle::new(false),
-            retro,
         }
     }
 
@@ -552,140 +545,6 @@ impl QuickSettingsSection {
                 section.open_stream_manager(cx);
             }))
     }
-
-    /// Retro LCD Sources + Captions/Chat screens (P239–P243).
-    fn render_retro(&self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let camera = &self.view.camera;
-        let disabled = camera.row.disabled_reason.is_some();
-        let entity = cx.entity().downgrade();
-        let open_page = camera.open_page.unwrap_or(PageId::Sources);
-        let cog = lcd::cog(
-            "quick-settings-lcd-open-sources",
-            t,
-            camera.open_label,
-            cx.listener(move |_, _, _, cx| cx.emit(OpenPage::of(open_page))),
-        );
-        // `LcdDevicePicker`'s `LcdPanelRow` (`py-2 gap-4`): the dim label,
-        // then the pick and the cog on the right.
-        let mut sources_body = div().flex().flex_col().child(
-            div()
-                .flex()
-                .min_w_0()
-                .items_center()
-                .justify_between()
-                .gap(px(16.))
-                .py(px(8.))
-                .child(
-                    div()
-                        .flex_none()
-                        .text_color(lcd::dim(t))
-                        .child(lcd::tracked(section_copy::CAMERA)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .min_w_0()
-                        .items_center()
-                        .justify_end()
-                        .gap(px(8.))
-                        .child(
-                            fill_select("quick-settings-lcd-camera", &camera.row.picker, disabled)
-                                .trigger_with(lcd::picker_trigger(t))
-                                .on_change(move |value, _, cx| {
-                                    let _ = entity.update(cx, |section, _| {
-                                        section.select_camera(value.to_string());
-                                    });
-                                }),
-                        )
-                        .child(cog),
-                ),
-        );
-        if let Some(status) = &camera.row.status {
-            sources_body = sources_body.child(lcd::message(t, status.message.clone()));
-        }
-        if let Some(stand_in) = &camera.row.stand_in {
-            sources_body = sources_body.child(lcd::message(t, stand_in.clone()));
-        }
-        if camera.background.is_some() {
-            // Keep the same Background popover (C2); only the trigger is LCD.
-            sources_body = sources_body.child(self.background_line(t, cx));
-        }
-        if let Some(stage) = &camera.background_stage {
-            sources_body = sources_body.child(lcd::message(t, stage.clone()));
-        }
-        if let Some(effect) = camera.system_effect {
-            sources_body = sources_body.child(lcd::message(t, effect));
-        }
-
-        let captions = lcd::nav_row(
-            "quick-settings-lcd-captions",
-            t,
-            section_copy::CAPTIONS,
-            div()
-                .min_w_0()
-                .child(lcd::tracked(self.view.captions.clone()).truncate("lcd-captions-value")),
-            cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Captions))),
-        );
-        // One line that truncates at its end, as Electron's LCD value does
-        // ("STREAM MANAGER · ⇧…"): the name stays whole and the key is what
-        // a narrow screen cuts. Tracked text can't end in "…", so the line
-        // is plain capitals; the key is printed by the kit from the keymap's
-        // accelerator, never a hand-typed glyph (gpui-design-guards).
-        let chat_value: AnyElement = if let Some(new_label) = &self.view.chat.new_label {
-            div()
-                .min_w_0()
-                .child(lcd::tracked(new_label.clone()).truncate("lcd-chat-new"))
-                .into_any_element()
-        } else {
-            let mac = cfg!(target_os = "macos");
-            let strokes = parse_accelerator(self.view.chat.accelerator, mac);
-            let keys = shortcut_keys::label(
-                strokes
-                    .iter()
-                    .map(|stroke| (stroke.modifiers, stroke.key.as_str())),
-                mac,
-            );
-            let words = if keys.is_empty() {
-                section_copy::STREAM_MANAGER.to_string()
-            } else {
-                format!("{} · {keys}", section_copy::STREAM_MANAGER)
-            };
-            div()
-                .min_w_0()
-                .child(lcd::tracked(words).truncate("lcd-chat-value"))
-                .into_any_element()
-        };
-        let chat = lcd::nav_row(
-            "quick-settings-lcd-chat",
-            t,
-            section_copy::CHAT,
-            chat_value,
-            cx.listener(|section, _, _, cx| section.open_stream_manager(cx)),
-        );
-
-        // Each screen in its own section (`RetroQuickSettings`), as the
-        // default look's groups are.
-        div()
-            .id("quick-settings")
-            .flex()
-            .flex_col()
-            .child(
-                PanelSection::new("quick-settings-sources").child(lcd::panel(
-                    "quick-settings-lcd-sources",
-                    t,
-                    section_copy::SOURCES,
-                    sources_body,
-                )),
-            )
-            .child(PanelSection::new("quick-settings-doors").child(lcd::panel(
-                "quick-settings-lcd-doors",
-                t,
-                "Captions and Chat",
-                div().flex().flex_col().child(captions).child(chat),
-            )))
-            .child(self.choose_image_dialog(window, cx))
-            .into_any_element()
-    }
 }
 
 impl Render for QuickSettingsSection {
@@ -694,9 +553,7 @@ impl Render for QuickSettingsSection {
         // No "Sources" heading (plan 235 D3): group_label is for screen
         // readers only; GroupedList's visible label stays off.
         let _ = self.view.group_label;
-        if self.retro {
-            return self.render_retro(t, window, cx);
-        }
+
         let sources = PanelSection::new("quick-settings-sources")
             .child(GroupedList::new().item(self.camera_block(t, cx)));
         let doors = PanelSection::new("quick-settings-doors").child(

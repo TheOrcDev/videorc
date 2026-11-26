@@ -43,7 +43,6 @@ macro_rules! secondary {
 }
 
 mod app;
-mod lcd;
 mod platform;
 mod preview;
 mod screens;

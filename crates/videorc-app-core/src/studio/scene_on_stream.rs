@@ -215,17 +215,6 @@ pub fn screen_privacy_view(
     }
 }
 
-/// `RetroScreenPrivacyRow`'s label (`scene-on-stream.tsx:456`,
-/// `control.statusLabel ?? 'Hide screen'`): the room's own words while it
-/// says more than Hidden, else "Hide screen" (the row's On / Off says the
-/// rest).
-pub fn retro_privacy_label(view: &ScreenPrivacyView) -> &str {
-    view.chip
-        .as_deref()
-        .filter(|chip| *chip != copy::SCREEN_HIDDEN)
-        .unwrap_or(copy::HIDE_SCREEN)
-}
-
 /// What a press sends: `screen.hide` with the streamer as its reason while
 /// the screen shows, `screen.show` while it is hidden.
 pub fn screen_privacy_request(hidden: bool) -> (&'static str, Value) {

@@ -489,10 +489,6 @@ const PEAK_HOLD_MS: f64 = 1200.0;
 const PEAK_RELEASE_MS: f64 = 600.0;
 /// `SILENCE_DB`: the floor a released meter settles to.
 pub const SILENCE_DB: f64 = -120.0;
-/// `CLIP_THRESHOLD_DB` and `CLIP_HOLD_MS` (`lib/audio/zones.ts`): a reading
-/// at or above −1 dB lights the LCD meter's CLIP flag for 1.5 s.
-pub const CLIP_THRESHOLD_DB: f64 = -1.0;
-const CLIP_HOLD: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// One meter's `peak` ballistics: a fast attack, a slower release, and a
 /// held peak that waits, then falls.
@@ -502,7 +498,6 @@ pub struct MeterBallistics {
     hold_db: f64,
     hold_since: Option<Instant>,
     at: Option<Instant>,
-    clip_until: Option<Instant>,
 }
 
 impl Default for MeterBallistics {
@@ -512,7 +507,6 @@ impl Default for MeterBallistics {
             hold_db: SILENCE_DB,
             hold_since: None,
             at: None,
-            clip_until: None,
         }
     }
 }
@@ -528,11 +522,6 @@ impl MeterBallistics {
     /// One reading (`None`: no reading, the meter falls) at `now`.
     pub fn step(&mut self, input_db: Option<f64>, now: Instant) -> MeterView {
         let target = input_db.filter(|db| db.is_finite()).unwrap_or(SILENCE_DB);
-        if target >= CLIP_THRESHOLD_DB {
-            self.clip_until = Some(now + CLIP_HOLD);
-        } else if self.clip_until.is_some_and(|until| now >= until) {
-            self.clip_until = None;
-        }
         let elapsed = self.at.map_or(0.0, |at| {
             now.saturating_duration_since(at).as_secs_f64() * 1000.0
         });
@@ -574,45 +563,11 @@ impl MeterBallistics {
 
     /// Settled: nothing moves until the next reading.
     pub fn settled(&self) -> bool {
-        self.view() == MeterView::default() && self.clip_until.is_none()
-    }
-
-    /// S3.1h: the LCD meter's digits and CLIP flag at `now`.
-    pub fn lcd_view(&self, now: Instant) -> LcdMeterView {
-        LcdMeterView {
-            readout: lcd_readout(self.db),
-            clipping: self.clip_until.is_some_and(|until| now < until),
-        }
+        self.view() == MeterView::default()
     }
 
     pub fn reset(&mut self) {
         *self = Self::default();
-    }
-}
-
-/// S3.1h: what the LCD meter prints beside its segments: the level in
-/// digits (`LcdMeterValue`) and whether the CLIP flag is lit.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LcdMeterView {
-    pub readout: String,
-    pub clipping: bool,
-}
-
-/// `formatDb(db, {decimals: 1, unit: false, floorDb: −60})`: "−∞" at or
-/// below the meter's floor, else one decimal with a true minus ("−12.3",
-/// "0.0", "+0.4").
-pub fn lcd_readout(db: f64) -> String {
-    if !db.is_finite() || db <= METER_MIN_DB {
-        return "\u{2212}\u{221e}".to_string();
-    }
-    let rounded = (db * 10.0).round() / 10.0;
-    let magnitude = format!("{:.1}", rounded.abs());
-    if rounded == 0.0 {
-        magnitude
-    } else if rounded < 0.0 {
-        format!("\u{2212}{magnitude}")
-    } else {
-        format!("+{magnitude}")
     }
 }
 

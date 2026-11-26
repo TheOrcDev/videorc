@@ -20,6 +20,20 @@ const solid = (width, height, [r, g, b]) => {
 }
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex')
 
+test('committed baseline manifests no longer offer the retired Retro Studio', () => {
+  for (const file of ['baseline-manifest.json', 'baseline-manifest-linux.json']) {
+    const manifest = readManifest(new URL(`../../docs/gpui/${file}`, import.meta.url))
+    assert.equal(manifest.screens.includes('studio-retro'), false, file)
+    assert.equal(
+      screensOf(manifest).some(({ screen }) => screen === 'studio-retro'),
+      false,
+      file
+    )
+    assert.throws(() => entriesOf(manifest, 'studio-retro'), /No baseline screen/, file)
+    assert.ok(entriesOf(manifest, 'studio').length > 0, file)
+  }
+})
+
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'gpui-baseline-test-'))
   const baseline = join(root, 'baseline')

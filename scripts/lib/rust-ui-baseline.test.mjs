@@ -60,8 +60,9 @@ test('the looks are dark, light and Increase Contrast over each', () => {
 })
 
 test("the screen ids are plan 220's, updated for plan 260, and the Stream Manager has four bands", () => {
-  assert.equal(BASELINE_SCREEN_IDS.length, 38)
-  assert.equal(new Set(BASELINE_SCREEN_IDS).size, 38)
+  assert.equal(BASELINE_SCREEN_IDS.includes('studio-retro'), false)
+  assert.equal(BASELINE_SCREEN_IDS.length, 37)
+  assert.equal(new Set(BASELINE_SCREEN_IDS).size, 37)
   for (const id of [
     'sounds',
     'livestream-discord',

@@ -60,7 +60,7 @@ use videorc_kit::tokens::{Theme, size, text};
 
 use crate::app::permissions::Permissions;
 use crate::app::shell::Shell;
-use crate::screens::studio::audio::meter::{lcd_meter, segmented_meter};
+use crate::screens::studio::audio::meter::segmented_meter;
 
 pub type AppStudio = Studio<BackendClient>;
 
@@ -482,7 +482,6 @@ pub struct SourcesPanel {
     board_loading: bool,
     meters: AudioMeters,
     meters_view: AudioMetersView,
-    retro: bool,
     settling: bool,
     mic_gain: Entity<SliderState>,
     sys_gain: Entity<SliderState>,
@@ -666,7 +665,6 @@ impl SourcesPanel {
             board_loading: false,
             meters,
             meters_view,
-            retro: snap.settings.studio.retro_lcd_studio(),
             settling: false,
             mic_gain,
             sys_gain,
@@ -797,7 +795,6 @@ impl SourcesPanel {
         media: &MediaAccessSnapshot,
         cx: &mut Context<Self>,
     ) {
-        self.retro = snapshot.settings.studio.retro_lcd_studio();
         self.meters_view = self.meters.step(snapshot, levels, Instant::now());
         self.ensure_meter_ticks(cx);
         if self.board.is_none() {
@@ -893,15 +890,10 @@ impl SourcesPanel {
     fn level_meter(
         &self,
         meter: videorc_app_core::studio::audio_mixer::MeterView,
-        lcd: &videorc_app_core::studio::audio_mixer::LcdMeterView,
         muted: bool,
         theme: &videorc_kit::tokens::Theme,
     ) -> AnyElement {
-        if self.retro {
-            lcd_meter(meter, lcd, muted, theme).into_any_element()
-        } else {
-            segmented_meter(meter, muted, theme).into_any_element()
-        }
+        segmented_meter(meter, muted, theme).into_any_element()
     }
 
     fn push_model(&mut self, cx: &mut Context<Self>) {
@@ -1354,12 +1346,7 @@ impl SourcesPanel {
         if !mic.selected {
             body = body.child(facts_line(t, audio_copy::NO_MICROPHONE));
         }
-        body = body.child(self.level_meter(
-            self.meters_view.microphone,
-            &self.meters_view.microphone_lcd,
-            muted || !mic.selected,
-            t,
-        ));
+        body = body.child(self.level_meter(self.meters_view.microphone, muted || !mic.selected, t));
         let gain_value = match mic.row.gain_reset.clone() {
             Some(reset) => {
                 let entity = cx.entity();
@@ -1543,12 +1530,7 @@ impl SourcesPanel {
 
         let mut body = item_body().child(facts_line(t, system.facts.clone()));
         if system.row.show_level {
-            body = body.child(self.level_meter(
-                self.meters_view.system_audio,
-                &self.meters_view.system_audio_lcd,
-                false,
-                t,
-            ));
+            body = body.child(self.level_meter(self.meters_view.system_audio, false, t));
         } else if system.row.idle_line {
             body = body.child(facts_line(t, audio_mixer::copy::IDLE_LINE));
         }
@@ -1679,12 +1661,7 @@ impl SourcesPanel {
         ));
         let mut body = item_body();
         if sounds.show_level {
-            body = body.child(self.level_meter(
-                self.meters_view.sounds,
-                &self.meters_view.sounds_lcd,
-                false,
-                t,
-            ));
+            body = body.child(self.level_meter(self.meters_view.sounds, false, t));
         } else {
             body = body.child(facts_line(t, audio_copy::SOUNDS_IDLE));
         }

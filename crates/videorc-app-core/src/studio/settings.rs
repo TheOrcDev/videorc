@@ -401,6 +401,7 @@ impl StudioSettings {
         {
             spread_into(&mut settings.doc, &parsed);
         }
+        settings.doc.remove("retroLcdStudio");
         settings
     }
 
@@ -472,11 +473,6 @@ impl StudioSettings {
     /// Scene motion (`=== true`).
     pub fn animate_scene_changes(&self) -> bool {
         self.field("animateSceneChanges") == Some(&Value::Bool(true))
-    }
-
-    /// Retro LCD (plan 197): `=== true`.
-    pub fn retro_lcd_studio(&self) -> bool {
-        self.field("retroLcdStudio") == Some(&Value::Bool(true))
     }
 
     /// Chat in Studio (plan 204): `=== true`.
@@ -723,6 +719,23 @@ mod tests {
                 .collect(),
             delete: Vec::new(),
             writer: writer.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn legacy_retro_settings_load_and_save_without_the_retired_preference() {
+        for stored in [
+            json!(r#"{"retroLcdStudio":true,"studioChat":true,"keepMicrophoneWarm":false}"#),
+            json!({"retroLcdStudio": true, "studioChat": true, "keepMicrophoneWarm": false}),
+        ] {
+            let settings = StudioSettings::load(Some(&stored));
+            assert_eq!(settings.get("studioChat"), Some(&json!(true)));
+            assert_eq!(settings.get("keepMicrophoneWarm"), Some(&json!(false)));
+            assert_eq!(settings.get("retroLcdStudio"), None);
+            let saved = serde_json::to_value(&settings).unwrap();
+            assert!(saved.get("retroLcdStudio").is_none());
+            let restored: StudioSettings = serde_json::from_value(saved).unwrap();
+            assert_eq!(restored, settings);
         }
     }
 

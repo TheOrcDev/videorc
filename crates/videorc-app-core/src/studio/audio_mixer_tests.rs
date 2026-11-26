@@ -145,33 +145,3 @@ fn gain_reads_and_resets_as_the_faders_do() {
         "Muted"
     );
 }
-
-#[test]
-fn the_lcd_meter_prints_its_level_and_holds_clip_for_a_second_and_a_half() {
-    // `formatDb(db, {decimals: 1, unit: false, floorDb: −60})`.
-    assert_eq!(lcd_readout(SILENCE_DB), "\u{2212}\u{221e}");
-    assert_eq!(lcd_readout(-60.0), "\u{2212}\u{221e}");
-    assert_eq!(lcd_readout(-12.34), "\u{2212}12.3");
-    assert_eq!(lcd_readout(-0.04), "0.0");
-    assert_eq!(lcd_readout(0.4), "+0.4");
-
-    let start = Instant::now();
-    let mut meter = MeterBallistics::default();
-    let rest = meter.lcd_view(start);
-    assert_eq!(rest.readout, "\u{2212}\u{221e}");
-    assert!(!rest.clipping);
-    // A reading at −1 dB lights CLIP; it stays lit 1.5 s after the last one.
-    meter.step(Some(-0.5), start);
-    assert!(meter.lcd_view(start).clipping);
-    let later = start + std::time::Duration::from_millis(1400);
-    meter.step(None, later);
-    assert!(meter.lcd_view(later).clipping);
-    assert!(!meter.settled(), "a lit CLIP keeps the meter stepping");
-    let after = start + std::time::Duration::from_millis(1600);
-    meter.step(None, after);
-    assert!(!meter.lcd_view(after).clipping);
-    // −1.5 dB is under the flag's threshold.
-    let mut quiet = MeterBallistics::default();
-    quiet.step(Some(-1.5), start);
-    assert!(!quiet.lcd_view(start).clipping);
-}
