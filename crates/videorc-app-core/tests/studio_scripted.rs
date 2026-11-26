@@ -3101,6 +3101,41 @@ async fn the_launch_arms_the_ring_and_starts_a_buffer_only_session_with_the_scen
     assert!(studio.snapshot().session.status.replay_only);
 }
 
+/// L6's preview-check-invisible on c54b5bb6d: with no screen preview
+/// started at idle, the backend refused the ring three times ("the screen
+/// preview source(s) produced no frames") and the ring gave up. The ring's
+/// start starts the screen's capture first, as a Record does. The scene
+/// holds a screen and a camera: the backend's scene commit starts the camera
+/// (`start_missing_sources`), as for a Record, and both starts carry it.
+#[tokio::test]
+async fn the_rings_start_starts_the_screens_capture_before_the_session() {
+    let (backend, studio, _) = clips_studio(capture_config_with_camera()).await;
+    studio.clips_due().await;
+    let calls = backend.calls();
+    let screen = calls
+        .iter()
+        .position(|call| call == "preview.screen.start")
+        .expect("the ring's start starts the screen's capture");
+    let start = calls
+        .iter()
+        .position(|call| call == "session.start")
+        .expect("the ring starts");
+    assert!(screen < start, "the capture first: {calls:?}");
+    let script = backend.script.lock().unwrap();
+    let capture = &script.screen_starts[0];
+    assert_eq!(capture.sources, script.started_with[0].sources);
+    assert_eq!(capture.video, script.started_with[0].output.video);
+    assert_eq!(
+        capture.sources.screen_id.as_deref(),
+        Some("screen:screencapturekit:1")
+    );
+    assert_eq!(
+        capture.sources.camera_id.as_deref(),
+        Some("camera:1"),
+        "screen and camera"
+    );
+}
+
 #[tokio::test]
 async fn the_ring_waits_for_a_switch_awaiting_its_proof_and_starts_with_its_scene() {
     let (backend, studio, _) = clips_studio(capture_config_with_camera()).await;

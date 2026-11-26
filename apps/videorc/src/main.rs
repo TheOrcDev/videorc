@@ -427,7 +427,8 @@ fn main() -> Result<()> {
     // screen and camera previews' first frames only when the app starts
     // those previews itself. Electron's renderer does (`preview.screen.start`
     // at idle); this app shows the program and sends `preview.screen.start`
-    // only before a session, so a ring that waited would wait for good
+    // only before a session (the ring's own included), so a ring that waited
+    // would wait for good
     // ("Waiting for the screen preview to start."), as in Electron with
     // VIDEORC_DISABLE_AUTO_PREVIEW=1.
     studio.set_clips_auto_preview(false);
