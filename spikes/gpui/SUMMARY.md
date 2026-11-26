@@ -107,6 +107,10 @@ which are plan 260's S0.1 lines.
 | `scale_factors_seen` | number array | Every scale factor the window had, in order, without repeats; two values mean it moved to a display with another scale (S0.2a) | — |
 | `viewport_px`, `viewport_device_px` | string | The window's content size at the end of the run, `<w>x<h>`, in logical and in device pixels (S0.2a) | — |
 | `viewport_changes` | integer | Times the content size changed between two renders: a resize by its edge, a maximise, a move to another scale (S0.2a) | — |
+| `display_hz` | number | The display's refresh rate as the desktop compositor reports it, to compare `presents_per_second` with (WC-0.2) | — |
+| `drawable_resizes` | integer | Times the presenter resized its buffers to follow the laid-out size (WC-0.2) | — |
+| `present_waits_timed_out` | integer | Presenter waits for a free buffer that took over a second, as when the window is minimised (WC-0.2) | 0 in a timed run |
+| `layout_test` | boolean | The spike moved and resized the view on a timer, so its renders are not idle ones (WC-0.2) | — |
 
 A spike that needs a number not in this table adds it with a plain
 snake-case name and a unit suffix (`_ms`, `_mb`, `_percent`), and adds a
