@@ -34,6 +34,7 @@ import { join, resolve } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { seedUiSettingsJs } from './lib/renderer-profile-seed.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import { countTransientFifoPauseMarkers } from './lib/transient-fifo-pressure-gates.mjs'
 import {
   connectBackend,
   request,
@@ -57,6 +58,7 @@ const shotsDir = process.env.VIDEORC_WATCHDOG_SHOTS_DIR
   ? resolve(process.env.VIDEORC_WATCHDOG_SHOTS_DIR)
   : null
 const appLines = []
+let fifoPauseAtMs = null
 
 // Dev thresholds (D4): seconds in the plan become a few seconds here.
 const MIC_MUTED_AFTER_MS = 3000
@@ -65,7 +67,11 @@ const PICTURE_STOPPED_AFTER_MS = 3000
 const PICTURE_BLACK_AFTER_MS = 3000
 const DESTINATION_DOWN_AFTER_MS = 5000
 const REPEAT_WINDOW_MS = 6000
-const PAUSE_MS = Number(process.env.VIDEORC_SMOKE_STALL_PAUSE_MS ?? 4500)
+// Both Electron and GPUI use the backend's same watchdog: progress diagnostics
+// sample every 2 s, then a 1 s tick applies the 3 s smoke threshold. Buffered
+// encoder callbacks can still advance after the FIFO pauses. Leave enough time
+// for the notice and alert to open; 4.5 s can recover before either is sampled.
+const PAUSE_MS = Number(process.env.VIDEORC_SMOKE_STALL_PAUSE_MS ?? 8000)
 const PAUSE_AFTER_FRAMES = 900
 
 const targets = [
@@ -135,6 +141,9 @@ try {
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     onLine: (line) => {
       appLines.push(line)
+      if (fifoPauseAtMs === null && countTransientFifoPauseMarkers(line) > 0) {
+        fifoPauseAtMs = Date.now()
+      }
       console.log(line)
     }
   })
@@ -355,24 +364,37 @@ try {
       skip('picture-stopped', 'the VideoToolbox FIFO pause seam is macOS only')
     } else {
       const stalled = await waitFor(
-        () => healthEvents.find((event) => event.code === 'watchdog-picture-stopped'),
+        () =>
+          fifoPauseAtMs !== null &&
+          healthEvents.find(
+            (event) => event.code === 'watchdog-picture-stopped' && event.atMs >= fifoPauseAtMs
+          ),
         45000
       )
       if (!stalled) {
         const stallSeen = healthEvents.some((event) => event.code === 'stream-output-stalled')
         fail(
           'picture-stopped',
-          stallSeen
-            ? `stream-output-stalled fired but no alert opened (${alertNames()})`
-            : `the FIFO pause never stalled the output (frames ${PAUSE_AFTER_FRAMES}, pause ${PAUSE_MS} ms)`
+          fifoPauseAtMs === null
+            ? `the FIFO pause marker never arrived (frames ${PAUSE_AFTER_FRAMES}, pause ${PAUSE_MS} ms)`
+            : stallSeen
+              ? `stream-output-stalled fired but no alert opened (${alertNames()})`
+              : `the FIFO pause fired (${PAUSE_MS} ms), but no stream-output-stalled health event arrived`
         )
       } else {
         const cleared = await waitFor(
-          () => healthEvents.find((event) => event.code === 'watchdog-picture-stopped-cleared'),
+          () =>
+            healthEvents.find(
+              (event) =>
+                event.code === 'watchdog-picture-stopped-cleared' && event.atMs >= stalled.atMs
+            ),
           15000
         )
         if (cleared)
-          pass('picture-stopped', `opened on the stall ("${stalled.message}"), then cleared`)
+          pass(
+            'picture-stopped',
+            `opened ${stalled.atMs - fifoPauseAtMs} ms after the FIFO pause ("${stalled.message}"), then cleared`
+          )
         else fail('picture-stopped', 'opened but never cleared after the pause')
       }
       await assertSessionRunning(ws, 'after the stall')
@@ -569,6 +591,24 @@ try {
   report.pass = failures.length === 0
   report.failures = failures
   report.skips = skips
+  report.fifoPause = {
+    durationMs: PAUSE_MS,
+    observedAtMs: fifoPauseAtMs,
+    events: healthEvents
+      .filter((event) =>
+        [
+          'stream-output-stalled',
+          'stream-output-resumed',
+          'watchdog-picture-stopped',
+          'watchdog-picture-stopped-cleared'
+        ].includes(event.code)
+      )
+      .map((event) => ({
+        code: event.code,
+        observedAtMs: event.atMs,
+        afterInjectionMs: fifoPauseAtMs === null ? null : event.atMs - fifoPauseAtMs
+      }))
+  }
   writeFileSync(
     join(outputDirectory, 'stream-watchdog-evidence.json'),
     JSON.stringify(report, null, 2)
