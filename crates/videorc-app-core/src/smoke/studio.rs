@@ -646,7 +646,17 @@ impl StudioSmoke {
                 && !(self.studio.switch_orientation(vertical).await
                     && self.studio.apply_layout_preset(&preset).await)
             {
-                return Err(format!("Could not find layout preset {preset}."));
+                // Electron's words: a layout it knows but won't take is
+                // disabled; a name it doesn't know isn't found.
+                let known = serde_json::from_value::<videorc_protocol::LayoutPreset>(
+                    Value::String(preset.clone()),
+                )
+                .is_ok();
+                return Err(if known {
+                    format!("Layout preset {preset} is disabled.")
+                } else {
+                    format!("Could not find layout preset {preset}.")
+                });
             }
             wait_for(
                 self.studio.watch(),

@@ -188,7 +188,11 @@ export async function runGpuiPreviewInteractionStress() {
           await converge(preset)
           available.push(preset)
         } catch (error) {
-          if (/Could not find layout preset|blocked|needs a (screen|camera)/i.test(error.message)) {
+          if (
+            /Could not find layout preset|Layout preset \S+ is disabled|blocked|needs a (screen|camera)/i.test(
+              error.message
+            )
+          ) {
             refused.push(preset)
           } else {
             failures.push(`${preset}: ${error.message}`)
