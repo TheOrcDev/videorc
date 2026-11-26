@@ -451,6 +451,9 @@ impl GoLiveDialog {
                 )
                 .icon(crate::screens::platform_glyph(&dest.platform))
                 .context(context)
+                // Electron: `h-auto min-h-10 py-1.5`.
+                .auto_height(true)
+                .min_height(40.)
                 .child(badge),
             );
             // `go-live-destination-body`: under the title (`pl-13`), 8 px
@@ -596,6 +599,8 @@ impl GoLiveDialog {
                         )
                         .icon(crate::screens::platform_glyph(&target.platform))
                         .context(context)
+                        .auto_height(true)
+                        .min_height(40.)
                         .child(StatusBadge::new(copy::LEFT_OUT).tone(StatusTone::Neutral)),
                     )
                     .child(
