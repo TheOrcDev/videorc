@@ -70,8 +70,15 @@ const forced = process.env.VIDEORC_LIVE_BACKGROUND_FORCE_STILL === '1'
 const gpuiApp = smokeAppIsGpui()
 const idleReporter = gpuiApp ? 'compositor' : idlePreviewLiveBackgroundReporter(process.platform)
 
-/** Plan 190 "Performance budget": the background's own p95 on an M-series Mac. */
-const BUDGET_MS = { 1080: 1.5, 2160: 3.0 }
+/**
+ * The background's own p95 in the app on an M-series Mac (owner decision Q71,
+ * 2026-11-26). Plan 190's 1.5 / 3.0 ms came from the hot-GPU microbench
+ * (`live_frame_gpu_times`, 70 frames back to back); in the app the live
+ * buffer draws once per tick on an otherwise idle GPU, whose clocks drop
+ * between ticks, so the same shader measures 3–4× longer (Silk 1.5–2.4 ms at
+ * 1080p, the heaviest 4K cases 5–6 ms on a quiet host, 2026-10-31).
+ */
+const BUDGET_MS = { 1080: 2.75, 2160: 6.0 }
 const CASES = (
   process.env.VIDEORC_LIVE_BACKGROUND_SMOKE_CASES ??
   [
