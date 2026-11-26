@@ -414,6 +414,15 @@ pub(crate) fn bundle_id_matches_prefix(bundle_id: &str, prefix: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('.'))
 }
 
+/// Set to `0` by a host app that plays no audio of its own: the GPUI app,
+/// whose every sound plays from this backend (`excludesCurrentProcessAudio`
+/// keeps those out). Excluding such a host only costs: ScreenCaptureKit takes
+/// an excluded app's audio by its responsible process, so a host started from
+/// a terminal took every sound already playing from that terminal's
+/// processes when the capture opened (a smoke's tone, toggled on mid-take,
+/// recorded as digital silence; L6's GPUI matrix, 2026-11-26).
+pub(crate) const EXCLUDE_HOST_APP_ENV: &str = "VIDEORC_SYSTEM_AUDIO_EXCLUDE_HOST_APP";
+
 /// Which running applications the system-audio filter excludes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AppExclusion {
@@ -436,6 +445,25 @@ impl AppExclusion {
             } else {
                 Vec::new()
             },
+        }
+    }
+
+    /// No app: the host plays no audio of its own ([`EXCLUDE_HOST_APP_ENV`]).
+    pub(crate) fn none() -> Self {
+        Self {
+            bundle_prefixes: Vec::new(),
+            pids: Vec::new(),
+        }
+    }
+
+    /// What this backend's host asks for: `exclude_host` is
+    /// [`EXCLUDE_HOST_APP_ENV`]'s value; only `0` turns the exclusion off,
+    /// so Electron, which never sets it, keeps [`Self::videorc`].
+    pub(crate) fn for_host(exclude_host: Option<&str>, parent_pid: i32) -> Self {
+        if exclude_host.map(str::trim) == Some("0") {
+            Self::none()
+        } else {
+            Self::videorc(parent_pid)
         }
     }
 
@@ -740,7 +768,10 @@ mod capture {
     impl Default for SystemAudioCaptureOptions {
         fn default() -> Self {
             Self {
-                exclusion: AppExclusion::videorc(parent_pid()),
+                exclusion: AppExclusion::for_host(
+                    std::env::var(EXCLUDE_HOST_APP_ENV).ok().as_deref(),
+                    parent_pid(),
+                ),
                 queue_capacity: SYSTEM_AUDIO_QUEUE_CAPACITY,
             }
         }
@@ -1633,6 +1664,29 @@ mod tests {
         // Orphaned (launchd) or unknown parents name no app.
         assert!(AppExclusion::videorc(1).pids.is_empty());
         assert!(AppExclusion::videorc(0).pids.is_empty());
+    }
+
+    #[test]
+    fn system_audio_a_host_that_plays_nothing_excludes_no_app() {
+        // The GPUI app sets the variable to 0: nothing is excluded, so a
+        // sound already playing when the capture opens is captured.
+        assert_eq!(
+            AppExclusion::for_host(Some("0"), 4242),
+            AppExclusion::none()
+        );
+        assert!(
+            AppExclusion::none()
+                .matching_indices([("dev.theorcdev.videorc", 4242), ("com.apple.afplay", 7)])
+                .is_empty()
+        );
+        // Electron never sets it; anything but 0 keeps Videorc's own apps out.
+        for value in [None, Some("1"), Some(""), Some("no")] {
+            assert_eq!(
+                AppExclusion::for_host(value, 4242),
+                AppExclusion::videorc(4242),
+                "{value:?}"
+            );
+        }
     }
 
     #[test]
