@@ -1175,6 +1175,7 @@ impl Render for StreamManager {
                         .children(regions),
                 )
                 .child(status_bar(
+                    t,
                     self.notices.clone(),
                     &self.studio.live_chat_now().providers,
                     pinned,

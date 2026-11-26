@@ -18,15 +18,18 @@ use videorc_app_core::studio::sources::copy::{HIDE_SCREEN, SHOW_SCREEN};
 use videorc_kit::{
     button::{Button, ButtonSize, ButtonVariant},
     dropdown_menu::{DropdownMenu, Menu, MenuItem},
+    icon::{IconName, icon},
     pin_window_button::PinWindowButton,
     platform_glyph::PlatformMark,
     shortcut_keys::ShortcutKeys,
-    status_bar::{StatusBar, StatusBarHint},
+    status_bar::{ACTION_ICON, StatusBar, StatusBarHint},
     status_bar_action::StatusBarAction,
     status_dot::{StatusDot, StatusTone},
+    theme::hsla,
+    tokens::Theme,
 };
 
-use super::layout::{Tier, full_labels};
+use super::layout::{Tier, full_labels, wide_labels};
 
 const CLEAR: &str = "Clear";
 const CLEAR_VIEW: &str = "Clear view";
@@ -62,8 +65,22 @@ const HIDE_SCREEN_HINT: &str =
     "Cover your screen with a frosted picture on the recording and every stream";
 const SHOW_SCREEN_HINT: &str = "Show your screen to viewers again";
 
-/// The status bar under the panes.
+/// A status bar action's 14 px icon (`StatusBarAction`'s `icon`): muted,
+/// in the foreground while its toggle is on, as Keep on top's pin.
+fn action_icon(t: &Theme, name: IconName, on: bool) -> gpui::Svg {
+    icon(
+        name,
+        ACTION_ICON,
+        hsla(if on { t.foreground } else { t.muted_foreground }),
+    )
+}
+
+/// The status bar under the panes. The actions are Electron's
+/// (`stream-manager-status-bar.tsx`): icons, with the words Hide screen and
+/// Commands at Wide only (`WIDE_LABEL`) and Clip's scissors from 800 px
+/// (`COMPACT_ICON`).
 pub fn status_bar(
+    t: &Theme,
     notices: gpui::Entity<crate::screens::notifications::Centre>,
     providers: &[LiveChatProviderState],
     pinned: bool,
@@ -88,6 +105,7 @@ pub fn status_bar(
 ) -> AnyElement {
     let tier = Tier::of(width);
     let labels = full_labels(width);
+    let wide = wide_labels(width);
     let unsupported = hide_method == HideMethod::Unsupported;
     let hide_hint = if unsupported {
         CAPTURE_PROTECTION_UNSUPPORTED.to_string()
@@ -151,7 +169,8 @@ pub fn status_bar(
         bar = bar
             .child(
                 StatusBarAction::new("hide-screen", screen_label)
-                    .text(screen_label)
+                    .icon(action_icon(t, IconName::EyeSlash, screen_hidden))
+                    .when(wide, |action| action.text(screen_label))
                     .hint(screen_hint.clone())
                     .pressed(screen_hidden)
                     .disabled(screen_disabled)
@@ -168,7 +187,15 @@ pub fn status_bar(
             )
             .child(
                 StatusBarAction::new("hide-from-stream", HIDE_FROM_STREAM)
-                    .text(HIDE_FROM_STREAM)
+                    .icon(action_icon(
+                        t,
+                        if hidden {
+                            IconName::EyeClosedFill
+                        } else {
+                            IconName::EyeClosed
+                        },
+                        hidden,
+                    ))
                     .hint(hide_hint)
                     .pressed(hidden)
                     .disabled(unsupported)
@@ -178,6 +205,7 @@ pub fn status_bar(
                 DropdownMenu::new("highlight-position")
                     .trigger(
                         StatusBarAction::new("highlight-position", HIGHLIGHT_POSITION)
+                            .icon(action_icon(t, IconName::FrameCorners, false))
                             .hint(format!("{HIGHLIGHT_POSITION}: {}", anchor.label())),
                     )
                     .menu({
@@ -198,6 +226,9 @@ pub fn status_bar(
             )
             .child(
                 StatusBarAction::new("clip-30", "Save a 30-second clip")
+                    .when(labels, |action| {
+                        action.icon(action_icon(t, IconName::Scissors, false))
+                    })
                     .text(clip_short)
                     .hint("Save the last 30 seconds as a clip")
                     .on_click({
@@ -256,13 +287,15 @@ pub fn status_bar(
         if labels {
             bar = bar.child(
                 StatusBarAction::new("chat-commands", "Chat commands…")
-                    .text(COMMANDS)
+                    .icon(action_icon(t, IconName::ChatCircleText, false))
+                    .when(wide, |action| action.text(COMMANDS))
                     .hint(COMMANDS_HINT)
                     .on_click(|_, _, _| {}),
             );
         }
         bar = bar.child(
             StatusBarAction::new("open-preview", preview)
+                .icon(action_icon(t, IconName::Eye, false))
                 .hint(open_preview())
                 .on_click(|_, _, _| {}),
         );
@@ -279,7 +312,15 @@ pub fn status_bar(
             )
             .child(
                 StatusBarAction::new("hide-from-stream", HIDE_FROM_STREAM)
-                    .text(HIDE_FROM_STREAM)
+                    .icon(action_icon(
+                        t,
+                        if hidden {
+                            IconName::EyeClosedFill
+                        } else {
+                            IconName::EyeClosed
+                        },
+                        hidden,
+                    ))
                     .hint(hide_hint)
                     .pressed(hidden)
                     .disabled(unsupported)
@@ -289,9 +330,9 @@ pub fn status_bar(
                 DropdownMenu::new("more-actions")
                     .trigger(
                         Button::new("more-actions")
-                            .label("⋯")
+                            .icon(IconName::DotsThreeBold)
                             .variant(ButtonVariant::Ghost)
-                            .size(ButtonSize::Xs)
+                            .size(ButtonSize::IconXs)
                             .accessibility_label(MORE_ACTIONS),
                     )
                     .menu({

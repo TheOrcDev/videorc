@@ -85,6 +85,8 @@ pub struct Button {
     dense: bool,
     /// Leading icon in the button's ink (`data-icon="inline-start"`).
     leading_icon: Option<IconName>,
+    /// Trailing icon in the button's ink (`data-icon="inline-end"`).
+    trailing_icon: Option<IconName>,
     disabled: bool,
     lit: bool,
     selected: bool,
@@ -109,6 +111,7 @@ impl Button {
             size: ButtonSize::Default,
             dense: false,
             leading_icon: None,
+            trailing_icon: None,
             disabled: false,
             lit: false,
             selected: false,
@@ -149,6 +152,14 @@ impl Button {
     /// (`pl-2.5` default / `pl-2` at Xs).
     pub fn icon(mut self, name: IconName) -> Self {
         self.leading_icon = Some(name);
+        self
+    }
+
+    /// Trailing icon after the words (a menu trigger's chevron), with
+    /// Electron's inline-end padding (`pr-2.5` default / `pr-2` at Xs /
+    /// `pr-3` at Lg).
+    pub fn icon_end(mut self, name: IconName) -> Self {
+        self.trailing_icon = Some(name);
         self
     }
 
@@ -326,15 +337,25 @@ impl RenderOnce for Button {
         }
         let square = matches!(self.size, ButtonSize::Icon | ButtonSize::IconXs);
         let has_leading = self.leading_icon.is_some() && !square && !link_inline;
+        let has_trailing = self.trailing_icon.is_some() && !square && !link_inline;
         // Electron `has-data-[icon=inline-start]:pl-2.5` / xs `pl-2`.
-        let (pad_l, pad_r) = if has_leading {
-            let left = match self.size {
+        let pad_l = if has_leading {
+            match self.size {
                 ButtonSize::Xs => 8.0,
                 _ => 10.0,
-            };
-            (left, pad)
+            }
         } else {
-            (pad, pad)
+            pad
+        };
+        // Electron `has-data-[icon=inline-end]:pr-2.5` / xs `pr-2` / lg `pr-3`.
+        let pad_r = if has_trailing {
+            match self.size {
+                ButtonSize::Xs => 8.0,
+                ButtonSize::Lg => 12.0,
+                _ => 10.0,
+            }
+        } else {
+            pad
         };
         let r = radius::CHIP;
         let ink = match self.variant {
@@ -413,7 +434,11 @@ impl RenderOnce for Button {
             .gap(px(gap))
             .children(self.leading_icon.map(|name| icon(name, icon_px, hsla(ink))))
             .children(self.label)
-            .children(self.children);
+            .children(self.children)
+            .children(
+                self.trailing_icon
+                    .map(|name| icon(name, icon_px, hsla(ink))),
+            );
 
         match self.variant {
             ButtonVariant::Default | ButtonVariant::Record | ButtonVariant::GoLive => {
