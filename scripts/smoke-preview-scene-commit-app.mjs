@@ -194,10 +194,7 @@ async function setGpuiMargin(smoke, wanted) {
   for (let turn = 0; turn < 16 && node.bounds && !inView(node.bounds); turn += 1) {
     const anchor = columnAnchor(await ui.tree(), node.bounds)
     if (!anchor) break
-    await smokeCommand(smoke, 'ui-scroll', {
-      ...anchor,
-      dy: node.bounds.y < 96 ? -200 : 200
-    })
+    await ui.scroll(anchor, { dy: node.bounds.y < 96 ? -200 : 200 })
     await sleep(200)
     node = await ui.waitFor(margin)
   }
@@ -269,7 +266,7 @@ function columnAnchor(tree, target) {
       b.y >= 96 &&
       b.y + b.height <= 520
     ) {
-      found = { role: node.role, label: node.label }
+      found = { role: node.role, name: node.label }
       return
     }
     for (const child of node.children ?? []) walk(child)

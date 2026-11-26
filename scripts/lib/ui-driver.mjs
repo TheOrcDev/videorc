@@ -376,6 +376,20 @@ export function createUiDriver(
     )
   }
 
+  /**
+   * A mouse wheel over the element (or the window's centre without one):
+   * positive `dy` reveals what is below, as a DOM `deltaY`. GPUI only
+   * (`ui-scroll`); an Electron smoke scrolls its page with eval-js.
+   */
+  async function scroll(selector, { dx = 0, dy = 0, ...options } = {}) {
+    if (!gpui)
+      throw new Error("scroll() is the GPUI driver's; scroll an Electron page with eval-js.")
+    const ms = waitMs(options)
+    const params = { dx, dy, timeoutMs: ms }
+    if (selector !== undefined && selector !== null) Object.assign(params, gpuiSelector(selector))
+    return send('ui-scroll', params, ms)
+  }
+
   /** Types `text` into a text field (emptied first unless `clear: false`). */
   async function type(selector, text, options = {}) {
     const ms = waitMs(options)
@@ -571,6 +585,7 @@ export function createUiDriver(
     readText,
     isChecked,
     press,
+    scroll,
     openTab,
     capture,
     setAppearance,
