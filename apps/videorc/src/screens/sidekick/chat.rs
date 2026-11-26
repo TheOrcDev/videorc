@@ -22,7 +22,7 @@ use videorc_protocol::cohost::CohostAutoChat;
 use super::live::{LiveView, UnlockAction};
 use super::{
     SaveSection, SidekickScreen, config_grid_pair, field_beside, field_description, field_stack,
-    field_text, save_error_line, tab_lead, unlock_alert,
+    field_text, field_text_balanced, save_error_line, tab_lead, unlock_alert,
 };
 
 const ANSWERS: &str = "Answers";
@@ -217,7 +217,7 @@ fn cooldown_field(
         .flex_col()
         .gap(px(12.))
         .child(field_beside(
-            field_text(label, Some(description.into()), t),
+            field_text_balanced(label, description, t),
             Switch::new(id)
                 .accessibility_label(label)
                 .checked(enabled)
