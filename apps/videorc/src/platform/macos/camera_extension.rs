@@ -55,7 +55,7 @@ pub fn camera_extension_failure(code: i64) -> (&'static str, &'static str) {
         ),
         2 => (
             "missingEntitlement",
-            "This build of Videorc can't install Videorc Camera. Download Videorc again from videorc.com, then turn it on again.",
+            "This build of Videorc can't install Videorc Camera: it was signed without the system-extension entitlement.",
         ),
         3 => (
             "unsupportedParentBundleLocation",
