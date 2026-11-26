@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use gpui::{Context, Entity, Window, div, prelude::*, px};
+use gpui::{Context, Entity, Focusable, Window, div, prelude::*, px};
 use gpui_base::input::InputEvent;
 use videorc_app_core::desktop::permissions::PermissionPlatform;
 use videorc_app_core::livestream::accounts::{destination_label, platform_label};
@@ -330,6 +330,10 @@ impl GoLiveDialog {
         description.update(cx, |input, cx| {
             input.set_value(draft.description.clone(), window, cx)
         });
+        // Electron's dialog opens with the title focused (`titleRef`, its
+        // initial focus), so an empty title shows its error ring at once.
+        let focus = title.read(cx).focus_handle(cx);
+        cx.on_next_frame(window, move |_, window, cx| focus.focus(window, cx));
         self.seeded = true;
     }
 
