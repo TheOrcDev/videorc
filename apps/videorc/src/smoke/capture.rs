@@ -132,17 +132,25 @@ impl CaptureCommands {
                 let handle = crate::screens::stream_manager::window::handle(cx)
                     .ok_or("Chat window is not open.")?;
                 let id = window_number(handle, cx)?;
+                // The frame as the window server has it: the viewport size
+                // lags a frame change until the window draws again.
                 let size = handle
-                    .update(cx, |_, window, _| window.viewport_size())
+                    .update(cx, |_, window, _| window.bounds().size)
                     .map_err(|_| "Chat window is not open.".to_string())?;
                 Ok::<_, String>((id, size))
             })
             .await??;
         capture(id, &file, Format::Png).await?;
+        // And what the capture really holds, in device pixels.
+        let pixels = std::fs::read(&file)
+            .ok()
+            .and_then(|bytes| decode_png(&bytes).ok())
+            .map(|bitmap| json!({ "width": bitmap.width, "height": bitmap.height }));
         Ok(json!({
             "file": file,
             "width": f32::from(drawn.width),
             "height": f32::from(drawn.height),
+            "pixels": pixels,
         }))
     }
 

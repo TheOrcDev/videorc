@@ -472,19 +472,30 @@ impl AppSmokeCommands {
         check.insert("kind".into(), json!("input-file"));
         let grant =
             validate_smoke_resource_authorization(&check, self.config.state_directory.as_deref())?;
-        let imported = self
+        // A file the backend refuses (not an image) is the Images page's
+        // error toast, not a failed command: Electron's handler resolves once
+        // the import button is enabled again. The answer names the refusal.
+        let (imported_id, import_error) = match self
             .admin
             .request(
                 "screens.importImage",
                 json!({ "path": grant.path.to_string_lossy() }),
                 IMAGE_IMPORT_TIMEOUT,
             )
-            .await?;
-        let imported_id = imported
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or("The backend's takeover import gave no id.")?
-            .to_string();
+            .await
+        {
+            Ok(imported) => (
+                Some(
+                    imported
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .ok_or("The backend's takeover import gave no id.")?
+                        .to_string(),
+                ),
+                None,
+            ),
+            Err(error) => (None, Some(error)),
+        };
         let list = self
             .admin
             .request("screens.list", json!({}), ADMIN_TIMEOUT)
@@ -507,12 +518,18 @@ impl AppSmokeCommands {
                 ready_ids.push(id.to_string());
             }
         }
-        if !ids.iter().any(|id| id == &imported_id) {
+        if let Some(imported_id) = &imported_id
+            && !ids.iter().any(|id| id == imported_id)
+        {
             return Err(format!(
                 "Takeover import published {imported_id} but screens.list does not include it."
             ));
         }
-        Ok(json!({ "ids": ids, "readyIds": ready_ids }))
+        let mut answer = json!({ "ids": ids, "readyIds": ready_ids });
+        if let Some(error) = import_error {
+            answer["importError"] = json!(error);
+        }
+        Ok(answer)
     }
 
     async fn backend_debug_rpc(&self, params: &Map<String, Value>) -> Result<Value, String> {

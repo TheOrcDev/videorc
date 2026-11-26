@@ -8,9 +8,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { createUiDriver } from './lib/ui-driver.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
+const gpuiApp = process.env.VIDEORC_APP === 'gpui'
 const settleMs = Number(process.env.VIDEORC_PREVIEW_SCENE_COMMIT_SETTLE_MS ?? 800)
 const outputDirectory = join(tmpdir(), `videorc-preview-scene-commit-${Date.now()}`)
 mkdirSync(outputDirectory, { recursive: true })
@@ -75,36 +77,15 @@ try {
   )
   assertCameraShapeCommit({ compositor: shapeCompositor, surface: shapeSurface, highRevision })
 
-  const marginValue = 18
-  await smokeCommand(smoke, 'open-layout-tab')
-  const marginInputResult = await smokeCommand(smoke, 'eval-js', {
-    code: `
-      const camera = document.querySelector('[data-videorc-stage-source="source:camera"]')
-      camera?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 }))
-      camera?.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 }))
-      camera?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-
-      const input = document.querySelector('input[aria-label="Margin value"]')
-      if (!input) return { ok: false, reason: 'margin input missing' }
-
-      input.focus()
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
-      setter?.call(input, '${marginValue}')
-      input.dispatchEvent(new Event('input', { bubbles: true }))
-      input.dispatchEvent(new KeyboardEvent('keydown', {
-        key: 'Enter',
-        code: 'Enter',
-        bubbles: true,
-        cancelable: true
-      }))
-      input.blur()
-      await sleep(${settleMs})
-      return { ok: true, value: input.value }
-    `
-  })
+  let marginValue = 18
+  const marginInputResult = gpuiApp
+    ? await setGpuiMargin(smoke, marginValue)
+    : await setElectronMargin(smoke, marginValue)
   if (marginInputResult?.ok === false) {
     throw new Error(`Margin input was not available: ${JSON.stringify(marginInputResult)}`)
   }
+  // GPUI's slider lands on the step nearest the press.
+  if (gpuiApp && typeof marginInputResult?.value === 'number') marginValue = marginInputResult.value
   const marginCompositor = await waitForCompositorCameraMargin(
     ws,
     marginValue,
@@ -159,6 +140,104 @@ try {
     // Best-effort cleanup.
   }
   await launched.stop()
+}
+
+/** Electron: the Layout tab's Margin number field, through the page. */
+async function setElectronMargin(smoke, marginValue) {
+  await smokeCommand(smoke, 'open-layout-tab')
+  return smokeCommand(smoke, 'eval-js', {
+    code: `
+      const camera = document.querySelector('[data-videorc-stage-source="source:camera"]')
+      camera?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 }))
+      camera?.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 }))
+      camera?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+
+      const input = document.querySelector('input[aria-label="Margin value"]')
+      if (!input) return { ok: false, reason: 'margin input missing' }
+
+      input.focus()
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+      setter?.call(input, '${marginValue}')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter',
+        code: 'Enter',
+        bubbles: true,
+        cancelable: true
+      }))
+      input.blur()
+      await sleep(${settleMs})
+      return { ok: true, value: input.value }
+    `
+  })
+}
+
+/**
+ * GPUI: the Scene page's Margin is a slider (0–96, step 1) whose node takes
+ * no focus from a pointer click, so the press lands on its track at the
+ * wanted fraction (the 16 px thumb travels the track less its width). A
+ * pointer press rounds to a step near the wanted one: the answer is the
+ * margin the compositor committed. Once the kit slider focuses on pointer
+ * down (Radix; sent to the kit lane 11-26), this becomes click, Home, then
+ * one Arrow Right per point, and lands on 18 exactly.
+ */
+async function setGpuiMargin(smoke, wanted) {
+  const ui = createUiDriver(smoke, { app: 'gpui' })
+  const margin = { role: 'slider', name: 'Margin' }
+  await ui.openTab('layout', { waitFor: margin })
+  const windowHeight = (await ui.tree({ depth: 0 }))?.bounds?.height ?? 800
+  let node = await ui.waitFor(margin)
+  for (let turn = 0; turn < 12 && node.bounds; turn += 1) {
+    if (node.bounds.y >= 0 && node.bounds.y + node.bounds.height <= windowHeight - 8) break
+    await smokeCommand(smoke, 'ui-scroll', { dy: node.bounds.y < 0 ? -240 : 240 })
+    await sleep(200)
+    node = await ui.waitFor(margin)
+  }
+  const bounds = node.bounds
+  if (!bounds) return { ok: false, reason: 'the Margin slider has no bounds' }
+  const thumb = 16
+  const before = (await request(ws, timeoutMs, 'compositor.status')).sceneLayout?.cameraMargin
+  await ui.clickAt(
+    bounds.x + thumb / 2 + (bounds.width - thumb) * (wanted / 96),
+    bounds.y + bounds.height / 2
+  )
+  let value = before
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    value = (await request(ws, timeoutMs, 'compositor.status')).sceneLayout?.cameraMargin
+    if (typeof value === 'number' && value !== before) break
+    await sleep(100)
+  }
+  if (typeof value !== 'number' || value === before || Math.abs(value - wanted) > 4) {
+    return {
+      ok: false,
+      reason: `the Margin slider committed ${value} (was ${before}), wanted about ${wanted}`
+    }
+  }
+  return { ok: true, value }
+}
+
+/**
+ * The preview surface's scene. GPUI's preview presents the compositor's own
+ * frames and keeps no revision of its own (`preview-surface-scene-state`
+ * answers null), so its revision is the frame the compositor rendered, its
+ * shapes the compositor's sources, and its status the surface's.
+ */
+async function surfaceSceneState(smoke) {
+  const state = await smokeCommand(smoke, 'preview-surface-scene-state')
+  if (!gpuiApp) return state
+  const [compositor, surfaceStatus] = await Promise.all([
+    request(ws, timeoutMs, 'compositor.status'),
+    smokeCommand(smoke, 'native-preview-surface-status')
+  ])
+  return {
+    ...state,
+    sceneRevision: compositor.frameSceneRevision ?? compositor.sceneRevision ?? null,
+    sourceShapes: Object.fromEntries(
+      (compositor.sceneSources ?? []).map((source) => [source.id, source.shape ?? null])
+    ),
+    surfaceStatus
+  }
 }
 
 async function waitForSurfaceLive(smoke) {
@@ -243,7 +322,7 @@ async function waitForSurfaceRevision(smoke, revision) {
   let last = null
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    last = await smokeCommand(smoke, 'preview-surface-scene-state')
+    last = await surfaceSceneState(smoke)
     if (last.sceneRevision === revision) {
       return last
     }
@@ -260,7 +339,7 @@ async function waitForSurfaceCameraShape(smoke, shape, revision) {
   let last = null
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    last = await smokeCommand(smoke, 'preview-surface-scene-state')
+    last = await surfaceSceneState(smoke)
     if (last.sceneRevision === revision && last.cameraShape === shape) {
       return last
     }

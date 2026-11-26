@@ -163,7 +163,7 @@ async function runSmoke() {
   const appDataDir = join(stateRoot, 'app-data')
   const userDataDir = join(stateRoot, 'user-data')
   const outputDirectory = join(stateRoot, 'recordings')
-  const databasePath = join(appDataDir, 'videorc.sqlite3')
+  let databasePath = join(appDataDir, 'videorc.sqlite3')
   // Where Electron's isolated backend keeps its database; the live backend
   // says where its own is once it runs (the GPUI app isolates it elsewhere).
   let recoveryDirectory = join(appDataDir, 'session-finalization-recovery')
@@ -220,7 +220,8 @@ async function runSmoke() {
     {
       const isolation = await requestSmokeCommand(smoke, 'inspect-backend-state-isolation', {})
       if (typeof isolation?.databasePath === 'string') {
-        recoveryDirectory = join(dirname(isolation.databasePath), 'session-finalization-recovery')
+        databasePath = isolation.databasePath
+        recoveryDirectory = join(dirname(databasePath), 'session-finalization-recovery')
       }
     }
     assert.equal(processExists(appPid), true, `Electron main process ${appPid} is not alive.`)
