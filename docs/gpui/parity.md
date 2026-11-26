@@ -1735,125 +1735,125 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1162 | Page key ⌘9 ("Sidekick") | Opens the Sidekick page (key by digit order) | `shared/sidebar-pages.ts:144` | [ ] | [ ] | [ ] |
-| P1163 | Tab strip "Overview", "Chat", "Community", "Voice", "Reports", "Clean cut" | Switches the Sidekick sections | `renderer/components/tabs/buddy-tab.tsx:131 (renderer/lib/buddy-tabs.ts:28)` | [ ] | [ ] | [ ] |
-| P1164 | Status row: Sidekick mark + status line (dot, label, reason, detail) | Shows Sidekick Live's state | `renderer/components/tabs/buddy-tab.tsx:284` | [ ] | [ ] | [ ] |
-| P1165 | "Sidekick Live" switch (with disabled reason) | Turns Sidekick on or off. Asks for consent if needed | `renderer/components/cohost-status.tsx:123` | [ ] | [ ] | [ ] |
-| P1166 | "Open Stream Manager" + shortcut chip | Opens the comments window | `renderer/components/tabs/buddy-tab.tsx:304` | [ ] | [ ] | [ ] |
-| P1167 | Lock alert (Sign in / View Premium) | Explains why Sidekick is locked and offers the fix | `renderer/components/tabs/buddy-tab.tsx:207` | [ ] | [ ] | [ ] |
-| P1168 | Section "Sidekick Live" ("Alpha" badge) | Holds the listening setting | `renderer/components/tabs/buddy-tab.tsx:332` | [ ] | [ ] | [ ] |
-| P1169 | "Sidekick hears you while you're live" switch + allowance line | Turns microphone listening on or off | `renderer/components/cohost-settings-section.tsx:135` | [ ] | [ ] | [ ] |
-| P1170 | "What Sidekick does" rows + tab buttons (Chat / Voice) | Each power links to its settings tab | `renderer/components/tabs/buddy-tab.tsx:352` | [ ] | [ ] | [ ] |
-| P1171 | Section "Cloud AI": "Allow cloud AI" switch + uses list | Grants or revokes cloud-AI consent | `renderer/components/tabs/buddy-tab.tsx:431` | [ ] | [ ] | [ ] |
-| P1172 | Consent dialog "Turn on Sidekick Live?" ("Not now" / "Allow and turn on") | Asks for consent before Sidekick turns on | `renderer/components/buddy-consent-dialog.tsx:43` | [ ] | [ ] | [ ] |
-| P1173 | Error toast with "Retry" | Turning on failed | `renderer/components/tabs/buddy-tab.tsx:468` | [ ] | [ ] | [ ] |
+| P1162 | Page key ⌘9 ("Sidekick") | Opens the Sidekick page (key by digit order) | `shared/sidebar-pages.ts:144` | [x] | [ ] | [ ] |
+| P1163 | Tab strip "Overview", "Chat", "Community", "Voice", "Reports", "Clean cut" | Switches the Sidekick sections | `renderer/components/tabs/buddy-tab.tsx:131 (renderer/lib/buddy-tabs.ts:28)` | [x] | [ ] | [ ] |
+| P1164 | Status row: Sidekick mark + status line (dot, label, reason, detail) | Shows Sidekick Live's state | `renderer/components/tabs/buddy-tab.tsx:284` | [x] | [ ] | [ ] |
+| P1165 | "Sidekick Live" switch (with disabled reason) | Turns Sidekick on or off. Asks for consent if needed | `renderer/components/cohost-status.tsx:123` | [x] | [ ] | [ ] |
+| P1166 | "Open Stream Manager" + shortcut chip | Opens the comments window | `renderer/components/tabs/buddy-tab.tsx:304` | [x] | [ ] | [ ] |
+| P1167 | Lock alert (Sign in / View Premium) | Explains why Sidekick is locked and offers the fix | `renderer/components/tabs/buddy-tab.tsx:207` | [x] | [ ] | [ ] |
+| P1168 | Section "Sidekick Live" ("Alpha" badge) | Holds the listening setting | `renderer/components/tabs/buddy-tab.tsx:332` | [x] | [ ] | [ ] |
+| P1169 | "Sidekick hears you while you're live" switch + allowance line | Turns microphone listening on or off | `renderer/components/cohost-settings-section.tsx:135` | [x] | [ ] | [ ] |
+| P1170 | "What Sidekick does" rows + tab buttons (Chat / Voice) | Each power links to its settings tab | `renderer/components/tabs/buddy-tab.tsx:352` | [x] | [ ] | [ ] |
+| P1171 | Section "Cloud AI": "Allow cloud AI" switch + uses list | Grants or revokes cloud-AI consent | `renderer/components/tabs/buddy-tab.tsx:431` | [x] | [ ] | [ ] |
+| P1172 | Consent dialog "Turn on Sidekick Live?" ("Not now" / "Allow and turn on") | Asks for consent before Sidekick turns on | `renderer/components/buddy-consent-dialog.tsx:43` | [x] | [ ] | [ ] |
+| P1173 | Error toast with "Retry" | Turning on failed | `renderer/components/tabs/buddy-tab.tsx:468` | [x] | [ ] | [ ] |
 
 ### Sidekick → Chat (cohost-settings-section.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1174 | Lock alert above both columns | Says why it is locked and what stays free | `renderer/components/tabs/buddy-tab.tsx:235` | [ ] | [ ] | [ ] |
-| P1175 | Section "Replies": "Answers" switch + cooldown slider | Auto-answers viewer questions | `renderer/components/cohost-settings-section.tsx:186` | [ ] | [ ] | [ ] |
-| P1176 | "Banter" switch + cooldown slider | Quiet-time remarks | `renderer/components/cohost-settings-section.tsx:196` | [ ] | [ ] | [ ] |
-| P1177 | "Write greetings with AI" switch | Sidekick rewrites greetings in the avatar's voice | `renderer/components/cohost-settings-section.tsx:209` | [ ] | [ ] | [ ] |
-| P1178 | "Reply tone" segmented (Friendly / Short / Professional) | Sets the tone of drafted replies | `renderer/components/cohost-settings-section.tsx:225` | [ ] | [ ] | [ ] |
-| P1179 | Section "Moderation": "Chat rules" list (edit, remove) | Edits the chat rules Sidekick enforces | `renderer/components/cohost-settings-section.tsx:351` | [ ] | [ ] | [ ] |
-| P1180 | "Add a rule…" input (Enter) | Adds a chat rule | `renderer/components/cohost-settings-section.tsx:400` | [ ] | [ ] | [ ] |
-| P1181 | "Flag sensitivity" (Relaxed / Balanced / Strict) | Sets the threshold for flags | `renderer/components/cohost-settings-section.tsx:426` | [ ] | [ ] | [ ] |
-| P1182 | "Put comments on stream automatically" segmented | Auto-shows chat cards on stream | `renderer/components/cohost-settings-section.tsx:447` | [ ] | [ ] | [ ] |
-| P1183 | Save error | Shows a failed save | `renderer/components/cohost-settings-section.tsx:239` | [ ] | [ ] | [ ] |
+| P1174 | Lock alert above both columns | Says why it is locked and what stays free | `renderer/components/tabs/buddy-tab.tsx:235` | [x] | [ ] | [ ] |
+| P1175 | Section "Replies": "Answers" switch + cooldown slider | Auto-answers viewer questions | `renderer/components/cohost-settings-section.tsx:186` | [x] | [ ] | [ ] |
+| P1176 | "Banter" switch + cooldown slider | Quiet-time remarks | `renderer/components/cohost-settings-section.tsx:196` | [x] | [ ] | [ ] |
+| P1177 | "Write greetings with AI" switch | Sidekick rewrites greetings in the avatar's voice | `renderer/components/cohost-settings-section.tsx:209` | [x] | [ ] | [ ] |
+| P1178 | "Reply tone" segmented (Friendly / Short / Professional) | Sets the tone of drafted replies | `renderer/components/cohost-settings-section.tsx:225` | [x] | [ ] | [ ] |
+| P1179 | Section "Moderation": "Chat rules" list (edit, remove) | Edits the chat rules Sidekick enforces | `renderer/components/cohost-settings-section.tsx:351` | [x] | [ ] | [ ] |
+| P1180 | "Add a rule…" input (Enter) | Adds a chat rule | `renderer/components/cohost-settings-section.tsx:400` | [x] | [ ] | [ ] |
+| P1181 | "Flag sensitivity" (Relaxed / Balanced / Strict) | Sets the threshold for flags | `renderer/components/cohost-settings-section.tsx:426` | [x] | [ ] | [ ] |
+| P1182 | "Put comments on stream automatically" segmented | Auto-shows chat cards on stream | `renderer/components/cohost-settings-section.tsx:447` | [x] | [ ] | [ ] |
+| P1183 | Save error | Shows a failed save | `renderer/components/cohost-settings-section.tsx:239` | [x] | [ ] | [ ] |
 
 ### Sidekick → Community (community/*.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1184 | Premium lock alert | Says "Sidekick remembers" needs Premium | `renderer/components/community/community-tab.tsx:98` | [ ] | [ ] | [ ] |
-| P1185 | "Your community" header + "Reading your past streams" progress | Summary of the community and backfill progress | `renderer/components/community/community-tab.tsx:156` | [ ] | [ ] | [ ] |
-| P1186 | Remember offer alert ("Turn on" / "Not now") | Offers to turn on Sidekick remembers | `renderer/components/community/remember-offer.tsx:42` | [ ] | [ ] | [ ] |
-| P1187 | "Links that need you": "Same person" / "Not the same" | Resolves suggestions to merge accounts | `renderer/components/community/community-tab.tsx:222` | [ ] | [ ] | [ ] |
-| P1188 | "People": "Search people" input | Filters people | `renderer/components/community/community-tab.tsx:366` | [ ] | [ ] | [ ] |
-| P1189 | "Sort people" select (Streams / Last chat / Name) | Sorts the list | `renderer/components/community/community-tab.tsx:379` | [ ] | [ ] | [ ] |
-| P1190 | "Show" segmented (Regulars / Everyone / Linked / Bots) | Filters the list | `renderer/components/community/community-tab.tsx:391` | [ ] | [ ] | [ ] |
-| P1191 | People list rows / empty state / loading spinner | Opens a person's card | `renderer/components/community/community-tab.tsx:402` | [ ] | [ ] | [ ] |
-| P1192 | Person card dialog (name title) | Shows the person's details | `renderer/components/community/community-tab.tsx:125` | [ ] | [ ] | [ ] |
-| P1193 | Card "Wave" / "Waved" | Avatar waves at this person | `renderer/components/community/person-card-body.tsx:366` | [ ] | [ ] | [ ] |
-| P1194 | Card "Same person as…" picker (search, "Same person" confirm) | Links two accounts as one person | `renderer/components/community/person-card-body.tsx:389` | [ ] | [ ] | [ ] |
-| P1195 | Card "More for {name}" menu: "Mark as bot" / "Not a bot", "Forget {name}…" | Bot flag and forgetting a person | `renderer/components/community/person-card-body.tsx:204` | [ ] | [ ] | [ ] |
-| P1196 | Memory "Forget …" + confirm | Deletes one remembered fact | `renderer/components/community/person-card-body.tsx:300` | [ ] | [ ] | [ ] |
-| P1197 | Linked account "Not the same" | Unlinks an account | `renderer/components/community/person-card-body.tsx:520` | [ ] | [ ] | [ ] |
-| P1198 | Suggestion alert "Same person" / "Not the same" | Answers a link suggestion | `renderer/components/community/person-card-body.tsx:557` | [ ] | [ ] | [ ] |
-| P1199 | "Your note" textarea (⌘/Ctrl+Enter) | Private note about the person | `renderer/components/community/person-card-body.tsx:602` | [ ] | [ ] | [ ] |
-| P1200 | YouTube retention note | Explains YouTube data limits | `renderer/components/community/person-card-body.tsx:340` | [ ] | [ ] | [ ] |
-| P1201 | "Preview": "Play a welcome" / "Play a milestone" | Local preview of the avatar's reactions | `renderer/components/community/community-preview.tsx:84` | [ ] | [ ] | [ ] |
-| P1202 | Settings: "Remember my community" switch | Turns on tracking of regulars | `renderer/components/community/community-tab.tsx:590` | [ ] | [ ] | [ ] |
-| P1203 | "Welcome regulars on stream" switch | Bubble welcome for regulars | `renderer/components/community/community-tab.tsx:596` | [ ] | [ ] | [ ] |
-| P1204 | "Show milestone cards automatically" switch | Auto-shows milestone cards | `renderer/components/community/community-tab.tsx:608` | [ ] | [ ] | [ ] |
-| P1205 | "Regular after" select | Streams needed before someone counts as a regular | `renderer/components/community/community-tab.tsx:620` | [ ] | [ ] | [ ] |
-| P1206 | Retention quiet alert | Explains what is kept | `renderer/components/community/community-tab.tsx:645` | [ ] | [ ] | [ ] |
-| P1207 | Premium: "Sidekick remembers" switch | Keeps facts viewers share | `renderer/components/community/community-tab.tsx:666` | [ ] | [ ] | [ ] |
-| P1208 | Premium: "Community sync" switch (always disabled) | Placeholder for syncing across computers | `renderer/components/community/community-tab.tsx:680` | [ ] | [ ] | [ ] |
-| P1209 | "Your data": disclosure line + "Copy" / "Copied" | Copies the viewer disclosure line | `renderer/components/community/community-tab.tsx:711` | [ ] | [ ] | [ ] |
-| P1210 | "Export…" / "Import…" | Saves or loads the community file | `renderer/components/community/community-tab.tsx:724` | [ ] | [ ] | [ ] |
-| P1211 | "Forget everyone…" + confirm "Forget everyone?" | Wipes all community data | `renderer/components/community/community-tab.tsx:746` | [ ] | [ ] | [ ] |
+| P1184 | Premium lock alert | Says "Sidekick remembers" needs Premium | `renderer/components/community/community-tab.tsx:98` | [x] | [ ] | [ ] |
+| P1185 | "Your community" header + "Reading your past streams" progress | Summary of the community and backfill progress | `renderer/components/community/community-tab.tsx:156` | [x] | [ ] | [ ] |
+| P1186 | Remember offer alert ("Turn on" / "Not now") | Offers to turn on Sidekick remembers | `renderer/components/community/remember-offer.tsx:42` | [x] | [ ] | [ ] |
+| P1187 | "Links that need you": "Same person" / "Not the same" | Resolves suggestions to merge accounts | `renderer/components/community/community-tab.tsx:222` | [x] | [ ] | [ ] |
+| P1188 | "People": "Search people" input | Filters people | `renderer/components/community/community-tab.tsx:366` | [x] | [ ] | [ ] |
+| P1189 | "Sort people" select (Streams / Last chat / Name) | Sorts the list | `renderer/components/community/community-tab.tsx:379` | [x] | [ ] | [ ] |
+| P1190 | "Show" segmented (Regulars / Everyone / Linked / Bots) | Filters the list | `renderer/components/community/community-tab.tsx:391` | [x] | [ ] | [ ] |
+| P1191 | People list rows / empty state / loading spinner | Opens a person's card | `renderer/components/community/community-tab.tsx:402` | [x] | [ ] | [ ] |
+| P1192 | Person card dialog (name title) | Shows the person's details | `renderer/components/community/community-tab.tsx:125` | [x] | [ ] | [ ] |
+| P1193 | Card "Wave" / "Waved" | Avatar waves at this person | `renderer/components/community/person-card-body.tsx:366` | [x] | [ ] | [ ] |
+| P1194 | Card "Same person as…" picker (search, "Same person" confirm) | Links two accounts as one person | `renderer/components/community/person-card-body.tsx:389` | [x] | [ ] | [ ] |
+| P1195 | Card "More for {name}" menu: "Mark as bot" / "Not a bot", "Forget {name}…" | Bot flag and forgetting a person | `renderer/components/community/person-card-body.tsx:204` | [x] | [ ] | [ ] |
+| P1196 | Memory "Forget …" + confirm | Deletes one remembered fact | `renderer/components/community/person-card-body.tsx:300` | [x] | [ ] | [ ] |
+| P1197 | Linked account "Not the same" | Unlinks an account | `renderer/components/community/person-card-body.tsx:520` | [x] | [ ] | [ ] |
+| P1198 | Suggestion alert "Same person" / "Not the same" | Answers a link suggestion | `renderer/components/community/person-card-body.tsx:557` | [x] | [ ] | [ ] |
+| P1199 | "Your note" textarea (⌘/Ctrl+Enter) | Private note about the person | `renderer/components/community/person-card-body.tsx:602` | [x] | [ ] | [ ] |
+| P1200 | YouTube retention note | Explains YouTube data limits | `renderer/components/community/person-card-body.tsx:340` | [x] | [ ] | [ ] |
+| P1201 | "Preview": "Play a welcome" / "Play a milestone" | Local preview of the avatar's reactions | `renderer/components/community/community-preview.tsx:84` | [x] | [ ] | [ ] |
+| P1202 | Settings: "Remember my community" switch | Turns on tracking of regulars | `renderer/components/community/community-tab.tsx:590` | [x] | [ ] | [ ] |
+| P1203 | "Welcome regulars on stream" switch | Bubble welcome for regulars | `renderer/components/community/community-tab.tsx:596` | [x] | [ ] | [ ] |
+| P1204 | "Show milestone cards automatically" switch | Auto-shows milestone cards | `renderer/components/community/community-tab.tsx:608` | [x] | [ ] | [ ] |
+| P1205 | "Regular after" select | Streams needed before someone counts as a regular | `renderer/components/community/community-tab.tsx:620` | [x] | [ ] | [ ] |
+| P1206 | Retention quiet alert | Explains what is kept | `renderer/components/community/community-tab.tsx:645` | [x] | [ ] | [ ] |
+| P1207 | Premium: "Sidekick remembers" switch | Keeps facts viewers share | `renderer/components/community/community-tab.tsx:666` | [x] | [ ] | [ ] |
+| P1208 | Premium: "Community sync" switch (always disabled) | Placeholder for syncing across computers | `renderer/components/community/community-tab.tsx:680` | [x] | [ ] | [ ] |
+| P1209 | "Your data": disclosure line + "Copy" / "Copied" | Copies the viewer disclosure line | `renderer/components/community/community-tab.tsx:711` | [x] | [ ] | [ ] |
+| P1210 | "Export…" / "Import…" | Saves or loads the community file | `renderer/components/community/community-tab.tsx:724` | [x] | [ ] | [ ] |
+| P1211 | "Forget everyone…" + confirm "Forget everyone?" | Wipes all community data | `renderer/components/community/community-tab.tsx:746` | [x] | [ ] | [ ] |
 
 ### Sidekick → Voice (buddy-voice-commands.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1212 | Off alert "Turn on Sidekick Live to use voice commands." + "Go to Overview" | Points to the Overview switch | `renderer/components/buddy-voice-commands.tsx:120` | [ ] | [ ] | [ ] |
-| P1213 | Paused lines | Say why commands are paused | `renderer/components/buddy-voice-commands.tsx:131` | [ ] | [ ] | [ ] |
-| P1214 | Section "Commands": "What you can say" list | Lists the voice commands | `renderer/components/buddy-voice-commands.tsx:145` | [ ] | [ ] | [ ] |
-| P1215 | "Commands need “Sidekick” first" switch | Requires the wake word | `renderer/components/buddy-voice-commands.tsx:171` | [ ] | [ ] | [ ] |
-| P1216 | "Before Sidekick removes a comment" (Confirm first / 5-second countdown) | Sets the removal confirmation | `renderer/components/buddy-voice-commands.tsx:183` | [ ] | [ ] | [ ] |
-| P1217 | Section "Remove messages": per-platform rows + fix button (tooltip) | Reconnects accounts so Sidekick can remove messages | `renderer/components/buddy-voice-commands.tsx:203` | [ ] | [ ] | [ ] |
+| P1212 | Off alert "Turn on Sidekick Live to use voice commands." + "Go to Overview" | Points to the Overview switch | `renderer/components/buddy-voice-commands.tsx:120` | [x] | [ ] | [ ] |
+| P1213 | Paused lines | Say why commands are paused | `renderer/components/buddy-voice-commands.tsx:131` | [x] | [ ] | [ ] |
+| P1214 | Section "Commands": "What you can say" list | Lists the voice commands | `renderer/components/buddy-voice-commands.tsx:145` | [x] | [ ] | [ ] |
+| P1215 | "Commands need “Sidekick” first" switch | Requires the wake word | `renderer/components/buddy-voice-commands.tsx:171` | [x] | [ ] | [ ] |
+| P1216 | "Before Sidekick removes a comment" (Confirm first / 5-second countdown) | Sets the removal confirmation | `renderer/components/buddy-voice-commands.tsx:183` | [x] | [ ] | [ ] |
+| P1217 | Section "Remove messages": per-platform rows + fix button (tooltip) | Reconnects accounts so Sidekick can remove messages | `renderer/components/buddy-voice-commands.tsx:203` | [x] | [ ] | [ ] |
 
 ### Sidekick → Reports (buddy-report-card.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1218 | Section "Stream report" | Shows what happened on the stream | `renderer/components/buddy-report-card.tsx:106` | [ ] | [ ] | [ ] |
-| P1219 | "Markers" button | Opens the session's markers dialog | `renderer/components/buddy-report-card.tsx:111` | [ ] | [ ] | [ ] |
-| P1220 | "Stream" select | Switches which session's report shows | `renderer/components/buddy-report-card.tsx:211` | [ ] | [ ] | [ ] |
-| P1221 | Error alert + "Try again" | Reloads the report | `renderer/components/buddy-report-card.tsx:146` | [ ] | [ ] | [ ] |
-| P1222 | Loading line / empty state | Shown with no report | `renderer/components/buddy-report-card.tsx:178` | [ ] | [ ] | [ ] |
-| P1223 | Off note alert | Says Sidekick was off | `renderer/components/buddy-report-card.tsx:247` | [ ] | [ ] | [ ] |
-| P1224 | Chat platform chips (tooltip counts) | Messages per platform | `renderer/components/buddy-report-card.tsx:446` | [ ] | [ ] | [ ] |
-| P1225 | Lists: "Said on stream", "Posted as you", "Missed questions", "Open promises", "Moments", "Alerts", "Commands", "Regulars back", "Milestones" | Report sections | `renderer/components/buddy-report-card.tsx:272` | [ ] | [ ] | [ ] |
-| P1226 | Summary lock alert | Premium lock for the summary | `renderer/components/buddy-report-card.tsx:582` | [ ] | [ ] | [ ] |
-| P1227 | "Show all {n}" / "Show fewer" | Expands a capped list | `renderer/components/buddy-report-card.tsx:673` | [ ] | [ ] | [ ] |
+| P1218 | Section "Stream report" | Shows what happened on the stream | `renderer/components/buddy-report-card.tsx:106` | [x] | [ ] | [ ] |
+| P1219 | "Markers" button | Opens the session's markers dialog | `renderer/components/buddy-report-card.tsx:111` | [x] | [ ] | [ ] |
+| P1220 | "Stream" select | Switches which session's report shows | `renderer/components/buddy-report-card.tsx:211` | [x] | [ ] | [ ] |
+| P1221 | Error alert + "Try again" | Reloads the report | `renderer/components/buddy-report-card.tsx:146` | [x] | [ ] | [ ] |
+| P1222 | Loading line / empty state | Shown with no report | `renderer/components/buddy-report-card.tsx:178` | [x] | [ ] | [ ] |
+| P1223 | Off note alert | Says Sidekick was off | `renderer/components/buddy-report-card.tsx:247` | [x] | [ ] | [ ] |
+| P1224 | Chat platform chips (tooltip counts) | Messages per platform | `renderer/components/buddy-report-card.tsx:446` | [x] | [ ] | [ ] |
+| P1225 | Lists: "Said on stream", "Posted as you", "Missed questions", "Open promises", "Moments", "Alerts", "Commands", "Regulars back", "Milestones" | Report sections | `renderer/components/buddy-report-card.tsx:272` | [x] | [ ] | [ ] |
+| P1226 | Summary lock alert | Premium lock for the summary | `renderer/components/buddy-report-card.tsx:582` | [x] | [ ] | [ ] |
+| P1227 | "Show all {n}" / "Show fewer" | Expands a capped list | `renderer/components/buddy-report-card.tsx:673` | [x] | [ ] | [ ] |
 
 ### Sidekick → Clean cut (clean-cut/*.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1228 | Lock alert | Says why Clean cut is locked | `renderer/components/clean-cut/clean-cut-card.tsx:278` | [ ] | [ ] | [ ] |
-| P1229 | Section "Clean cut": "Make a clean cut of every recording" switch | Auto-cuts every recording | `renderer/components/clean-cut/clean-cut-card.tsx:299` | [ ] | [ ] | [ ] |
-| P1230 | Section "Recordings": "Search recordings…" | Filters recordings | `renderer/components/clean-cut/clean-cut-card.tsx:477` | [ ] | [ ] | [ ] |
-| P1231 | Recording rows / "No recordings match" / "Show all (n)" / "Show fewer" | Picks a recording | `renderer/components/clean-cut/clean-cut-card.tsx:487` | [ ] | [ ] | [ ] |
-| P1232 | "Kind of cut" (Clean / Condensed) | Chooses the cut type | `renderer/components/clean-cut/clean-cut-card.tsx:333` | [ ] | [ ] | [ ] |
-| P1233 | "Condensed length" segmented + "Make again" | Sets the condensed target length | `renderer/components/clean-cut/clean-cut-card.tsx:342` | [ ] | [ ] | [ ] |
-| P1234 | "Make a clean cut" / "Make a condensed cut" | Starts the cut job | `renderer/components/clean-cut/clean-cut-card.tsx:600` | [ ] | [ ] | [ ] |
-| P1235 | "Review" / "Cancel" (while busy) | Opens the review or cancels the job | `renderer/components/clean-cut/clean-cut-card.tsx:610` | [ ] | [ ] | [ ] |
-| P1236 | "Show in Finder" / "Show in Explorer" | Reveals the output file *(Label varies: "Show in Finder" on macOS, "Show in Explorer" on Windows, other text on Linux (lib/platform.ts:114))* | `renderer/components/clean-cut/clean-cut-card.tsx:630 (label renderer/lib/platform.ts:114)` | [ ] | [ ] | [ ] |
-| P1237 | "Open in Library" | Opens the output session in Library | `renderer/components/clean-cut/clean-cut-card.tsx:638` | [ ] | [ ] | [ ] |
-| P1238 | "Allow cloud AI…" | Opens the consent dialog | `renderer/components/clean-cut/clean-cut-card.tsx:685` | [ ] | [ ] | [ ] |
-| P1239 | Failed status alert + toasts with "Retry" | Retries a failed cut | `renderer/components/clean-cut/clean-cut-card.tsx:374` | [ ] | [ ] | [ ] |
-| P1240 | Consent dialog "Make a clean cut?" / "Turn on Clean cut?" | Asks for cloud-AI consent ("Allow and make it" / "Allow and turn on") | `renderer/components/clean-cut/clean-cut-consent-dialog.tsx:48` | [ ] | [ ] | [ ] |
-| P1241 | Review: back button | Leaves the review | `renderer/components/clean-cut/clean-cut-review.tsx:705` | [ ] | [ ] | [ ] |
-| P1242 | Review "Kind of cut" segmented | Switches between the clean and condensed drafts | `renderer/components/clean-cut/clean-cut-review.tsx:731` | [ ] | [ ] | [ ] |
-| P1243 | "What plays" (Preview the cut / Original) | Chooses the playback source | `renderer/components/clean-cut/clean-cut-review.tsx:766` | [ ] | [ ] | [ ] |
-| P1244 | "Cut selection" (Backspace/Delete) | Removes the selected words | `renderer/components/clean-cut/clean-cut-review.tsx:789` | [ ] | [ ] | [ ] |
-| P1245 | "Undo" (⌘/Ctrl+Z) / "Redo" (⌘/Ctrl+Shift+Z) | Undoes or redoes draft edits | `renderer/components/clean-cut/clean-cut-review.tsx:809` | [ ] | [ ] | [ ] |
-| P1246 | "Follow playback" switch | Transcript scrolls with playback | `renderer/components/clean-cut/clean-cut-review.tsx:841` | [ ] | [ ] | [ ] |
-| P1247 | Keys: Space play, ←/→ seek ±5s, ↑/↓ step removals, Enter toggle | Review keyboard control | `renderer/components/clean-cut/clean-cut-review.tsx:664` | [ ] | [ ] | [ ] |
-| P1248 | "Kinds of cuts" toggle chips | Turns categories of removals on or off | `renderer/components/clean-cut/clean-cut-review.tsx:1087` | [ ] | [ ] | [ ] |
-| P1249 | Timeline pins (tooltip, click seeks) | Jumps to a removal | `renderer/components/clean-cut/clean-cut-review.tsx:1172` | [ ] | [ ] | [ ] |
-| P1250 | Transcript words / removal blocks with keep/cut button | Toggles individual removals | `renderer/components/clean-cut/clean-cut-transcript.tsx:513` | [ ] | [ ] | [ ] |
-| P1251 | Transcript-unreadable alert + "Try again" / empty "No speech found" | Fallback states | `renderer/components/clean-cut/clean-cut-review.tsx:861` | [ ] | [ ] | [ ] |
-| P1252 | Footer "Retry", "Open in Library", "Discard" | Footer actions for the job and draft | `renderer/components/clean-cut/clean-cut-review.tsx:939` | [ ] | [ ] | [ ] |
-| P1253 | "Save changes" (⌘/Ctrl+S) | Saves the edited cut | `renderer/components/clean-cut/clean-cut-review.tsx:978` | [ ] | [ ] | [ ] |
-| P1254 | Confirm "Leave without saving?" ("Keep editing" / "Discard changes") | Guards against leaving unsaved edits | `renderer/components/clean-cut/clean-cut-review.tsx:990` | [ ] | [ ] | [ ] |
-| P1255 | "Couldn't open the cut" + "Try again" / waiting empty state + "Open Clean cut" | Error and waiting states | `renderer/components/clean-cut/clean-cut-review.tsx:1034` | [ ] | [ ] | [ ] |
+| P1228 | Lock alert | Says why Clean cut is locked | `renderer/components/clean-cut/clean-cut-card.tsx:278` | [x] | [ ] | [ ] |
+| P1229 | Section "Clean cut": "Make a clean cut of every recording" switch | Auto-cuts every recording | `renderer/components/clean-cut/clean-cut-card.tsx:299` | [x] | [ ] | [ ] |
+| P1230 | Section "Recordings": "Search recordings…" | Filters recordings | `renderer/components/clean-cut/clean-cut-card.tsx:477` | [x] | [ ] | [ ] |
+| P1231 | Recording rows / "No recordings match" / "Show all (n)" / "Show fewer" | Picks a recording | `renderer/components/clean-cut/clean-cut-card.tsx:487` | [x] | [ ] | [ ] |
+| P1232 | "Kind of cut" (Clean / Condensed) | Chooses the cut type | `renderer/components/clean-cut/clean-cut-card.tsx:333` | [x] | [ ] | [ ] |
+| P1233 | "Condensed length" segmented + "Make again" | Sets the condensed target length | `renderer/components/clean-cut/clean-cut-card.tsx:342` | [x] | [ ] | [ ] |
+| P1234 | "Make a clean cut" / "Make a condensed cut" | Starts the cut job | `renderer/components/clean-cut/clean-cut-card.tsx:600` | [x] | [ ] | [ ] |
+| P1235 | "Review" / "Cancel" (while busy) | Opens the review or cancels the job | `renderer/components/clean-cut/clean-cut-card.tsx:610` | [x] | [ ] | [ ] |
+| P1236 | "Show in Finder" / "Show in Explorer" | Reveals the output file *(Label varies: "Show in Finder" on macOS, "Show in Explorer" on Windows, other text on Linux (lib/platform.ts:114))* | `renderer/components/clean-cut/clean-cut-card.tsx:630 (label renderer/lib/platform.ts:114)` | [x] | [ ] | [ ] |
+| P1237 | "Open in Library" | Opens the output session in Library | `renderer/components/clean-cut/clean-cut-card.tsx:638` | [x] | [ ] | [ ] |
+| P1238 | "Allow cloud AI…" | Opens the consent dialog | `renderer/components/clean-cut/clean-cut-card.tsx:685` | [x] | [ ] | [ ] |
+| P1239 | Failed status alert + toasts with "Retry" | Retries a failed cut | `renderer/components/clean-cut/clean-cut-card.tsx:374` | [x] | [ ] | [ ] |
+| P1240 | Consent dialog "Make a clean cut?" / "Turn on Clean cut?" | Asks for cloud-AI consent ("Allow and make it" / "Allow and turn on") | `renderer/components/clean-cut/clean-cut-consent-dialog.tsx:48` | [x] | [ ] | [ ] |
+| P1241 | Review: back button | Leaves the review | `renderer/components/clean-cut/clean-cut-review.tsx:705` | [x] | [ ] | [ ] |
+| P1242 | Review "Kind of cut" segmented | Switches between the clean and condensed drafts | `renderer/components/clean-cut/clean-cut-review.tsx:731` | [x] | [ ] | [ ] |
+| P1243 | "What plays" (Preview the cut / Original) | Chooses the playback source | `renderer/components/clean-cut/clean-cut-review.tsx:766` | [x] | [ ] | [ ] |
+| P1244 | "Cut selection" (Backspace/Delete) | Removes the selected words | `renderer/components/clean-cut/clean-cut-review.tsx:789` | [x] | [ ] | [ ] |
+| P1245 | "Undo" (⌘/Ctrl+Z) / "Redo" (⌘/Ctrl+Shift+Z) | Undoes or redoes draft edits | `renderer/components/clean-cut/clean-cut-review.tsx:809` | [x] | [ ] | [ ] |
+| P1246 | "Follow playback" switch | Transcript scrolls with playback | `renderer/components/clean-cut/clean-cut-review.tsx:841` | [x] | [ ] | [ ] |
+| P1247 | Keys: Space play, ←/→ seek ±5s, ↑/↓ step removals, Enter toggle | Review keyboard control | `renderer/components/clean-cut/clean-cut-review.tsx:664` | [x] | [ ] | [ ] |
+| P1248 | "Kinds of cuts" toggle chips | Turns categories of removals on or off | `renderer/components/clean-cut/clean-cut-review.tsx:1087` | [x] | [ ] | [ ] |
+| P1249 | Timeline pins (tooltip, click seeks) | Jumps to a removal | `renderer/components/clean-cut/clean-cut-review.tsx:1172` | [x] | [ ] | [ ] |
+| P1250 | Transcript words / removal blocks with keep/cut button | Toggles individual removals | `renderer/components/clean-cut/clean-cut-transcript.tsx:513` | [x] | [ ] | [ ] |
+| P1251 | Transcript-unreadable alert + "Try again" / empty "No speech found" | Fallback states | `renderer/components/clean-cut/clean-cut-review.tsx:861` | [x] | [ ] | [ ] |
+| P1252 | Footer "Retry", "Open in Library", "Discard" | Footer actions for the job and draft | `renderer/components/clean-cut/clean-cut-review.tsx:939` | [x] | [ ] | [ ] |
+| P1253 | "Save changes" (⌘/Ctrl+S) | Saves the edited cut | `renderer/components/clean-cut/clean-cut-review.tsx:978` | [x] | [ ] | [ ] |
+| P1254 | Confirm "Leave without saving?" ("Keep editing" / "Discard changes") | Guards against leaving unsaved edits | `renderer/components/clean-cut/clean-cut-review.tsx:990` | [x] | [ ] | [ ] |
+| P1255 | "Couldn't open the cut" + "Try again" / waiting empty state + "Open Clean cut" | Error and waiting states | `renderer/components/clean-cut/clean-cut-review.tsx:1034` | [x] | [ ] | [ ] |
 
 ### Co-host pane (Stream Manager; cohost-pane.tsx, cohost-*.tsx)
 
