@@ -838,7 +838,12 @@ fn report_list<T>(
     }
     let expanded = state.expanded.contains(id);
     let (visible, _) = rv::cap_report_list(items, expanded, rv::LIST_CAP);
-    let mut list = GroupedList::new().label(rv::list_label(label, items.len()));
+    // "Moments · 8": the count at normal weight after the semibold name
+    // (`font-normal tabular-nums`); the whole heading stays the group's name.
+    let mut list = GroupedList::new()
+        .label(label)
+        .label_count(items.len().to_string())
+        .accessibility_label(rv::list_label(label, items.len()));
     for (index, item) in visible.iter().enumerate() {
         list = list.row(build(index, item));
     }
