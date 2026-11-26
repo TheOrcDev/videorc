@@ -587,14 +587,20 @@ impl Reader {
                             commit_at = commit_at.or(Some(at));
                             if let Ok(mut t) = self.telemetry.lock() {
                                 t.layer_presented += 1;
+                                t.layer_delivered += 1;
                                 t.cpu_present_to_release_ms =
                                     report.released.then(|| at.elapsed().as_secs_f64() * 1000.0);
                             }
                         }
                         // Hidden or unplaced: acknowledged, not drawn.
                         // Neither a present nor a drop; a frame the texture
-                        // route bound still counts.
-                        (Some(_), None) => {}
+                        // route bound still counts. The presenter holds it,
+                        // so showing the presenter now shows this frame.
+                        (Some(_), None) => {
+                            if let Ok(mut t) = self.telemetry.lock() {
+                                t.layer_delivered += 1;
+                            }
+                        }
                         (_, error) => {
                             if let Ok(mut t) = self.telemetry.lock() {
                                 t.dropped += 1;
