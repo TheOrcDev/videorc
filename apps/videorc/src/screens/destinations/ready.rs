@@ -1,16 +1,17 @@
 //! Ready to go live checklist (`ReadyToGoLive`, P766–P776).
 
-use gpui::{AnyElement, Context, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px};
 use videorc_app_core::livestream::copy as page_copy;
 use videorc_app_core::livestream::plan;
 use videorc_app_core::livestream::ready::{self, ReadyInput, ReadyRow, ReadyView, RowState};
 use videorc_app_core::livestream::targets;
+use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::theme::{self, TypeScale, hsla};
-use videorc_kit::tokens::text;
+use videorc_kit::tokens::{size, text};
 
 use super::DestinationsPanel;
 
@@ -48,6 +49,31 @@ impl DestinationsPanel {
         })
     }
 
+    /// `videoProfileCompatibility`'s refusal or warning: a warning Alert in
+    /// its own block above Output quality (`go-live-panel.tsx`), never
+    /// coloured words.
+    pub(super) fn compatibility_alert(
+        &self,
+        view: &ReadyView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let warning = view.warning.clone()?;
+        let t = theme::current(window, cx).theme();
+        Some(
+            div()
+                .p(px(size::GUTTER))
+                .border_b_1()
+                .border_color(hsla(t.border))
+                .child(
+                    Alert::new("destinations-compatibility")
+                        .variant(AlertVariant::Warning)
+                        .description(SharedString::from(warning)),
+                )
+                .into_any_element(),
+        )
+    }
+
     pub(super) fn ready_section(
         &self,
         view: &ReadyView,
@@ -56,18 +82,9 @@ impl DestinationsPanel {
     ) -> AnyElement {
         let t = theme::current(window, cx).theme();
         let entity = cx.entity();
-        let mut section = PanelSection::new("destinations-ready")
+        let section = PanelSection::new("destinations-ready")
             .title(page_copy::READY_TO_GO_LIVE)
             .last(true);
-
-        if let Some(warning) = &view.warning {
-            section = section.child(
-                div()
-                    .type_scale(text::META)
-                    .text_color(hsla(t.warning))
-                    .child(warning.clone()),
-            );
-        }
 
         let mut list = GroupedList::new();
         for (index, row) in view.rows.iter().enumerate() {
