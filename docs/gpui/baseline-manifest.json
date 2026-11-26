@@ -12,7 +12,6 @@
     "account-menu",
     "health",
     "studio",
-    "studio-retro",
     "show-stage",
     "stream-manager",
     "scene",
@@ -67,7 +66,7 @@
     }
   ],
   "notes": [
-    "Pages and page tabs are shot at 960x660, 1100x720 and 1280x800; menus, dialogs, the palette, toasts, Retro LCD, Chat in Studio, the live states and first run at 1280x800; the Stream Manager at 420x640, 700x640, 900x640 and 1100x700; Captions and Notes at their default frames. Sizes are CSS pixels: the PNGs are 2x.",
+    "Pages and page tabs are shot at 960x660, 1100x720 and 1280x800; menus, dialogs, the palette, toasts, Chat in Studio, the live states and first run at 1280x800; the Stream Manager at 420x640, 700x640, 900x640 and 1100x700; Captions and Notes at their default frames. Sizes are CSS pixels: the PNGs are 2x.",
     "Increase Contrast (prefers-contrast: more, by CDP media emulation) is shot over both themes. Every shot is Page.captureScreenshot of the window page, so the native window frame and traffic lights are not in it.",
     "The profile is the test pattern with the camera and the microphone off, the Demo scene working, and three saved scenes: Talking head and Side by side need a camera, so they read \"Resolve sources\". The clips ring is off. Destinations hold fake keys; the on-air shot streams only to a local RTMP sink.",
     "Not fixed between runs: Library session names, dates and thumbnails (two real 3 s test-pattern recordings), the Schedule dialog clock, the recording and on-air timers, and any host notice the app raises.",
@@ -5906,54 +5905,6 @@
       "path": "stream-manager/band-900-900x640-light.png",
       "bytes": 138559,
       "sha256": "1cd9b1e0c56dc39bfe6e4951c6535cf56ececde608014b45ea6f7ea740e93149",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
-    },
-    {
-      "screen": "studio-retro",
-      "state": "default",
-      "theme": "dark",
-      "contrast": "more",
-      "width": 1280,
-      "height": 800,
-      "path": "studio-retro/default-1280x800-dark-contrast.png",
-      "bytes": 360280,
-      "sha256": "f5c237975a652e265af49eacb226848383d8a2fcaf43a0bb4137bf2aa0afd264",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
-    },
-    {
-      "screen": "studio-retro",
-      "state": "default",
-      "theme": "dark",
-      "contrast": "normal",
-      "width": 1280,
-      "height": 800,
-      "path": "studio-retro/default-1280x800-dark.png",
-      "bytes": 355062,
-      "sha256": "bbd5e371e86a46e2d72f8ca06e89d8c9bb276812e4d04bcd100302cc051f0c98",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
-    },
-    {
-      "screen": "studio-retro",
-      "state": "default",
-      "theme": "light",
-      "contrast": "more",
-      "width": 1280,
-      "height": 800,
-      "path": "studio-retro/default-1280x800-light-contrast.png",
-      "bytes": 324260,
-      "sha256": "04f8bebc6a1ee83bd7369fb109b88325093b1fd343c6c336561b672836f2f9a8",
-      "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
-    },
-    {
-      "screen": "studio-retro",
-      "state": "default",
-      "theme": "light",
-      "contrast": "normal",
-      "width": 1280,
-      "height": 800,
-      "path": "studio-retro/default-1280x800-light.png",
-      "bytes": 320833,
-      "sha256": "afa40b1ef71f6182f31cfb16ea2ce550ea1916309c4420bfbd3397557b150901",
       "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
     },
     {
