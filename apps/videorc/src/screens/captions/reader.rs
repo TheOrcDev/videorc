@@ -357,14 +357,20 @@ impl Render for CaptionsReader {
                 .flex()
                 .items_start()
                 .gap(px(8.))
+                // `text-lg`: 18 px on a 28 px line, normal weight (the root's
+                // label scale would make it semibold on a 16 px line).
                 .text_size(px(18.))
+                .line_height(px(28.))
+                .font_weight(gpui::FontWeight::NORMAL)
                 .text_color(hsla(if notice.failed {
                     t.foreground
                 } else {
                     t.muted_foreground
                 }));
             if notice.failed {
-                line = line.child(icon(IconName::WarningCircle, 16., hsla(t.destructive)));
+                // `mt-1 size-4`: on the 28 px line.
+                line =
+                    line.child(icon(IconName::WarningCircle, 16., hsla(t.destructive)).mt(px(4.)));
             }
             body = body.child(line.child(notice.text));
         }
@@ -376,7 +382,8 @@ impl Render for CaptionsReader {
                     "reader-{}",
                     line.identity()
                 )))
-                .line_height(gpui::relative(1.3));
+                // `leading-snug`.
+                .line_height(gpui::relative(1.375));
             row = if latest {
                 row.text_size(px(size))
                     .font_weight(if style.id == "high-contrast" {
@@ -391,7 +398,10 @@ impl Render for CaptionsReader {
                     }))
                     .when(style.id == "lower-third", |row| row.w_full())
             } else {
-                row.text_size(px(20.)).text_color(hsla(t.muted_foreground))
+                // `text-xl text-muted-foreground`, normal weight.
+                row.text_size(px(20.))
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .text_color(hsla(t.muted_foreground))
             };
             body = body.child(row.child(line.text));
         }
