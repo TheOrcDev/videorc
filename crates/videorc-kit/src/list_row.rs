@@ -404,6 +404,8 @@ pub struct GroupedList {
     accessibility_label: Option<SharedString>,
     rows: SmallVec<[AnyElement; 4]>,
     appearance: Option<Appearance>,
+    /// Each divider adds its 1 px instead of overlaying the row's top.
+    padded_rows: bool,
 }
 
 impl GroupedList {
@@ -415,7 +417,18 @@ impl GroupedList {
             accessibility_label: None,
             rows: SmallVec::new(),
             appearance: None,
+            padded_rows: false,
         }
+    }
+
+    /// The rows are padded blocks that size to their content (a setting's
+    /// row with `py`, a min height or a description), so each divider adds
+    /// its 1 px above the row, as Electron's `divide-y` border does on an
+    /// auto-height row. Off by default: a fixed-height row (a 32 px
+    /// `ListRow`, `h-8`) keeps its height with the divider inside it.
+    pub fn padded_rows(mut self, padded: bool) -> Self {
+        self.padded_rows = padded;
+        self
     }
 
     /// Stable ID for an unnamed group, or repeated groups with the same label.
@@ -475,8 +488,17 @@ impl RenderOnce for GroupedList {
         let a11y = self.accessibility_label.clone().or(self.label.clone());
         let id = self.id.or_else(|| a11y.clone().map(ElementId::from));
         // Divider is painted inside each following row so the row stays 32 px
-        // (Electron), not 33 with an external border.
+        // (Electron), not 33 with an external border; padded rows take it as
+        // a border on top instead (`divide-y` on an auto-height row).
+        let padded = self.padded_rows;
         let rows = self.rows.into_iter().enumerate().map(|(index, row)| {
+            if padded {
+                return div()
+                    .when(index > 0, |wrap| {
+                        wrap.border_t_1().border_color(hsla(t.border))
+                    })
+                    .child(row);
+            }
             div().relative().child(row).when(index > 0, |wrap| {
                 wrap.child(
                     div()
