@@ -149,7 +149,7 @@ pub fn state_json(snapshot: &StudioSnapshot) -> Value {
             "on": snapshot.clips.on,
             "armed": snapshot.clips.armed,
             "running": snapshot.clips.running,
-            "state": serde_json::to_value(&snapshot.clips.state).unwrap_or(Value::Null),
+            "state": serde_json::to_value(snapshot.clips.state).unwrap_or(Value::Null),
             "blockedReason": snapshot.clips.blocked_reason,
             "waitReason": snapshot.clips.wait_reason,
         },
