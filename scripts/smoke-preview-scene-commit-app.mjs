@@ -86,6 +86,7 @@ try {
   }
   // GPUI's slider lands on the step nearest the press.
   if (gpuiApp && typeof marginInputResult?.value === 'number') marginValue = marginInputResult.value
+  if (gpuiApp) console.log(`Margin set to ${marginInputResult.value} by ${marginInputResult.via}.`)
   const marginCompositor = await waitForCompositorCameraMargin(
     ws,
     marginValue,
@@ -177,21 +178,33 @@ async function setElectronMargin(smoke, marginValue) {
  * no focus from a pointer click, so the press lands on its track at the
  * wanted fraction (the 16 px thumb travels the track less its width). A
  * pointer press rounds to a step near the wanted one: the answer is the
- * margin the compositor committed. Once the kit slider focuses on pointer
- * down (Radix; sent to the kit lane 11-26), this becomes click, Home, then
- * one Arrow Right per point, and lands on 18 exactly.
+ * margin the compositor committed.
  */
 async function setGpuiMargin(smoke, wanted) {
   const ui = createUiDriver(smoke, { app: 'gpui' })
   const margin = { role: 'slider', name: 'Margin' }
   await ui.openTab('layout', { waitFor: margin })
-  const windowHeight = (await ui.tree({ depth: 0 }))?.bounds?.height ?? 800
+  // Scroll the slider into the top of the window by wheeling over a node in
+  // its own column (the inspector scrolls apart from the lead column; the
+  // window's centre may be over the other one). The window's node carries
+  // no bounds, so "in view" is a band any window size shows.
+  const inView = (bounds) => bounds && bounds.y >= 96 && bounds.y + bounds.height <= 520
   let node = await ui.waitFor(margin)
-  for (let turn = 0; turn < 12 && node.bounds; turn += 1) {
-    if (node.bounds.y >= 0 && node.bounds.y + node.bounds.height <= windowHeight - 8) break
-    await smokeCommand(smoke, 'ui-scroll', { dy: node.bounds.y < 0 ? -240 : 240 })
+  for (let turn = 0; turn < 16 && node.bounds && !inView(node.bounds); turn += 1) {
+    const anchor = columnAnchor(await ui.tree(), node.bounds)
+    if (!anchor) break
+    await smokeCommand(smoke, 'ui-scroll', {
+      ...anchor,
+      dy: node.bounds.y < 96 ? -200 : 200
+    })
     await sleep(200)
     node = await ui.waitFor(margin)
+  }
+  if (!inView(node.bounds)) {
+    return {
+      ok: false,
+      reason: `the Margin slider stayed out of view: ${JSON.stringify(node.bounds)}`
+    }
   }
   const bounds = node.bounds
   if (!bounds) return { ok: false, reason: 'the Margin slider has no bounds' }
@@ -214,7 +227,31 @@ async function setGpuiMargin(smoke, wanted) {
       reason: `the Margin slider committed ${value} (was ${before}), wanted about ${wanted}`
     }
   }
-  return { ok: true, value }
+  return { ok: true, value, via: 'press' }
+}
+
+/** A labelled node in view in the same column as `target`, as a driver
+ * selector, to wheel over. */
+function columnAnchor(tree, target) {
+  let found = null
+  const walk = (node) => {
+    if (found || !node) return
+    const b = node.bounds
+    if (
+      b &&
+      node.label &&
+      node.role &&
+      Math.abs(b.x - target.x) < 48 &&
+      b.y >= 96 &&
+      b.y + b.height <= 520
+    ) {
+      found = { role: node.role, label: node.label }
+      return
+    }
+    for (const child of node.children ?? []) walk(child)
+  }
+  walk(tree)
+  return found
 }
 
 /**

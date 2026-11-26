@@ -120,12 +120,22 @@ export async function runGpuiFreeformEditor({
   const stage = await ui.waitFor({ id: 'scene-stage' })
   const stageBounds = stage.bounds
   assert.ok(stageBounds, 'scene-stage has no bounds (gap 1 patch missing from smoke binary)')
-  const canvas = {
-    x: stageBounds.x + STAGE_GUTTER_PX,
-    y: stageBounds.y + STAGE_GUTTER_PX,
-    width: stageBounds.width - STAGE_GUTTER_PX * 2,
-    height: stageBounds.height - STAGE_GUTTER_PX * 2
+  // The canvas itself: GPUI names its box (`scene-canvas-box`, the handles'
+  // gutter outside it); the stage card around it also holds the toolbar's
+  // lines and footer. It is measured again after each orientation change.
+  // A build without the node falls back to the stage less the gutter.
+  const measureCanvas = async () => {
+    const box = await ui.waitFor({ id: 'scene-canvas-box' }, { timeoutMs: 3000 }).catch(() => null)
+    if (box?.bounds) return { ...box.bounds }
+    const around = (await ui.waitFor({ id: 'scene-stage' })).bounds
+    return {
+      x: around.x + STAGE_GUTTER_PX,
+      y: around.y + STAGE_GUTTER_PX,
+      width: around.width - STAGE_GUTTER_PX * 2,
+      height: around.height - STAGE_GUTTER_PX * 2
+    }
   }
+  let canvas = await measureCanvas()
   assert.ok(canvas.width > 40 && canvas.height > 40, `canvas too small: ${JSON.stringify(canvas)}`)
 
   report.display = { width: stageBounds.width, height: stageBounds.height, dpr: 1, app: 'gpui' }
@@ -156,6 +166,8 @@ export async function runGpuiFreeformEditor({
     await sleep(300)
     await patchSourceTransform(backend, timeoutMs, BASE_SOURCE_ID, seedTransform, setScene)
     await sleep(200)
+    canvas = await measureCanvas()
+    report.gpui[orientation] = { canvas }
 
     for (let index = 0; index < 4; index++) {
       await gpuiGesture({
@@ -243,7 +255,9 @@ export async function runGpuiFreeformEditor({
 async function patchSourceTransform(backend, timeoutMs, sourceId, transform, setScene) {
   const scene = await request(backend, timeoutMs, 'scene.get')
   const sources = scene.sources.map((source) =>
-    source.id === sourceId ? { ...source, transform: { ...source.transform, ...transform } } : source
+    source.id === sourceId
+      ? { ...source, transform: { ...source.transform, ...transform } }
+      : source
   )
   await setScene({ ...scene, sources })
 }
@@ -323,9 +337,7 @@ async function gpuiGesture({
   const gate = evaluateFreeformGestureGpui(data)
   report.gestures.push({ ...data, gate, ok: gate.ok })
   if (!gate.ok) {
-    report.failures.push(
-      `GPUI ${orientation} ${kind}#${index}: ${gate.failures.join('; ')}`
-    )
+    report.failures.push(`GPUI ${orientation} ${kind}#${index}: ${gate.failures.join('; ')}`)
   }
 }
 

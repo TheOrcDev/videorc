@@ -58,6 +58,8 @@ mod words {
     /// The stage's accessible name: a group node, so the tree (and the UI
     /// driver's `scene-stage` id) carries its bounds.
     pub const STAGE: &str = "Stage";
+    /// The canvas's accessible name (the output's frame on the stage).
+    pub const CANVAS: &str = "Canvas";
 }
 
 /// The canvas's height left for the page around it (`calc(100vh - 248px)`).
@@ -251,8 +253,12 @@ impl ScenePage {
         let share = (aspect / (16. / 9.)).min(1.);
         let tall = (f32::from(window.viewport_size().height) - PAGE_CHROME_PX).max(120.);
         let gutter = HANDLE_GUTTER as f32;
+        // A named group node: the UI driver's `scene-canvas-box` carries the
+        // canvas's own bounds (the handles' gutter sits outside it).
         let mut canvas_box = div()
             .id("scene-canvas-box")
+            .role(gpui::Role::Group)
+            .aria_label(words::CANVAS)
             .relative()
             .w(relative(share))
             .max_w(px(tall * aspect))
