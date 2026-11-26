@@ -221,8 +221,8 @@ impl RenderOnce for TrackedText {
             return root.flex().flex_none().child(row).into_any_element();
         };
         let (text, size) = (self.text.clone(), self.size);
+        // GPUI items shrink by default (flex-shrink 1); `min-w-0` lets it.
         root.relative()
-            .flex_shrink()
             .min_w(px(0.0))
             .overflow_hidden()
             .whitespace_nowrap()
