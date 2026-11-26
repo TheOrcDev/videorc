@@ -956,6 +956,8 @@ pub struct Studio<B: StudioBackend> {
     stop_in_flight: Mutex<Option<watch::Receiver<Option<bool>>>>,
     /// One exclusion request at a time, each with the newest list.
     exclusion_lock: tokio::sync::Mutex<()>,
+    /// Idle camera requests run in order, each reading the newest pick.
+    camera_pick_lock: tokio::sync::Mutex<()>,
     /// One settings batch in flight at a time.
     settings_flush: tokio::sync::Mutex<()>,
     /// The settings retry's deadline moved; the driver looks again.
@@ -1113,6 +1115,7 @@ impl<B: StudioBackend> Studio<B> {
             start_lock: tokio::sync::Mutex::new(()),
             stop_lock: tokio::sync::Mutex::new(()),
             exclusion_lock: tokio::sync::Mutex::new(()),
+            camera_pick_lock: tokio::sync::Mutex::new(()),
             settings_flush: tokio::sync::Mutex::new(()),
             settings_retry: Notify::new(),
             live_read_done: Notify::new(),
