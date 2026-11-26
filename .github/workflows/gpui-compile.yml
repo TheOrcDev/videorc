@@ -103,9 +103,11 @@ jobs:
     name: gpui compile (Windows)
     # Keep draft/PR feedback cheap; the sentinel dispatches both platforms
     # on main after three quiet minutes, with an eight-minute maximum wait.
+    # Plan 260 clippy/tests run once per batch here, outside the release
+    # backend job's 80-minute budget (owner Q182).
     if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
     env:
       CARGO_BUILD_JOBS: 2
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -115,6 +117,8 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache GPUI check dependencies
         uses: Swatinem/rust-cache@v2
@@ -124,3 +128,15 @@ jobs:
 
       - name: Compile GPUI and test targets without running tests
         run: cargo check --locked -p videorc-app-core -p videorc-kit -p videorc-protocol -p videorc-app --all-targets
+
+      - name: Plan 260 crates (clippy + test)
+        # Plan 260 S1.0: every crate plan 260 adds (the workspace minus the
+        # backend, the addon and the WER helper, which have their own steps).
+        # A lane that fills one of them is linted and tested here with no
+        # workflow edit.
+        shell: pwsh
+        run: |
+          cargo clippy --workspace --exclude videorc-backend --exclude videorc-native-preview-addon --exclude videorc-wer-helper --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --workspace --exclude videorc-backend --exclude videorc-native-preview-addon --exclude videorc-wer-helper
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
