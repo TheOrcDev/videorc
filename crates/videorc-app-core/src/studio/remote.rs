@@ -29,7 +29,7 @@ use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use serde::Serialize;
 use serde_json::Value;
-use videorc_protocol::{DeviceStatus, RecordingState};
+use videorc_protocol::{DeviceKind, DeviceStatus, RecordingState};
 
 use super::audio_mixer;
 use super::session::{SessionActivity, SessionStartIntent};
@@ -245,13 +245,18 @@ fn output_intent(snapshot: &StudioSnapshot, active: bool) -> SessionStartIntent 
 }
 
 /// System audio's device status and what its switch shows
-/// (`systemAudioStatus`, `systemAudioShown`).
+/// (`systemAudioStatus`, `systemAudioShown`). The status is the listed
+/// device's own (`devices.find(kind === 'system-audio')?.status`), never the
+/// Studio row's Mac stand-in (`system_audio_row_status`): until a list names
+/// the device, the remotes are told it isn't available.
 fn system_audio(snapshot: &StudioSnapshot) -> (Option<DeviceStatus>, bool) {
-    let status = audio_mixer::system_audio_row_status(
-        &snapshot.sources.devices.devices,
-        snapshot.sources.devices_known,
-        cfg!(target_os = "macos"),
-    );
+    let status = snapshot
+        .sources
+        .devices
+        .devices
+        .iter()
+        .find(|device| device.kind == DeviceKind::SystemAudio)
+        .map(|device| device.status.clone());
     let facts = &snapshot.system_audio;
     let confirmed = if facts.issue.is_some() || facts.joining {
         None
