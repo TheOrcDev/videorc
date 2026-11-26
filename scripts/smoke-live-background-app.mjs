@@ -130,7 +130,11 @@ const CASES = (
       stream: streamHeight
         ? { width: widthFor(streamHeight), height: streamHeight, fps: Number(match[4]) }
         : null,
-      seconds: height > 1080 ? 4 : 6
+      // 6 s at every size. A 4K take arms the Preview's compositor in place
+      // at a new size, so the guard settles 2 s and judges its first 4K
+      // window about 4 s in; status publishes every 2 s, so a 4 s take read
+      // only the p95 the 1080p Preview had before the arm (2026-11-26).
+      seconds: 6
     }
   })
 /** The stage margin per side at Visibility 20 is 10 %; the ring is sampled inside it. */
