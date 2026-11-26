@@ -2016,80 +2016,80 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1378 | Page key ⌘, | Opens Settings | `shared/sidebar-pages.ts:108` | [ ] | [ ] | [ ] |
-| P1379 | Tabs "General", "Permissions", "Shortcuts", "Remote", "About" | Settings sections. Refreshes on window focus | `renderer/components/tabs/settings-tab.tsx:43` | [ ] | [ ] | [ ] |
-| P1380 | "Appearance" → "Theme" (Light / Dark / System) | Sets the color theme *(all ("Mac"/"PC" wording via platformCopy))* | `renderer/components/settings/general-settings.tsx:77` | [ ] | [ ] | [ ] |
-| P1381 | "Retro LCD" switch | LCD-style Studio controls | `renderer/components/settings/general-settings.tsx:87` | [ ] | [ ] | [ ] |
-| P1382 | "Animate scene changes" → Scene | Link to the Scene page | `renderer/components/settings/general-settings.tsx:102` | [ ] | [ ] | [ ] |
+| P1378 | Page key ⌘, | Opens Settings | `shared/sidebar-pages.ts:108` | [x] | [ ] | [ ] |
+| P1379 | Tabs "General", "Permissions", "Shortcuts", "Remote", "About" | Settings sections. Refreshes on window focus | `renderer/components/tabs/settings-tab.tsx:43` | [x] | [ ] | [ ] |
+| P1380 | "Appearance" → "Theme" (Light / Dark / System) | Sets the color theme *(all ("Mac"/"PC" wording via platformCopy))* | `renderer/components/settings/general-settings.tsx:77` | [x] | [ ] | [ ] |
+| P1381 | "Retro LCD" switch | LCD-style Studio controls | `renderer/components/settings/general-settings.tsx:87` | [x] | [ ] | [ ] |
+| P1382 | "Animate scene changes" → Scene | Link to the Scene page | `renderer/components/settings/general-settings.tsx:102` | [x] | [ ] | [ ] |
 | P1383 | "Graphics acceleration" status + "Retry on next launch" | GPU fallback status and retry *(Windows only (general-settings.tsx:107))* | `renderer/components/settings/general-settings.tsx:107` | n/a | [ ] | n/a |
-| P1384 | "Chat" → "Show 7TV emotes in chat" switch | Shows 7TV emotes | `renderer/components/settings/seventv-emotes-field.tsx:97` | [ ] | [ ] | [ ] |
-| P1385 | "GIFs in Twitch chat" (Animated / Still / Off) | How Twitch GIFs render | `renderer/components/settings/seventv-emotes-field.tsx:133` | [ ] | [ ] | [ ] |
-| P1386 | Emote error alert | Emote setting failure | `renderer/components/settings/seventv-emotes-field.tsx:57` | [ ] | [ ] | [ ] |
-| P1387 | "Chat in Studio" switch | Shows chat in Studio while live | `renderer/components/settings/general-settings.tsx:146` | [ ] | [ ] | [ ] |
-| P1388 | "Open Stream Manager when you go live" switch | Auto-opens the comments window | `renderer/components/settings/general-settings.tsx:159` | [ ] | [ ] | [ ] |
-| P1389 | "Notifications" → "Quiet while recording or live" switch | Holds notifications back while on air | `renderer/components/settings/general-settings.tsx:181` | [ ] | [ ] | [ ] |
-| P1390 | "Setup" → "Run setup again…" | Reopens first-run setup | `renderer/components/settings/general-settings.tsx:239` | [ ] | [ ] | [ ] |
-| P1391 | "Import" → "Import from OBS…" | Opens the OBS import dialog | `renderer/components/settings/general-settings.tsx:208` | [ ] | [ ] | [ ] |
-| P1392 | OBS dialog "Import from OBS": "Scene collection" and "Profile" selects | Chooses the OBS source | `renderer/components/obs-import-dialog.tsx:270` | [ ] | [ ] | [ ] |
-| P1393 | OBS errors + "Try again" / not-found / looking states | Discovery states | `renderer/components/obs-import-dialog.tsx:253` | [ ] | [ ] | [ ] |
-| P1394 | OBS "Cancel" / "Import setup" | Applies the import | `renderer/components/obs-import-dialog.tsx:384` | [ ] | [ ] | [ ] |
-| P1395 | "Privacy" → "Share anonymous usage stats" switch | Opts in or out of usage pings | `renderer/components/settings/usage-stats-field.tsx:57` | [ ] | [ ] | [ ] |
-| P1396 | Usage stats error alert | Save failure | `renderer/components/settings/usage-stats-field.tsx:41` | [ ] | [ ] | [ ] |
-| P1397 | "Elsewhere" rows (Account and Premium, Sidekick…, Your avatar…, Recording quality…, Destinations…, Checks…) | Links to settings on other pages | `renderer/components/settings/general-settings.tsx:261` | [ ] | [ ] | [ ] |
+| P1384 | "Chat" → "Show 7TV emotes in chat" switch | Shows 7TV emotes | `renderer/components/settings/seventv-emotes-field.tsx:97` | [x] | [ ] | [ ] |
+| P1385 | "GIFs in Twitch chat" (Animated / Still / Off) | How Twitch GIFs render | `renderer/components/settings/seventv-emotes-field.tsx:133` | [x] | [ ] | [ ] |
+| P1386 | Emote error alert | Emote setting failure | `renderer/components/settings/seventv-emotes-field.tsx:57` | [x] | [ ] | [ ] |
+| P1387 | "Chat in Studio" switch | Shows chat in Studio while live | `renderer/components/settings/general-settings.tsx:146` | [x] | [ ] | [ ] |
+| P1388 | "Open Stream Manager when you go live" switch | Auto-opens the comments window | `renderer/components/settings/general-settings.tsx:159` | [x] | [ ] | [ ] |
+| P1389 | "Notifications" → "Quiet while recording or live" switch | Holds notifications back while on air | `renderer/components/settings/general-settings.tsx:181` | [x] | [ ] | [ ] |
+| P1390 | "Setup" → "Run setup again…" | Reopens first-run setup | `renderer/components/settings/general-settings.tsx:239` | [x] | [ ] | [ ] |
+| P1391 | "Import" → "Import from OBS…" | Opens the OBS import dialog | `renderer/components/settings/general-settings.tsx:208` | [x] | [ ] | [ ] |
+| P1392 | OBS dialog "Import from OBS": "Scene collection" and "Profile" selects | Chooses the OBS source | `renderer/components/obs-import-dialog.tsx:270` | [x] | [ ] | [ ] |
+| P1393 | OBS errors + "Try again" / not-found / looking states | Discovery states | `renderer/components/obs-import-dialog.tsx:253` | [x] | [ ] | [ ] |
+| P1394 | OBS "Cancel" / "Import setup" | Applies the import | `renderer/components/obs-import-dialog.tsx:384` | [x] | [ ] | [ ] |
+| P1395 | "Privacy" → "Share anonymous usage stats" switch | Opts in or out of usage pings | `renderer/components/settings/usage-stats-field.tsx:57` | [x] | [ ] | [ ] |
+| P1396 | Usage stats error alert | Save failure | `renderer/components/settings/usage-stats-field.tsx:41` | [x] | [ ] | [ ] |
+| P1397 | "Elsewhere" rows (Account and Premium, Sidekick…, Your avatar…, Recording quality…, Destinations…, Checks…) | Links to settings on other pages | `renderer/components/settings/general-settings.tsx:261` | [x] | [ ] | [ ] |
 
 ### Settings → Permissions (settings/permissions-settings.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1398 | "System access" + "Refresh" | Re-checks permissions | `renderer/components/settings/permissions-settings.tsx:32` | [ ] | [ ] | [ ] |
-| P1399 | Access rows (Screen Recording, System audio, Microphone, Camera) + status + action button | Grant or fix each permission *(macOS and Windows; row set differs on Windows (lib/system-access.ts:266))* | `renderer/components/system-access-list.tsx:62` | [ ] | [ ] | n/a |
-| P1400 | "Change a permission" + "Open System Settings…"/"Open Windows Settings…" | Opens the OS privacy settings *(macOS and Windows (lib/platform.ts:36))* | `renderer/components/settings/permissions-settings.tsx:51` | [ ] | [ ] | n/a |
+| P1398 | "System access" + "Refresh" | Re-checks permissions | `renderer/components/settings/permissions-settings.tsx:32` | [x] | [ ] | [ ] |
+| P1399 | Access rows (Screen Recording, System audio, Microphone, Camera) + status + action button | Grant or fix each permission *(macOS and Windows; row set differs on Windows (lib/system-access.ts:266))* | `renderer/components/system-access-list.tsx:62` | [x] | [ ] | n/a |
+| P1400 | "Change a permission" + "Open System Settings…"/"Open Windows Settings…" | Opens the OS privacy settings *(macOS and Windows (lib/platform.ts:36))* | `renderer/components/settings/permissions-settings.tsx:51` | [x] | [ ] | n/a |
 | P1401 | Empty "Nothing to grant here" | No permissions to list *(Linux only (lib/system-access.ts:254))* | `renderer/components/settings/permissions-settings.tsx:68` | n/a | n/a | [ ] |
 
 ### Settings → Shortcuts (settings/shortcuts-settings.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1402 | "Global shortcuts" recorder fields (Hide screen, Record, Go live, Mute/unmute mic, System audio, 30s/1-min clip, Next/Previous scene) | Records system-wide hotkeys | `renderer/components/settings/shortcuts-settings.tsx:118` | [ ] | [ ] | [ ] |
-| P1403 | "Scenes" recorder fields per scene | Hotkey per scene | `renderer/components/settings/shortcuts-settings.tsx:136` | [ ] | [ ] | [ ] |
-| P1404 | Hint: Esc cancels, Backspace clears | Recorder keys | `renderer/components/settings/shortcuts-settings.tsx:156` | [ ] | [ ] | [ ] |
+| P1402 | "Global shortcuts" recorder fields (Hide screen, Record, Go live, Mute/unmute mic, System audio, 30s/1-min clip, Next/Previous scene) | Records system-wide hotkeys | `renderer/components/settings/shortcuts-settings.tsx:118` | [x] | [ ] | [ ] |
+| P1403 | "Scenes" recorder fields per scene | Hotkey per scene | `renderer/components/settings/shortcuts-settings.tsx:136` | [x] | [ ] | [ ] |
+| P1404 | Hint: Esc cancels, Backspace clears | Recorder keys | `renderer/components/settings/shortcuts-settings.tsx:156` | [x] | [ ] | [ ] |
 | P1405 | Unavailable warning alert | Global shortcuts don't work under Wayland *(Linux Wayland only (apps/desktop/src/main/global-shortcut-lifecycle.ts:33))* | `renderer/components/settings/shortcuts-settings.tsx:113` | n/a | n/a | [ ] |
-| P1406 | "App shortcuts" grouped lists (read-only key chips) | Reference list of in-app keys | `renderer/components/settings/shortcuts-settings.tsx:161` | [ ] | [ ] | [ ] |
+| P1406 | "App shortcuts" grouped lists (read-only key chips) | Reference list of in-app keys | `renderer/components/settings/shortcuts-settings.tsx:161` | [x] | [ ] | [ ] |
 
 ### Settings → Remote (settings/remote-settings.tsx, phone-remote-section.tsx, settings/agents-section.tsx, settings/connect-agent-dialog.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1407 | "Remote control" switch "Enable remote control" | Turns the Stream Deck/remote API on or off | `renderer/components/settings/remote-settings.tsx:96` | [ ] | [ ] | [ ] |
-| P1408 | "Pairing token" read-only + "Copy" | Copies the token | `renderer/components/settings/remote-settings.tsx:116` | [ ] | [ ] | [ ] |
-| P1409 | "New token" → "Regenerate" + confirm "Regenerate the pairing token?" | Rotates the token | `renderer/components/settings/remote-settings.tsx:147` | [ ] | [ ] | [ ] |
-| P1410 | Confirm "Turn off remote control?" | Shown when phones are paired | `renderer/components/settings/remote-settings.tsx:185` | [ ] | [ ] | [ ] |
-| P1411 | "Phone remote" switch "Enable phone remote" | Turns phone remote on or off | `renderer/components/phone-remote-section.tsx:298` | [ ] | [ ] | [ ] |
-| P1412 | Blocked warning alert | Why the phone remote can't run | `renderer/components/phone-remote-section.tsx:311` | [ ] | [ ] | [ ] |
-| P1413 | "Phones" → "Pair a phone…" | Opens the QR pairing dialog | `renderer/components/phone-remote-section.tsx:323` | [ ] | [ ] | [ ] |
-| P1414 | Dialog "Pair a phone": hidden QR (click to reveal), countdown, "New code" | QR pairing | `renderer/components/phone-remote-section.tsx:106` | [ ] | [ ] | [ ] |
-| P1415 | "Network" segmented (multi-NIC) | Picks the LAN address | `renderer/components/phone-remote-section.tsx:149` | [ ] | [ ] | [ ] |
-| P1416 | "Copy link instead" / troubleshooting text | Alternative to the QR code | `renderer/components/phone-remote-section.tsx:164` | [ ] | [ ] | [ ] |
-| P1417 | "Paired phones" list + menu "Rename…" / "Remove…" | Manages phones | `renderer/components/phone-remote-section.tsx:335` | [ ] | [ ] | [ ] |
-| P1418 | Dialog "Rename phone" / confirm "Remove {phone}?" | Phone edits | `renderer/components/phone-remote-section.tsx:216` | [ ] | [ ] | [ ] |
-| P1419 | "Agents" switch "Let AI agents control Videorc" | Turns the MCP agent bridge on or off | `renderer/components/settings/agents-section.tsx:118` | [ ] | [ ] | [ ] |
-| P1420 | Bind error / "bridge missing" alerts | Agent errors | `renderer/components/settings/agents-section.tsx:137` | [ ] | [ ] | [ ] |
-| P1421 | "Agent apps" → "Connect an agent…" | Opens the connect dialog | `renderer/components/settings/agents-section.tsx:152` | [ ] | [ ] | [ ] |
-| P1422 | "Your agents" list + "Remove…" + confirm "Remove {agent}?" | Revokes an agent | `renderer/components/settings/agents-section.tsx:174` | [ ] | [ ] | [ ] |
-| P1423 | Activity: "Activity from" select (All agents / per agent) + list / "No actions yet." | Agent action log | `renderer/components/settings/agents-section.tsx:287` | [ ] | [ ] | [ ] |
-| P1424 | Dialog "Connect an agent": "App" select, "Name" input, "Cancel" / "Connect" | Creates an agent token | `renderer/components/settings/connect-agent-dialog.tsx:169` | [ ] | [ ] | [ ] |
-| P1425 | Dialog "Connect {name}": "Show/Hide token", "Copy", "Add to {app}", "Done" | Shows the setup line once | `renderer/components/settings/connect-agent-dialog.tsx:281` | [ ] | [ ] | [ ] |
+| P1407 | "Remote control" switch "Enable remote control" | Turns the Stream Deck/remote API on or off | `renderer/components/settings/remote-settings.tsx:96` | [x] | [ ] | [ ] |
+| P1408 | "Pairing token" read-only + "Copy" | Copies the token | `renderer/components/settings/remote-settings.tsx:116` | [x] | [ ] | [ ] |
+| P1409 | "New token" → "Regenerate" + confirm "Regenerate the pairing token?" | Rotates the token | `renderer/components/settings/remote-settings.tsx:147` | [x] | [ ] | [ ] |
+| P1410 | Confirm "Turn off remote control?" | Shown when phones are paired | `renderer/components/settings/remote-settings.tsx:185` | [x] | [ ] | [ ] |
+| P1411 | "Phone remote" switch "Enable phone remote" | Turns phone remote on or off | `renderer/components/phone-remote-section.tsx:298` | [x] | [ ] | [ ] |
+| P1412 | Blocked warning alert | Why the phone remote can't run | `renderer/components/phone-remote-section.tsx:311` | [x] | [ ] | [ ] |
+| P1413 | "Phones" → "Pair a phone…" | Opens the QR pairing dialog | `renderer/components/phone-remote-section.tsx:323` | [x] | [ ] | [ ] |
+| P1414 | Dialog "Pair a phone": hidden QR (click to reveal), countdown, "New code" | QR pairing | `renderer/components/phone-remote-section.tsx:106` | [x] | [ ] | [ ] |
+| P1415 | "Network" segmented (multi-NIC) | Picks the LAN address | `renderer/components/phone-remote-section.tsx:149` | [x] | [ ] | [ ] |
+| P1416 | "Copy link instead" / troubleshooting text | Alternative to the QR code | `renderer/components/phone-remote-section.tsx:164` | [x] | [ ] | [ ] |
+| P1417 | "Paired phones" list + menu "Rename…" / "Remove…" | Manages phones | `renderer/components/phone-remote-section.tsx:335` | [x] | [ ] | [ ] |
+| P1418 | Dialog "Rename phone" / confirm "Remove {phone}?" | Phone edits | `renderer/components/phone-remote-section.tsx:216` | [x] | [ ] | [ ] |
+| P1419 | "Agents" switch "Let AI agents control Videorc" | Turns the MCP agent bridge on or off | `renderer/components/settings/agents-section.tsx:118` | [x] | [ ] | [ ] |
+| P1420 | Bind error / "bridge missing" alerts | Agent errors | `renderer/components/settings/agents-section.tsx:137` | [x] | [ ] | [ ] |
+| P1421 | "Agent apps" → "Connect an agent…" | Opens the connect dialog | `renderer/components/settings/agents-section.tsx:152` | [x] | [ ] | [ ] |
+| P1422 | "Your agents" list + "Remove…" + confirm "Remove {agent}?" | Revokes an agent | `renderer/components/settings/agents-section.tsx:174` | [x] | [ ] | [ ] |
+| P1423 | Activity: "Activity from" select (All agents / per agent) + list / "No actions yet." | Agent action log | `renderer/components/settings/agents-section.tsx:287` | [x] | [ ] | [ ] |
+| P1424 | Dialog "Connect an agent": "App" select, "Name" input, "Cancel" / "Connect" | Creates an agent token | `renderer/components/settings/connect-agent-dialog.tsx:169` | [x] | [ ] | [ ] |
+| P1425 | Dialog "Connect {name}": "Show/Hide token", "Copy", "Add to {app}", "Done" | Shows the setup line once | `renderer/components/settings/connect-agent-dialog.tsx:281` | [x] | [ ] | [ ] |
 
 ### Settings → About (settings/about-settings.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1426 | "Support bundle" → open Health | Goes to the Health export | `renderer/components/settings/about-settings.tsx:48` | [ ] | [ ] | [ ] |
-| P1427 | "Links": Website, Privacy policy, Terms of service, Source code and licenses | Opens web links | `renderer/components/settings/about-settings.tsx:57` | [ ] | [ ] | [ ] |
-| P1428 | "About & updates" version + release track | Shows version and channel *(Track label per platform (releaseTrackLabel :96))* | `renderer/components/settings/about-settings.tsx:82` | [ ] | [ ] | [ ] |
-| P1429 | "What's new…" | Opens the changelog dialog | `renderer/components/settings/about-settings.tsx:101` | [ ] | [ ] | [ ] |
-| P1430 | Update error alert + "Try again" | Update check failure | `renderer/components/settings/about-settings.tsx:109` | [ ] | [ ] | [ ] |
-| P1431 | "Updates" row: check / "Checking…" / "Update download" progress / install / external link | Updater control states | `renderer/components/settings/about-settings.tsx:140` | [ ] | [ ] | [ ] |
+| P1426 | "Support bundle" → open Health | Goes to the Health export | `renderer/components/settings/about-settings.tsx:48` | [x] | [ ] | [ ] |
+| P1427 | "Links": Website, Privacy policy, Terms of service, Source code and licenses | Opens web links | `renderer/components/settings/about-settings.tsx:57` | [x] | [ ] | [ ] |
+| P1428 | "About & updates" version + release track | Shows version and channel *(Track label per platform (releaseTrackLabel :96))* | `renderer/components/settings/about-settings.tsx:82` | [x] | [ ] | [ ] |
+| P1429 | "What's new…" | Opens the changelog dialog | `renderer/components/settings/about-settings.tsx:101` | [x] | [ ] | [ ] |
+| P1430 | Update error alert + "Try again" | Update check failure | `renderer/components/settings/about-settings.tsx:109` | [x] | [ ] | [ ] |
+| P1431 | "Updates" row: check / "Checking…" / "Update download" progress / install / external link | Updater control states | `renderer/components/settings/about-settings.tsx:140` | [x] | [ ] | [ ] |
 
 ### Encoder preference (settings/encoder-preference-field.tsx; rendered on Output, not Settings)
 
@@ -2133,41 +2133,41 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1454 | Auto-show decision | Shown on a fresh install or to resume; never auto-shown on Linux *(macOS and Windows (first-run.ts:84))* | `renderer/lib/first-run.ts:84` | [ ] | [ ] | n/a |
-| P1455 | Step order: permissions, goal, look, sound, destinations | Linux skips Permissions; "Recordings" skips Destinations *(Permissions step not on Linux (first-run.ts:108))* | `renderer/lib/first-run.ts:7; first-run.ts:105` | [ ] | [ ] | [ ] |
-| P1456 | Welcome backdrop | Moving liquid-chrome backdrop; still with reduced motion or no GPU acceleration | `renderer/components/first-run/welcome-backdrop.tsx:59` | [ ] | [ ] | [ ] |
-| P1457 | Title band | Drag band on the traffic-light line | `renderer/components/first-run/first-run-setup.tsx:187` | [ ] | [ ] | [ ] |
-| P1458 | Step counter + live "Step X of Y, {title}" | Announces the step change | `renderer/components/first-run/setup-step-frame.tsx:89` | [ ] | [ ] | [ ] |
-| P1459 | "Skip setup" | Leaves setup from any step | `renderer/components/first-run/setup-step-frame.tsx:134` | [ ] | [ ] | [ ] |
-| P1460 | "Back" | Previous step | `renderer/components/first-run/setup-step-frame.tsx:161` | [ ] | [ ] | [ ] |
-| P1461 | Primary "Continue" / "Open Studio" / "Done" (replay) | Next step, or leaves on the last one | `renderer/components/first-run/first-run-setup.tsx:111` | [ ] | [ ] | [ ] |
-| P1462 | Placeholder | Solid window shown while the setup chunk loads | `renderer/components/app-shell.tsx:632` | [ ] | [ ] | [ ] |
-| P1463 | Permissions "Welcome to Videorc" | App icon, OS description, privacy line | `renderer/components/first-run/permissions-step.tsx:89` | [ ] | [ ] | [ ] |
-| P1464 | Rows "Screen Recording", "System audio", "Microphone", "Camera" | Status badge and tag ("Needed to record"/"Optional") per row *(none on Linux (system-access.ts:254); Screen Recording optional on Windows (system-access.ts:286))* | `renderer/lib/system-access.ts:282` | [ ] | [ ] | [ ] |
-| P1465 | Row action "Allow…" / "Reopen Videorc" / "Open System Settings…" | OS prompt, relaunch, or OS settings pane *(macOS / Windows)* | `renderer/lib/system-access-view.ts:50` | [ ] | [ ] | n/a |
-| P1466 | Microphone level proof | "Say something. The bar moves when Videorc hears you." | `renderer/components/first-run/permissions-step.tsx:41` | [ ] | [ ] | [ ] |
-| P1467 | Permissions primary "Continue" / "Skip for now" | Continue once required grants are in | `renderer/components/first-run/permissions-step.tsx:103` | [ ] | [ ] | [ ] |
+| P1454 | Auto-show decision | Shown on a fresh install or to resume; never auto-shown on Linux *(macOS and Windows (first-run.ts:84))* | `renderer/lib/first-run.ts:84` | [x] | [ ] | n/a |
+| P1455 | Step order: permissions, goal, look, sound, destinations | Linux skips Permissions; "Recordings" skips Destinations *(Permissions step not on Linux (first-run.ts:108))* | `renderer/lib/first-run.ts:7; first-run.ts:105` | [x] | [ ] | [ ] |
+| P1456 | Welcome backdrop | Moving liquid-chrome backdrop; still with reduced motion or no GPU acceleration | `renderer/components/first-run/welcome-backdrop.tsx:59` | [x] | [ ] | [ ] |
+| P1457 | Title band | Drag band on the traffic-light line | `renderer/components/first-run/first-run-setup.tsx:187` | [x] | [ ] | [ ] |
+| P1458 | Step counter + live "Step X of Y, {title}" | Announces the step change | `renderer/components/first-run/setup-step-frame.tsx:89` | [x] | [ ] | [ ] |
+| P1459 | "Skip setup" | Leaves setup from any step | `renderer/components/first-run/setup-step-frame.tsx:134` | [x] | [ ] | [ ] |
+| P1460 | "Back" | Previous step | `renderer/components/first-run/setup-step-frame.tsx:161` | [x] | [ ] | [ ] |
+| P1461 | Primary "Continue" / "Open Studio" / "Done" (replay) | Next step, or leaves on the last one | `renderer/components/first-run/first-run-setup.tsx:111` | [x] | [ ] | [ ] |
+| P1462 | Placeholder | Solid window shown while the setup chunk loads | `renderer/components/app-shell.tsx:632` | [x] | [ ] | [ ] |
+| P1463 | Permissions "Welcome to Videorc" | App icon, OS description, privacy line | `renderer/components/first-run/permissions-step.tsx:89` | [x] | [ ] | [ ] |
+| P1464 | Rows "Screen Recording", "System audio", "Microphone", "Camera" | Status badge and tag ("Needed to record"/"Optional") per row *(none on Linux (system-access.ts:254); Screen Recording optional on Windows (system-access.ts:286))* | `renderer/lib/system-access.ts:282` | [x] | [ ] | [ ] |
+| P1465 | Row action "Allow…" / "Reopen Videorc" / "Open System Settings…" | OS prompt, relaunch, or OS settings pane *(macOS / Windows)* | `renderer/lib/system-access-view.ts:50` | [x] | [ ] | n/a |
+| P1466 | Microphone level proof | "Say something. The bar moves when Videorc hears you." | `renderer/components/first-run/permissions-step.tsx:41` | [x] | [ ] | [ ] |
+| P1467 | Permissions primary "Continue" / "Skip for now" | Continue once required grants are in | `renderer/components/first-run/permissions-step.tsx:103` | [x] | [ ] | [ ] |
 | P1468 | "Nothing to grant here" empty state | Linux explanation (replay only) *(Linux only (permissions-step.tsx:68))* | `renderer/components/first-run/permissions-step.tsx:114` | n/a | n/a | [ ] |
-| P1469 | Goal "What are you making?" rows "Recordings" / "Livestreams" / "Both" | Picks the goal and advances; ↑↓ move between rows | `renderer/components/first-run/goal-step.tsx:29` | [ ] | [ ] | [ ] |
-| P1470 | Look "Your look": scene picture | Live preview of the chosen look | `renderer/components/first-run/look-step.tsx:151` | [ ] | [ ] | [ ] |
-| P1471 | Look: "Orientation" ("Horizontal 16:9" / "Vertical 9:16") | Sets canvas orientation | `renderer/components/first-run/look-step.tsx:166` | [ ] | [ ] | [ ] |
-| P1472 | Look: "Camera shape" ("Rectangle" / "Rounded" / "Circle") | Sets camera mask, when it applies | `renderer/components/first-run/look-step.tsx:182` | [ ] | [ ] | [ ] |
-| P1473 | Look: "Background" tiles ("None" + live backgrounds) | Picks a live background | `renderer/components/first-run/look-step.tsx:196` | [ ] | [ ] | [ ] |
-| P1474 | Look: "Layout" scene cards | Picks a layout preset; unavailable ones give a reason | `renderer/components/first-run/look-step.tsx:231` | [ ] | [ ] | [ ] |
-| P1475 | Look: "Back to permissions" | Jumps back when a grant is missing | `renderer/components/first-run/look-step.tsx:250` | [ ] | [ ] | [ ] |
-| P1476 | Sound "Sound check": Microphone picker (None = "Off") | Switches the live microphone | `renderer/components/first-run/sound-step.tsx:172` | [ ] | [ ] | [ ] |
-| P1477 | Sound: "Videorc can't hear your microphone yet." + "Back to permissions" | Blocked-mic alert | `renderer/components/first-run/sound-step.tsx:200` | [ ] | [ ] | [ ] |
-| P1478 | Sound: level meter + "Microphone gain" fader + verdict | Live level and manual gain | `renderer/components/first-run/sound-step.tsx:206` | [ ] | [ ] | [ ] |
-| P1479 | Sound: "Set level for me" | Sets gain automatically from speech peak | `renderer/components/first-run/sound-step.tsx:228` | [ ] | [ ] | [ ] |
-| P1480 | Sound: "System audio" switch | Enables system audio capture *(row hidden where unsupported (lib/system-audio.ts:92))* | `renderer/components/first-run/sound-step.tsx:151` | [ ] | [ ] | [ ] |
-| P1481 | Destinations "Where you stream": rows YouTube / Twitch / Kick / X + "Connected" badge | Sign-in status per platform | `renderer/components/first-run/destinations-step.tsx:159` | [ ] | [ ] | [ ] |
-| P1482 | "Sign in…" | Starts OAuth; YouTube asks for consent first | `renderer/components/first-run/destinations-step.tsx:138` | [ ] | [ ] | [ ] |
-| P1483 | "Authorize X Live…" | Authorizes X native live | `renderer/components/first-run/destinations-step.tsx:142` | [ ] | [ ] | [ ] |
-| P1484 | Pending "Waiting for your browser…" + "Copy link" + "Cancel" | Browser sign-in in progress | `renderer/components/first-run/destinations-step.tsx:168; renderer/components/streaming/destination-card.tsx:950` | [ ] | [ ] | [ ] |
-| P1485 | YouTube consent "Connect YouTube to Videorc" | Policy links, checkbox, "Cancel" / "Continue to Google" | `renderer/components/first-run/destinations-step.tsx:173; renderer/components/streaming/destination-card.tsx:858` | [ ] | [ ] | [ ] |
-| P1486 | Offline alert | Shown when the engine is disconnected | `renderer/components/first-run/destinations-step.tsx:239` | [ ] | [ ] | [ ] |
-| P1487 | "Open Destinations" | Leaves setup to Destinations (stream keys, TikTok, Instagram) | `renderer/components/first-run/destinations-step.tsx:264` | [ ] | [ ] | [ ] |
-| P1488 | Replay entry "Run setup again…" | In Settings → General and ⌘K | `renderer/components/settings/general-settings.tsx:244` | [ ] | [ ] | [ ] |
+| P1469 | Goal "What are you making?" rows "Recordings" / "Livestreams" / "Both" | Picks the goal and advances; ↑↓ move between rows | `renderer/components/first-run/goal-step.tsx:29` | [x] | [ ] | [ ] |
+| P1470 | Look "Your look": scene picture | Live preview of the chosen look | `renderer/components/first-run/look-step.tsx:151` | [x] | [ ] | [ ] |
+| P1471 | Look: "Orientation" ("Horizontal 16:9" / "Vertical 9:16") | Sets canvas orientation | `renderer/components/first-run/look-step.tsx:166` | [x] | [ ] | [ ] |
+| P1472 | Look: "Camera shape" ("Rectangle" / "Rounded" / "Circle") | Sets camera mask, when it applies | `renderer/components/first-run/look-step.tsx:182` | [x] | [ ] | [ ] |
+| P1473 | Look: "Background" tiles ("None" + live backgrounds) | Picks a live background | `renderer/components/first-run/look-step.tsx:196` | [x] | [ ] | [ ] |
+| P1474 | Look: "Layout" scene cards | Picks a layout preset; unavailable ones give a reason | `renderer/components/first-run/look-step.tsx:231` | [x] | [ ] | [ ] |
+| P1475 | Look: "Back to permissions" | Jumps back when a grant is missing | `renderer/components/first-run/look-step.tsx:250` | [x] | [ ] | [ ] |
+| P1476 | Sound "Sound check": Microphone picker (None = "Off") | Switches the live microphone | `renderer/components/first-run/sound-step.tsx:172` | [x] | [ ] | [ ] |
+| P1477 | Sound: "Videorc can't hear your microphone yet." + "Back to permissions" | Blocked-mic alert | `renderer/components/first-run/sound-step.tsx:200` | [x] | [ ] | [ ] |
+| P1478 | Sound: level meter + "Microphone gain" fader + verdict | Live level and manual gain | `renderer/components/first-run/sound-step.tsx:206` | [x] | [ ] | [ ] |
+| P1479 | Sound: "Set level for me" | Sets gain automatically from speech peak | `renderer/components/first-run/sound-step.tsx:228` | [x] | [ ] | [ ] |
+| P1480 | Sound: "System audio" switch | Enables system audio capture *(row hidden where unsupported (lib/system-audio.ts:92))* | `renderer/components/first-run/sound-step.tsx:151` | [x] | [ ] | [ ] |
+| P1481 | Destinations "Where you stream": rows YouTube / Twitch / Kick / X + "Connected" badge | Sign-in status per platform | `renderer/components/first-run/destinations-step.tsx:159` | [x] | [ ] | [ ] |
+| P1482 | "Sign in…" | Starts OAuth; YouTube asks for consent first | `renderer/components/first-run/destinations-step.tsx:138` | [x] | [ ] | [ ] |
+| P1483 | "Authorize X Live…" | Authorizes X native live | `renderer/components/first-run/destinations-step.tsx:142` | [x] | [ ] | [ ] |
+| P1484 | Pending "Waiting for your browser…" + "Copy link" + "Cancel" | Browser sign-in in progress | `renderer/components/first-run/destinations-step.tsx:168; renderer/components/streaming/destination-card.tsx:950` | [x] | [ ] | [ ] |
+| P1485 | YouTube consent "Connect YouTube to Videorc" | Policy links, checkbox, "Cancel" / "Continue to Google" | `renderer/components/first-run/destinations-step.tsx:173; renderer/components/streaming/destination-card.tsx:858` | [x] | [ ] | [ ] |
+| P1486 | Offline alert | Shown when the engine is disconnected | `renderer/components/first-run/destinations-step.tsx:239` | [x] | [ ] | [ ] |
+| P1487 | "Open Destinations" | Leaves setup to Destinations (stream keys, TikTok, Instagram) | `renderer/components/first-run/destinations-step.tsx:264` | [x] | [ ] | [ ] |
+| P1488 | Replay entry "Run setup again…" | In Settings → General and ⌘K | `renderer/components/settings/general-settings.tsx:244` | [x] | [ ] | [ ] |
 
 ### Linux setup alert
 
