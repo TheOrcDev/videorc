@@ -297,3 +297,93 @@ impl RenderOnce for PlatformMark {
         }
     }
 }
+
+/// X's verification kinds (`verified_type`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifiedKind {
+    /// Premium / Premium+: the blue check.
+    Blue,
+    /// Verified Organizations: the gold check.
+    Business,
+    /// Government accounts: the grey check.
+    Government,
+}
+
+impl VerifiedKind {
+    /// What the check means, for its name and hover hint (`X_VERIFIED_LABEL`).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Blue => "Verified on X",
+            Self::Business => "Verified organization on X",
+            Self::Government => "Government account on X",
+        }
+    }
+
+    /// X's own badge, unchanged (brand rules: never a redrawn glyph).
+    fn svg(self) -> &'static str {
+        match self {
+            Self::Blue => include_str!("../icons/x-verified-premium-blue.svg"),
+            Self::Business => include_str!("../icons/x-verified-business-gold.svg"),
+            Self::Government => include_str!("../icons/x-verified-government-gray.svg"),
+        }
+    }
+}
+
+/// X's verified check after an author's name (Electron's `VerifiedCheck`,
+/// comment-row.tsx): X's own badge at 16 px, named for what it means, with
+/// that as its hover hint. Rasterised once per size and scale, like the
+/// other brand marks.
+#[derive(IntoElement)]
+pub struct VerifiedCheck {
+    id: ElementId,
+    kind: VerifiedKind,
+    size: f32,
+}
+
+impl VerifiedCheck {
+    pub fn new(id: impl Into<ElementId>, kind: VerifiedKind) -> Self {
+        VerifiedCheck {
+            id: id.into(),
+            kind,
+            size: 16.0,
+        }
+    }
+
+    /// The badge's side in px (16, `size-4`, by default).
+    pub fn size(mut self, size: f32) -> Self {
+        self.size = size;
+        self
+    }
+}
+
+impl RenderOnce for VerifiedCheck {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let label = self.kind.label();
+        let side = (self.size * window.scale_factor().max(1.0)).ceil() as u32;
+        let mark = div()
+            .id(self.id)
+            .flex_none()
+            .size(px(self.size))
+            .role(gpui::Role::Image)
+            .aria_label(label)
+            .tooltip(crate::tooltip::tooltip(label));
+        match brand_img(self.kind.svg(), side, side) {
+            // A canvas lays out at 0×0 without `size_full`.
+            Some(image) => mark.child(
+                canvas(
+                    move |_, _, _| (),
+                    move |bounds, _, window, _| paint_mark(window, bounds, image.clone()),
+                )
+                .size_full(),
+            ),
+            None => {
+                let t = resolve(None, window, cx);
+                mark.child(icon(
+                    IconName::SealCheckFill,
+                    self.size,
+                    hsla(t.muted_foreground),
+                ))
+            }
+        }
+    }
+}
