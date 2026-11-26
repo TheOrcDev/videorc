@@ -2277,6 +2277,22 @@ impl<B: StudioBackend> Studio<B> {
                         params.requested_at_ms = Some(requested_at_ms);
                         params.scene = scene;
                         params.simulcast = simulcast;
+                        // Electron's replayArmed: the replacement session
+                        // carries the ring when Record or Go Live takes over
+                        // from buffer-only capture. The saved switch alone
+                        // must not rearm a ring that failed or was disarmed.
+                        params.replay =
+                            inner
+                                .clips
+                                .ring
+                                .armed()
+                                .then_some(videorc_protocol::ReplayParams {
+                                    seconds: inner
+                                        .clips
+                                        .smoke_seconds
+                                        .unwrap_or(clips::REPLAY_RING_SECONDS),
+                                    auto: !view.capture.replay_buffer.explicit,
+                                });
                         params
                     },
                 ),
@@ -3279,7 +3295,7 @@ fn epoch_ms() -> u64 {
 /// set by `start_once`); this leaves it `None`. The vertical leg
 /// (`buildSimulcastParams`) is the start's too: it needs the scene on
 /// stream, so `start_once` sets it and the Clips ring's own session has none.
-/// Captions and the replay ring are Phase 3. The
+/// The replay ring is attached by `start_once` from its current arming. The
 /// chosen recordings folder rides apart, as its capability
 /// ([`StudioBackend::session_start_into`], S1.6a part 6b); without one the
 /// backend records into its default directory (`VIDEORC_RECORDINGS_DIR`

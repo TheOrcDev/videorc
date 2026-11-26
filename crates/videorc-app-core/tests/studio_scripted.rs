@@ -3336,6 +3336,67 @@ async fn the_launch_arms_the_ring_and_starts_a_buffer_only_session_with_the_scen
     assert!(studio.snapshot().session.status.replay_only);
 }
 
+/// The ring must ride the replacement session, as Electron's
+/// buildStartSessionParams does; omitting replay turns Clips off at Record.
+#[tokio::test]
+async fn the_armed_clips_ring_rides_record_and_live_session_starts() {
+    for intent in [
+        SessionStartIntent {
+            record: true,
+            stream: false,
+        },
+        SessionStartIntent {
+            record: false,
+            stream: true,
+        },
+        SessionStartIntent {
+            record: true,
+            stream: true,
+        },
+    ] {
+        for (explicit, seconds) in [(false, None), (true, Some(12))] {
+            let mut config = capture_config_with_twitch();
+            config["sources"] = capture_config_with_camera()["sources"].clone();
+            config["replayBuffer"] = json!({"enabled": true, "explicit": explicit});
+            let (backend, studio, _) = clips_studio(config).await;
+            studio.set_clips_for_run(true, seconds);
+            studio.clips_due().await;
+            assert!(studio.snapshot().session.status.replay_only);
+
+            assert_eq!(studio.start(intent, None).await, StartOutcome::Started);
+            let script = backend.script.lock().unwrap();
+            assert_eq!(script.started_with.len(), 2);
+            let started = &script.started_with[1];
+            assert_eq!(started.output.record_enabled, intent.record);
+            assert_eq!(started.output.stream_enabled, intent.stream);
+            assert_eq!(
+                started.replay,
+                Some(ReplayParams {
+                    seconds: seconds.unwrap_or(60),
+                    auto: !explicit,
+                })
+            );
+            drop(script);
+            assert!(studio.snapshot().clips.armed);
+            assert!(!studio.snapshot().session.status.replay_only);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_disarmed_clips_ring_does_not_attach_to_record_even_with_the_saved_switch_on() {
+    let (backend, studio, _) = clips_studio(capture_config_with_camera()).await;
+    studio.clips_due().await;
+    studio.set_clips_for_run(false, None);
+    assert!(studio.snapshot().clips.on);
+    assert_eq!(studio.start_recording().await, StartOutcome::Started);
+    assert!(
+        backend.script.lock().unwrap().started_with[1]
+            .replay
+            .is_none()
+    );
+}
+
 /// L6's preview-check-invisible on c54b5bb6d: with no screen preview
 /// started at idle, the backend refused the ring three times ("the screen
 /// preview source(s) produced no frames") and the ring gave up. The ring's
