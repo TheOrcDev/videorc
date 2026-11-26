@@ -101,16 +101,17 @@ test('filters match as electron-builder takes these patterns', () => {
 })
 
 test('the layout is where the app looks', () => {
+  const binaries = path.resolve('/build')
   const copies = bundleCopies({
     root: '/repo',
-    binaries: '/build',
-    bridge: '/build/videorc-mcp',
+    binaries,
+    bridge: path.join(binaries, 'videorc-mcp'),
     ffmpeg: '/repo/vendor/ffmpeg/current'
   })
   const to = Object.fromEntries(copies.map((copy) => [copy.to, copy]))
   // main.rs: the backend beside the app; the bridge beside the backend.
-  assert.equal(to['MacOS/Videorc'].from, '/build/Videorc')
-  assert.equal(to['MacOS/videorc-backend'].from, '/build/videorc-backend')
+  assert.equal(to['MacOS/Videorc'].from, path.join(binaries, 'Videorc'))
+  assert.equal(to['MacOS/videorc-backend'].from, path.join(binaries, 'videorc-backend'))
   assert.equal(to['MacOS/videorc-mcp'].required, false)
   // bundled.rs: electron-builder's names under Resources.
   for (const folder of [
@@ -124,11 +125,11 @@ test('the layout is where the app looks', () => {
   // Every required source exists in this checkout.
   for (const copy of bundleCopies({
     root,
-    binaries: '/build',
-    bridge: '/build/videorc-mcp',
+    binaries,
+    bridge: path.join(binaries, 'videorc-mcp'),
     ffmpeg: '/nowhere'
   })) {
-    if (copy.required && !copy.from.startsWith('/build')) {
+    if (copy.required && path.dirname(copy.from) !== binaries) {
       assert.ok(fs.existsSync(copy.from), copy.from)
     }
   }

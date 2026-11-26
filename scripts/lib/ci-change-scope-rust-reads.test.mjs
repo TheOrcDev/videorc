@@ -88,6 +88,17 @@ describe('ci-change-scope Rust reads, derived', () => {
     }
   })
 
+  it('runs Rust jobs for the Studio hook read by the Library noise tests', () => {
+    const path = 'apps/desktop/src/renderer/src/hooks/use-studio.tsx'
+    assert.ok(rustReadDesktopPaths().includes(path))
+    assert.equal(isAppTsPath(path), false)
+    const scope = classifyChangeScope({ eventName: 'pull_request', files: [path] })
+    assert.equal(scope.kind, 'code')
+    assert.equal(scope.macosRust, true)
+    assert.equal(scope.windowsHeavy, true)
+    assert.equal(scope.linuxHeavy, true)
+  })
+
   it('still lets main-process and renderer files no Rust code reads skip the Rust jobs', () => {
     // index.ts, app-menu.ts and virtual-camera-linux-setup.ts are named in
     // Rust doc comments only: a comment is not a read.
@@ -96,8 +107,7 @@ describe('ci-change-scope Rust reads, derived', () => {
       'apps/desktop/src/main/app-menu.ts',
       'apps/desktop/src/main/virtual-camera-linux-setup.ts',
       'apps/desktop/src/preload/index.ts',
-      'apps/desktop/src/renderer/src/components/sidebar.tsx',
-      'apps/desktop/src/renderer/src/hooks/use-studio.tsx'
+      'apps/desktop/src/renderer/src/components/sidebar.tsx'
     ]) {
       assert.equal(isRustReachableDesktopPath(path), false, path)
       const scope = classifyChangeScope({ eventName: 'pull_request', files: [path] })
