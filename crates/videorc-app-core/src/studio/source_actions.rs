@@ -197,6 +197,25 @@ impl<B: StudioBackend> Studio<B> {
         self.switch_source_device_live(kind, picked).await
     }
 
+    /// A remote's screen (`sceneApply` with `screenId`): the capture
+    /// sources the Screen picker would write for that screen or window
+    /// (`buildCaptureSources`), or `None` when the picker lists no screen
+    /// or window by that id.
+    pub(super) fn capture_sources_for(&self, device_id: &str) -> Option<Value> {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        let current = working_sources(inner);
+        let devices = capture_picker_devices(&inner.sources.devices.devices);
+        let listed = devices.iter().any(|device| {
+            device.id == device_id
+                && matches!(
+                    device.kind,
+                    videorc_protocol::DeviceKind::Screen | videorc_protocol::DeviceKind::Window
+                )
+        });
+        listed.then(|| build_capture_sources(&current, &devices, Some(device_id)))
+    }
+
     /// `switchSourceDeviceLive(kind, sources)`: refused with a warning while
     /// a picker must wait; a Screen pick is the scene on stream's screen
     /// (D2); idle, the capture config takes the pick; while a session runs,

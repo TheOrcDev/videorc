@@ -112,6 +112,17 @@ struct Script {
     /// Every remote surface published, and every remote intent's ack.
     remote_surfaces: Vec<Value>,
     remote_acks: Vec<RemoteIntentAckParams>,
+    /// What a remote's keys ask of the backend: `banners.list`'s answer
+    /// (none: not connected) and the refusal `banners.show` answers with;
+    /// the takeovers `screens.list` names; `sounds.list`'s sound ids (none:
+    /// not connected); whether the screen is hidden; and every banner,
+    /// takeover, sound and Hide screen request, with its params.
+    banners: Option<Value>,
+    banner_show_refusal: Option<String>,
+    takeovers: Vec<String>,
+    sound_ids: Option<Vec<String>>,
+    screen_hidden: bool,
+    remote_requests: Vec<(String, Value)>,
 }
 
 struct Scripted {
@@ -311,6 +322,69 @@ impl StudioBackend for Scripted {
         Ok(None)
     }
 
+    /// The scripted takeovers.
+    async fn screens_list(&self) -> Result<Vec<videorc_protocol::StreamScreen>, RpcError> {
+        self.note("screens.list");
+        let ids = self.script.lock().unwrap().takeovers.clone();
+        Ok(ids.iter().map(|id| takeover(id)).collect())
+    }
+
+    async fn screens_activate(
+        &self,
+        screen_id: &str,
+    ) -> Result<videorc_protocol::StreamScreen, RpcError> {
+        self.note("screens.activate");
+        self.script.lock().unwrap().remote_requests.push((
+            "screens.activate".to_string(),
+            json!({ "screenId": screen_id }),
+        ));
+        Ok(takeover(screen_id))
+    }
+
+    async fn screens_clear(&self) -> Result<(), RpcError> {
+        self.note("screens.clear");
+        self.script
+            .lock()
+            .unwrap()
+            .remote_requests
+            .push(("screens.clear".to_string(), Value::Null));
+        Ok(())
+    }
+
+    /// The scripted board (none: not connected).
+    async fn sounds_list(&self) -> Result<videorc_protocol::SoundboardState, RpcError> {
+        self.note("sounds.list");
+        let ids = self.script.lock().unwrap().sound_ids.clone();
+        let Some(ids) = ids else {
+            return Err(RpcError::not_connected("sounds.list"));
+        };
+        let sounds: Vec<Value> = ids
+            .iter()
+            .map(|id| {
+                json!({
+                    "id": id, "name": id, "file": format!("{id}.wav"),
+                    "durationMs": 1000, "loudnessLufs": -18.0, "levelDb": 0.0,
+                    "volumeDb": 0, "mode": "oneShot", "sortOrder": 0,
+                    "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z"
+                })
+            })
+            .collect();
+        Ok(serde_json::from_value(json!({
+            "sounds": sounds, "volumeDb": 0, "monitor": true, "startersSeeded": true
+        }))
+        .expect("a soundboard"))
+    }
+
+    async fn sounds_request(&self, method: &'static str, params: Value) -> Result<Value, RpcError> {
+        self.note(method);
+        self.script
+            .lock()
+            .unwrap()
+            .remote_requests
+            .push((method.to_string(), params));
+        Ok(Value::Null)
+    }
+
     async fn remote_intent_ack(&self, params: RemoteIntentAckParams) -> Result<(), RpcError> {
         self.note("remote.intent.ack");
         self.script.lock().unwrap().remote_acks.push(params);
@@ -418,6 +492,26 @@ impl StudioBackend for Scripted {
                     .scene_load
                     .clone()
                     .ok_or_else(|| RpcError::not_connected(method))
+            }
+            // A remote's banner and Hide screen keys.
+            "banners.list" => script
+                .banners
+                .clone()
+                .ok_or_else(|| RpcError::not_connected(method)),
+            "banners.show" | "banners.hide" => {
+                script.remote_requests.push((method.to_string(), params));
+                match (method, script.banner_show_refusal.clone()) {
+                    ("banners.show", Some(refusal)) => {
+                        Err(RpcError::new(method, "banner-refused", refusal))
+                    }
+                    _ => Ok(json!({})),
+                }
+            }
+            "screen.privacy.get" => Ok(json!({ "hidden": script.screen_hidden, "generation": 1 })),
+            "screen.hide" | "screen.show" => {
+                script.remote_requests.push((method.to_string(), params));
+                script.screen_hidden = method == "screen.hide";
+                Ok(json!({ "hidden": script.screen_hidden, "generation": 2 }))
             }
             _ => Err(RpcError::not_connected(method)),
         }
@@ -5268,6 +5362,300 @@ async fn a_remote_intent_is_run_and_acked() {
         }]
     );
     driver.abort();
+}
+
+/// A takeover as `screens.list` names it.
+fn takeover(id: &str) -> videorc_protocol::StreamScreen {
+    videorc_protocol::StreamScreen {
+        id: id.to_string(),
+        name: id.to_string(),
+        image_path: format!("/screens/{id}.png"),
+        thumbnail_path: None,
+        sort_order: 0,
+        status: videorc_protocol::StreamScreenStatus::Ready,
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+    }
+}
+
+/// A launched Studio for a remote's keys.
+async fn remote_studio(edit: impl FnOnce(&mut Script)) -> (Arc<Scripted>, Arc<Studio<Scripted>>) {
+    let backend = Scripted::new();
+    backend.with(edit);
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    (backend, studio)
+}
+
+/// Runs one intent as the driver does and answers its ack.
+async fn press(
+    backend: &Scripted,
+    studio: &Arc<Studio<Scripted>>,
+    intent: Value,
+) -> RemoteIntentAckParams {
+    studio
+        .run_remote_intent(RemoteIntentEnvelope {
+            intent_id: "key-1".to_string(),
+            intent,
+        })
+        .await;
+    backend
+        .script
+        .lock()
+        .unwrap()
+        .remote_acks
+        .pop()
+        .expect("the intent is acked")
+}
+
+fn accepted_ack() -> RemoteIntentAckParams {
+    RemoteIntentAckParams {
+        intent_id: "key-1".to_string(),
+        ok: true,
+        message: None,
+    }
+}
+
+fn refused_ack(message: &str) -> RemoteIntentAckParams {
+    RemoteIntentAckParams {
+        intent_id: "key-1".to_string(),
+        ok: false,
+        message: Some(message.to_string()),
+    }
+}
+
+fn remote_requests(backend: &Scripted) -> Vec<(String, Value)> {
+    std::mem::take(&mut backend.script.lock().unwrap().remote_requests)
+}
+
+#[tokio::test]
+async fn banner_keys_show_hide_and_toggle_a_listed_banner() {
+    let (backend, studio) = remote_studio(|script| {
+        script.banners = Some(json!([
+            { "id": "sale", "name": "Sale", "shown": false },
+            { "id": "logo", "name": "Logo", "shown": true }
+        ]));
+    })
+    .await;
+    assert_eq!(
+        press(
+            &backend,
+            &studio,
+            json!({ "kind": "bannerShow", "bannerId": "sale" })
+        )
+        .await,
+        accepted_ack()
+    );
+    assert_eq!(
+        remote_requests(&backend),
+        [("banners.show".to_string(), json!({ "id": "sale" }))]
+    );
+
+    // A toggle hides the banner that shows, and shows the hidden one.
+    press(
+        &backend,
+        &studio,
+        json!({ "kind": "bannerToggle", "bannerId": "logo" }),
+    )
+    .await;
+    press(
+        &backend,
+        &studio,
+        json!({ "kind": "bannerToggle", "bannerId": "sale" }),
+    )
+    .await;
+    // A hide without an id hides them all.
+    press(&backend, &studio, json!({ "kind": "bannerHide" })).await;
+    assert_eq!(
+        remote_requests(&backend),
+        [
+            ("banners.hide".to_string(), json!({ "id": "logo" })),
+            ("banners.show".to_string(), json!({ "id": "sale" })),
+            ("banners.hide".to_string(), json!({})),
+        ]
+    );
+
+    // A banner the list doesn't have is never sent.
+    assert_eq!(
+        press(
+            &backend,
+            &studio,
+            json!({ "kind": "bannerShow", "bannerId": "gone" })
+        )
+        .await,
+        refused_ack(remote_copy::BANNER_MISSING)
+    );
+    assert!(remote_requests(&backend).is_empty());
+
+    // The backend's refusal comes back verbatim.
+    backend.with(|script| {
+        script.banner_show_refusal =
+            Some("banners.show failed: Four banners are showing. Hide one first.".to_string());
+    });
+    assert_eq!(
+        press(
+            &backend,
+            &studio,
+            json!({ "kind": "bannerShow", "bannerId": "sale" })
+        )
+        .await,
+        refused_ack("Four banners are showing. Hide one first.")
+    );
+}
+
+#[tokio::test]
+async fn sound_keys_press_a_sound_on_the_board_and_stop_them() {
+    let (backend, studio) = remote_studio(|script| {
+        script.sound_ids = Some(vec!["airhorn".to_string()]);
+    })
+    .await;
+    assert_eq!(
+        press(
+            &backend,
+            &studio,
+            json!({ "kind": "soundPlay", "soundId": "airhorn" })
+        )
+        .await,
+        accepted_ack()
+    );
+    press(
+        &backend,
+        &studio,
+        json!({ "kind": "soundStop", "soundId": "airhorn" }),
+    )
+    .await;
+    press(&backend, &studio, json!({ "kind": "soundStop" })).await;
+    assert_eq!(
+        remote_requests(&backend),
+        [
+            ("sounds.press".to_string(), json!({ "id": "airhorn" })),
+            ("sounds.stop".to_string(), json!({ "id": "airhorn" })),
+            ("sounds.stop".to_string(), json!({})),
+        ]
+    );
+    assert_eq!(
+        press(
+            &backend,
+            &studio,
+            json!({ "kind": "soundPlay", "soundId": "gone" })
+        )
+        .await,
+        refused_ack(remote_copy::SOUND_MISSING)
+    );
+    assert!(remote_requests(&backend).is_empty());
+}
+
+#[tokio::test]
+async fn takeover_keys_put_a_listed_takeover_on_air_and_clear_it() {
+    let (backend, studio) = remote_studio(|script| {
+        script.takeovers = vec!["brb".to_string()];
+    })
+    .await;
+    assert_eq!(
+        press(
+            &backend,
+            &studio,
+            json!({ "kind": "takeoverShow", "assetId": "brb" })
+        )
+        .await,
+        accepted_ack()
+    );
+    assert_eq!(
+        press(&backend, &studio, json!({ "kind": "takeoverHide" })).await,
+        accepted_ack()
+    );
+    assert_eq!(
+        remote_requests(&backend),
+        [
+            ("screens.activate".to_string(), json!({ "screenId": "brb" })),
+            ("screens.clear".to_string(), Value::Null),
+        ]
+    );
+    assert_eq!(
+        press(
+            &backend,
+            &studio,
+            json!({ "kind": "takeoverShow", "assetId": "gone" })
+        )
+        .await,
+        refused_ack(remote_copy::TAKEOVER_MISSING)
+    );
+    assert!(remote_requests(&backend).is_empty());
+}
+
+#[tokio::test]
+async fn hide_screen_keys_hide_show_and_toggle_the_screen() {
+    let (backend, studio) = remote_studio(|_| {}).await;
+    assert_eq!(
+        press(&backend, &studio, json!({ "kind": "screenHide" })).await,
+        accepted_ack()
+    );
+    // Hidden: the toggle shows it again.
+    press(&backend, &studio, json!({ "kind": "screenHideToggle" })).await;
+    press(&backend, &studio, json!({ "kind": "screenHideToggle" })).await;
+    press(&backend, &studio, json!({ "kind": "screenShow" })).await;
+    assert_eq!(
+        remote_requests(&backend),
+        [
+            ("screen.hide".to_string(), json!({ "reason": "you" })),
+            ("screen.show".to_string(), Value::Null),
+            ("screen.hide".to_string(), json!({ "reason": "you" })),
+            ("screen.show".to_string(), Value::Null),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_layout_key_switches_to_the_first_scene_with_that_layout() {
+    let (backend, studio) = scenes_studio(capture_config_with_camera()).await;
+    assert_eq!(
+        studio.snapshot().scenes.on_stream_id.as_deref(),
+        Some("default-screen-camera")
+    );
+    assert_eq!(
+        press(
+            &backend,
+            &studio,
+            json!({ "kind": "sceneApply", "layoutPreset": "screen-only" })
+        )
+        .await,
+        accepted_ack()
+    );
+    settled(&studio).await;
+    assert_eq!(
+        studio.snapshot().scenes.on_stream_id.as_deref(),
+        Some("default-screen-only")
+    );
+    let commits = layout_commits(&backend);
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].1["layout"]["layoutPreset"], "screen-only");
+
+    // By id, as the scene keys send it.
+    assert_eq!(
+        press(
+            &backend,
+            &studio,
+            json!({ "kind": "sceneApply", "sceneId": "default-screen-camera" })
+        )
+        .await,
+        accepted_ack()
+    );
+    settled(&studio).await;
+    assert_eq!(
+        studio.snapshot().scenes.on_stream_id.as_deref(),
+        Some("default-screen-camera")
+    );
+
+    // A screen the device list doesn't have.
+    assert_eq!(
+        press(
+            &backend,
+            &studio,
+            json!({ "kind": "sceneApply", "screenId": "screen:screencapturekit:9" })
+        )
+        .await,
+        refused_ack(remote_copy::SCREEN_MISSING)
+    );
 }
 
 // ── A takeover's microphone mute (`studio::takeover_mute`) ──────────────

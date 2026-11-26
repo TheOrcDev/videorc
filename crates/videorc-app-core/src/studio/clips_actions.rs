@@ -853,17 +853,8 @@ impl<B: StudioBackend> Studio<B> {
             self.post(vec![NoticeCommand::Show(notice)]);
             return None;
         }
-        let params = serde_json::to_value(ClipMarkParams { seconds }).unwrap_or(Value::Null);
-        let answer = self.backend.clips_request(CLIP_MARK_METHOD, params).await;
-        let error = match answer {
-            Ok(value) => match serde_json::from_value::<ClipMarkedEvent>(value) {
-                Ok(event) => return Some(event),
-                Err(error) => crate::client::RpcError::new(
-                    CLIP_MARK_METHOD,
-                    crate::client::codes::INVALID_RESPONSE,
-                    format!("The {CLIP_MARK_METHOD} answer did not read: {error}"),
-                ),
-            },
+        let error = match self.request_clip_mark(seconds).await {
+            Ok(event) => return Some(event),
             Err(error) => error,
         };
         self.config.logger.warn(format!(
@@ -875,5 +866,23 @@ impl<B: StudioBackend> Studio<B> {
             self.post(vec![command]);
         }
         None
+    }
+
+    /// `clip.mark` with the length, its answer read as the event. Says
+    /// nothing itself: [`Self::mark_clip`] toasts, a remote's key answers
+    /// with the words.
+    pub(super) async fn request_clip_mark(
+        &self,
+        seconds: Option<u32>,
+    ) -> Result<ClipMarkedEvent, crate::client::RpcError> {
+        let params = serde_json::to_value(ClipMarkParams { seconds }).unwrap_or(Value::Null);
+        let value = self.backend.clips_request(CLIP_MARK_METHOD, params).await?;
+        serde_json::from_value::<ClipMarkedEvent>(value).map_err(|error| {
+            crate::client::RpcError::new(
+                CLIP_MARK_METHOD,
+                crate::client::codes::INVALID_RESPONSE,
+                format!("The {CLIP_MARK_METHOD} answer did not read: {error}"),
+            )
+        })
     }
 }
