@@ -196,7 +196,21 @@ pub(super) fn new(setup: PreviewSetup, window: &mut Window, cx: &mut App) -> Ent
     }
     let mut status = element.status_watch();
     let phase = status.borrow().phase;
+    let mut snapshots = studio.watch();
     cx.new(|cx: &mut Context<Preview>| {
+        // A performance check holds the picture: the watchdog stands down.
+        cx.spawn(async move |this: WeakEntity<Preview>, cx: &mut AsyncApp| {
+            while snapshots.changed().await.is_ok() {
+                let held = super::check_holds_preview(&snapshots.borrow_and_update());
+                if this
+                    .update(cx, |preview, _| preview.set_check_hold(held))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         // The slot's words follow the element's phase; nothing else of the
         // status redraws.
         cx.spawn(async move |this: WeakEntity<Preview>, cx: &mut AsyncApp| {

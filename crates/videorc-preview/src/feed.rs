@@ -454,6 +454,11 @@ pub struct Telemetry {
     /// over the slot): the watchdog doesn't judge it until it shows again.
     /// The surface stays up, unlike [`Self::parked`].
     pub hidden_by_host: bool,
+    /// A performance check holds the Preview's last picture (plan 212 S2,
+    /// Electron's `compositor.status.previewHold`): frames advance on the
+    /// check's canvas while nothing new is presented. Not a broken Preview:
+    /// the watchdog stands down as for [`Self::hidden_by_host`].
+    pub held_by_check: bool,
     /// S3.1b: the backend's native host commands the feed took.
     pub host_commands_taken: u64,
     /// S3.1b: the backend's latest `preview.surface.status`.

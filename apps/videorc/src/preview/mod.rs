@@ -239,9 +239,15 @@ impl Preview {
             // (`setPreviewWindowAspectRatio`, `use-studio.tsx`).
             cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 while settings.changed().await.is_ok() {
-                    let next = output_size(&settings.borrow_and_update());
+                    let (next, held) = {
+                        let snapshot = settings.borrow_and_update();
+                        (output_size(&snapshot), check_holds_preview(&snapshot))
+                    };
                     if this
-                        .update(cx, |preview, cx| preview.set_output(next, cx))
+                        .update(cx, |preview, cx| {
+                            preview.set_output(next, cx);
+                            preview.set_check_hold(held);
+                        })
                         .is_err()
                     {
                         break;
@@ -869,6 +875,16 @@ impl Preview {
         }
     }
 
+    /// While a performance check holds the Preview's last picture the
+    /// watchdog stands down (Electron's first-frame contract skips judging
+    /// under `previewHold`), so the held picture is never "healed".
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub(super) fn set_check_hold(&mut self, held: bool) {
+        if let Some(native) = self.native.as_mut() {
+            native.element.set_held_by_check(held);
+        }
+    }
+
     /// The shell says whether the Studio page shows: a slot that is not on
     /// screen presents nothing (the surface's record says `visible: false`).
     pub fn set_docked_shown(&mut self, shown: bool) {
@@ -1411,6 +1427,19 @@ fn open_floating(preview: WeakEntity<Preview>, cx: &mut App) {
 
 /// The output's size (`captureConfig.video`'s width and height).
 #[cfg(target_os = "macos")]
+/// A performance check holds the Preview's last picture (plan 212 S2,
+/// Electron's `compositor.status.previewHold`): a check this app started,
+/// or the backend's check still running, as the Studio's hold label reads it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn check_holds_preview(snapshot: &videorc_app_core::StudioSnapshot) -> bool {
+    let performance = &snapshot.performance;
+    performance.hold
+        || performance
+            .state
+            .as_ref()
+            .is_some_and(|state| state.running)
+}
+
 fn output_size(snapshot: &videorc_app_core::StudioSnapshot) -> (u32, u32) {
     let video = videorc_app_core::livestream::plan::recording_video(&snapshot.settings.capture_doc);
     (video.width, video.height)

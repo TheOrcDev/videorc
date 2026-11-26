@@ -943,6 +943,17 @@ impl PreviewElement {
         self.visible
     }
 
+    /// The host says a performance check holds the Preview's last picture
+    /// (Electron's `previewHold: 'performance-check'`): the watchdog stands
+    /// down until it lets go, as while the host hides the video.
+    pub fn set_held_by_check(&mut self, held: bool) {
+        if let Some(handle) = self.telemetry_handle()
+            && let Ok(mut t) = handle.lock()
+        {
+            t.held_by_check = held;
+        }
+    }
+
     /// The host's corner radius (the rounded slot; square in the Preview
     /// window), for the surface's record.
     pub fn set_corner_radius(&mut self, radius: f64) {
@@ -1273,10 +1284,11 @@ async fn watchdog(
             );
             continue;
         }
-        if t.hidden_by_host {
+        if t.hidden_by_host || t.held_by_check {
             // The host hid the video on purpose (its page is away, a dialog
-            // is over the slot): nothing on screen to judge, and nothing to
-            // heal. Unlike a park, the contract isn't reset: the phase stays,
+            // is over the slot), or a performance check holds its last
+            // picture (`previewHold`): nothing on screen to judge, and
+            // nothing to heal. Unlike a park, the contract isn't reset: the phase stays,
             // so a Preview that was presenting is still presenting when it
             // shows again. ogre, 2026-11-26: 30 s away read "Preview failed".
             last_frames_rendered = None;
