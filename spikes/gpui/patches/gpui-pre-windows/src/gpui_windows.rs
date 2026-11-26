@@ -12,6 +12,7 @@ mod dispatcher;
 mod display;
 mod events;
 mod keyboard;
+mod native_view;
 mod platform;
 mod system_notifications;
 mod system_settings;
@@ -38,6 +39,8 @@ pub(crate) use vsync::*;
 pub(crate) use window::*;
 pub(crate) use wrapper::*;
 
+pub(crate) use native_view::NativeViews;
+pub use native_view::{NativeVisual, NativeVisualSize};
 pub use platform::WindowsPlatform;
 
 pub(crate) use windows::Win32::Foundation::HWND;

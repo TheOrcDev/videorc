@@ -43,6 +43,7 @@ pub(crate) struct DirectXRenderer {
     globals: DirectXGlobalElements,
     pipelines: DirectXRenderPipelines,
     direct_composition: Option<DirectComposition>,
+    native_views: NativeViews,
     font_info: &'static FontInfo,
 
     width: u32,
@@ -90,6 +91,7 @@ struct DirectXRenderPipelines {
     mono_sprites: PipelineState<MonochromeSprite>,
     subpixel_sprites: PipelineState<SubpixelSprite>,
     poly_sprites: PipelineState<PolychromeSprite>,
+    native_view_erasers: PipelineState<Quad>,
 }
 
 struct DirectXGlobalElements {
@@ -116,6 +118,8 @@ impl Drop for Annotation<'_> {
 struct DirectComposition {
     comp_device: IDCompositionDevice,
     comp_target: IDCompositionTarget,
+    /// Holds native views' visuals beneath `comp_visual`.
+    root_visual: IDCompositionVisual,
     comp_visual: IDCompositionVisual,
 }
 
@@ -190,6 +194,7 @@ impl DirectXRenderer {
             globals,
             pipelines,
             direct_composition,
+            native_views: NativeViews::default(),
             font_info: Self::get_font_info(),
             width: 1,
             height: 1,
@@ -343,6 +348,7 @@ impl DirectXRenderer {
         self.globals = globals;
         self.pipelines = pipelines;
         self.direct_composition = direct_composition;
+        self.native_views.device_lost();
         self.skip_draws = true;
         Ok(())
     }
@@ -358,7 +364,59 @@ impl DirectXRenderer {
             return Ok(());
         }
         self.render(scene, background_appearance)?;
-        self.present()
+        self.present()?;
+        self.place_native_views(scene)
+    }
+
+    /// Adds a native view, shown once a drawn scene paints it.
+    pub(crate) fn attach_native_view(
+        &mut self,
+        id: NativeViewId,
+        visual: &NativeVisual,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.direct_composition.is_some(),
+            "native views need DirectComposition, which {DISABLE_DIRECT_COMPOSITION} turns off"
+        );
+        self.native_views.attach(id, visual);
+        Ok(())
+    }
+
+    pub(crate) fn detach_native_view(&mut self, id: NativeViewId) -> Result<()> {
+        let composition = self.direct_composition.as_ref();
+        if self
+            .native_views
+            .detach(id, composition.map(|composition| &composition.root_visual))?
+            && let Some(composition) = composition
+        {
+            unsafe { composition.comp_device.Commit() }?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_native_view_scale_factor(&mut self, scale_factor: f32) {
+        self.native_views.set_scale_factor(scale_factor);
+    }
+
+    /// Moves native views' visuals to where `scene` painted them. Called after
+    /// presenting, so GPUI's frame and the views' places reach the screen
+    /// together where the compositor allows.
+    fn place_native_views(&mut self, scene: &Scene) -> Result<()> {
+        let (Some(composition), Some(devices)) = (&self.direct_composition, &self.devices) else {
+            return Ok(());
+        };
+        let changed = self.native_views.update(
+            scene,
+            &composition.comp_device,
+            &composition.root_visual,
+            &composition.comp_visual,
+            &devices.device,
+            &devices.device_context,
+        )?;
+        if changed {
+            unsafe { composition.comp_device.Commit() }?;
+        }
+        Ok(())
     }
 
     /// Clear the render target for `background_appearance` and encode every
@@ -438,8 +496,9 @@ impl DirectXRenderer {
                     self.draw_polychrome_sprites(texture_id, range.start, range.len())
                 }
                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
-                // Native views are only composited on macOS.
-                PrimitiveBatch::NativeViews(_) => Ok(()),
+                PrimitiveBatch::NativeViews(range) => {
+                    self.erase_for_native_views(range.start, range.len())
+                }
             }
             .with_context(|| {
                 format!(
@@ -697,7 +756,39 @@ impl DirectXRenderer {
             )?;
         }
 
+        if !scene.native_views.is_empty() {
+            let erasers = scene
+                .native_views
+                .iter()
+                .map(|view| native_view_eraser(view, self.native_views.corner_radius(view.id)))
+                .collect::<Vec<_>>();
+            self.pipelines.native_view_erasers.update_buffer(
+                &devices.device,
+                &devices.device_context,
+                &erasers,
+            )?;
+        }
+
         Ok(())
+    }
+
+    /// Erases what was drawn before the native views in this range, where
+    /// they are painted, so they show through. The batch's fixed depth keeps
+    /// opaque quads painted after them, which were drawn first.
+    fn erase_for_native_views(&mut self, start: usize, len: usize) -> Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        let devices = self.devices.as_ref().context("devices missing")?;
+        self.pipelines.native_view_erasers.draw_range(
+            &devices.device_context,
+            self.globals
+                .batch_params_buffer
+                .as_ref()
+                .context("batch params buffer missing")?,
+            start as u32,
+            len as u32,
+        )
     }
 
     fn draw_shadows(&mut self, start: usize, len: usize) -> Result<()> {
@@ -1014,6 +1105,13 @@ impl DirectXRenderPipelines {
             create_blend_state(device)?,
         )?;
         let opaque_quad_pipeline = OpaqueQuadPipeline::new(device)?;
+        let native_view_erasers = PipelineState::new(
+            device,
+            "native_view_eraser_pipeline",
+            ShaderModule::Quad,
+            4,
+            create_erase_blend_state(device)?,
+        )?;
 
         Ok(Self {
             shadow_pipeline,
@@ -1026,6 +1124,7 @@ impl DirectXRenderPipelines {
             mono_sprites,
             subpixel_sprites,
             poly_sprites,
+            native_view_erasers,
         })
     }
 }
@@ -1034,11 +1133,13 @@ impl DirectComposition {
     pub fn new(dxgi_device: &IDXGIDevice, hwnd: HWND) -> Result<Self> {
         let comp_device = get_comp_device(dxgi_device)?;
         let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, false) }?;
+        let root_visual = unsafe { comp_device.CreateVisual() }?;
         let comp_visual = unsafe { comp_device.CreateVisual() }?;
 
         Ok(Self {
             comp_device,
             comp_target,
+            root_visual,
             comp_visual,
         })
     }
@@ -1046,7 +1147,9 @@ impl DirectComposition {
     pub fn set_swap_chain(&self, swap_chain: &IDXGISwapChain1) -> Result<()> {
         unsafe {
             self.comp_visual.SetContent(swap_chain)?;
-            self.comp_target.SetRoot(&self.comp_visual)?;
+            self.root_visual
+                .AddVisual(&self.comp_visual, true, None::<&IDCompositionVisual>)?;
+            self.comp_target.SetRoot(&self.root_visual)?;
             self.comp_device.Commit()?;
         }
         Ok(())
@@ -1536,6 +1639,46 @@ fn create_opaque_blend_state(device: &ID3D11Device) -> Result<ID3D11BlendState> 
         let mut state = None;
         device.CreateBlendState(&desc, Some(&mut state))?;
         Ok(state.unwrap())
+    }
+}
+
+/// Keeps what is drawn times one minus the source alpha, adding nothing: a
+/// native view's eraser, at alpha 1 inside its rounded bounds and 0 outside,
+/// leaves the pixels it covers transparent.
+#[inline]
+fn create_erase_blend_state(device: &ID3D11Device) -> Result<ID3D11BlendState> {
+    let mut desc = D3D11_BLEND_DESC::default();
+    desc.RenderTarget[0].BlendEnable = true.into();
+    desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ZERO;
+    desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+    desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
+    unsafe {
+        let mut state = None;
+        device.CreateBlendState(&desc, Some(&mut state))?;
+        Ok(state.unwrap())
+    }
+}
+
+/// The quad that erases what was drawn before a native view, drawn by the
+/// quad shaders with [`create_erase_blend_state`], which only read its alpha.
+fn native_view_eraser(view: &PaintNativeView, corner_radius: f32) -> Quad {
+    let half_side = (view.bounds.size.width.0.min(view.bounds.size.height.0) / 2.0).max(0.0);
+    let radius = ScaledPixels(corner_radius.clamp(0.0, half_side));
+    Quad {
+        order: view.order,
+        border_style: BorderStyle::default(),
+        bounds: view.bounds,
+        content_mask: view.content_mask,
+        // Just under 1, or the quad shader leaves an unrounded eraser to the
+        // opaque pass. An 8-bit channel times 1 - 0.999 rounds to 0.
+        background: solid_background(hsla(0.0, 0.0, 0.0, 0.999)),
+        border_color: Hsla::transparent_black(),
+        corner_radii: Corners::all(radius),
+        border_widths: Edges::default(),
     }
 }
 

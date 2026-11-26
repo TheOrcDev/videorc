@@ -34,6 +34,26 @@ use gpui::*;
 
 pub(crate) struct WindowsWindow(pub Rc<WindowsWindowInner>);
 
+/// Removes a native view from its window when `gpui::NativeView` drops it.
+struct NativeViewAttachment {
+    window: Weak<WindowsWindowInner>,
+    id: NativeViewId,
+}
+
+impl Drop for NativeViewAttachment {
+    fn drop(&mut self) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        match window.state.renderer.try_borrow_mut() {
+            Ok(mut renderer) => {
+                renderer.detach_native_view(self.id).log_err();
+            }
+            Err(_) => log::error!("a native view was dropped while its window was drawing"),
+        }
+    }
+}
+
 impl std::ops::Deref for WindowsWindow {
     type Target = WindowsWindowInner;
 
@@ -1035,10 +1055,30 @@ impl PlatformWindow for WindowsWindow {
             .set(Some(callback));
     }
 
-    fn draw(&self, scene: &Scene) {
+    /// `view` must point to a [`NativeVisual`](crate::NativeVisual).
+    unsafe fn attach_native_view(
+        &self,
+        id: NativeViewId,
+        view: std::ptr::NonNull<std::ffi::c_void>,
+    ) -> Option<Box<dyn std::any::Any>> {
+        // SAFETY: on Windows, `NativeView::new`'s caller passes a live
+        // `NativeVisual`; GPUI copies what it keeps from it before returning.
+        let visual = unsafe { view.cast::<crate::NativeVisual>().as_ref() };
         self.state
             .renderer
             .borrow_mut()
+            .attach_native_view(id, visual)
+            .log_err()?;
+        Some(Box::new(NativeViewAttachment {
+            window: Rc::downgrade(&self.0),
+            id,
+        }))
+    }
+
+    fn draw(&self, scene: &Scene) {
+        let mut renderer = self.state.renderer.borrow_mut();
+        renderer.set_native_view_scale_factor(self.state.scale_factor.get());
+        renderer
             .draw(scene, self.state.background_appearance.get())
             .log_err();
     }
