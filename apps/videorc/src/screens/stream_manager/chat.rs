@@ -1257,6 +1257,16 @@ impl Render for ChatPane {
             writable.len(),
             &names,
         );
+        // Send's name (`chat-pane.tsx`): the button is the icon alone.
+        let send_name = if self.sending {
+            "Sending message".to_string()
+        } else if targets.is_empty() {
+            "Send message: no destination picked".to_string()
+        } else if self.picked.is_none() || targets.len() == writable.len() {
+            "Send message to all writable destinations".to_string()
+        } else {
+            format!("Send message to {to_label}")
+        };
         let send_to = (writable.len() > 1).then(|| {
             let this = cx.entity().downgrade();
             let picked = self.picked.clone();
@@ -1264,6 +1274,7 @@ impl Render for ChatPane {
                 .trigger(
                     Button::new("chat-send-to-trigger")
                         .label(format!("To: {to_label}"))
+                        .icon_end(IconName::CaretDown)
                         .variant(ButtonVariant::Ghost)
                         .size(ButtonSize::Xs)
                         .accessibility_label(format!("Send to: {to_label}")),
@@ -1489,11 +1500,11 @@ impl Render for ChatPane {
                                 .child(ShortcutKeys::keystrokes("enter"))
                                 .child(
                                     Button::new("chat-send")
-                                        .label("Send")
+                                        .icon(IconName::PaperPlaneRightFill)
                                         .variant(ButtonVariant::Ghost)
-                                        .size(ButtonSize::Xs)
+                                        .size(ButtonSize::IconXs)
                                         .disabled(!can_send)
-                                        .accessibility_label("Send")
+                                        .accessibility_label(send_name)
                                         .on_click({
                                             let this = this.clone();
                                             move |_, _, app| {
