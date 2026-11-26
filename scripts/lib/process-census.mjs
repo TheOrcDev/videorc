@@ -16,7 +16,8 @@ export function ownedProcessLedgerPaths({
   const workspaceKey = createHash('sha256').update(workspaceRoot).digest('hex').slice(0, 16)
   return [
     join(appDataDir, appName, 'owned-processes', 'global.json'),
-    join(userDataDir, 'owned-processes', `${workspaceKey}.json`)
+    join(userDataDir, 'owned-processes', `${workspaceKey}.json`),
+    join(userDataDir, 'owned-processes', `rust-${workspaceKey}.json`)
   ]
 }
 

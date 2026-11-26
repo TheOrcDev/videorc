@@ -33,7 +33,8 @@ test('ownedProcessLedgerPaths mirrors the desktop owned-process ledger locations
     }),
     [
       join('/tmp/app-data', 'Videorc', 'owned-processes', 'global.json'),
-      join('/tmp/user-data', 'owned-processes', `${workspaceKey}.json`)
+      join('/tmp/user-data', 'owned-processes', `${workspaceKey}.json`),
+      join('/tmp/user-data', 'owned-processes', `rust-${workspaceKey}.json`)
     ]
   )
 })
