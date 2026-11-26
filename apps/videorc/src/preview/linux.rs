@@ -83,7 +83,8 @@ pub(super) struct Cover {
     /// opens and gives it back as it closes, and the key-context path is
     /// the drawn frame's, so a change asks for one more frame to read it.
     focus: Option<FocusHandle>,
-    /// The Shell's full-window overlay (first run) is showing.
+    /// An overlay that opens without taking focus (first run, Go Live) is
+    /// showing.
     probe: Option<Rc<dyn Fn(&App) -> bool>>,
     /// The canvas has looked once. Its first look can come in the window's
     /// first draw, when there is no drawn frame to read a path from (GPUI
