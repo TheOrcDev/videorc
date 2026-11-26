@@ -106,7 +106,12 @@ try {
   const launch = await launchDevApp({
     env: {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
-      VIDEORC_SMOKE_PREVIEW_MOTION: '1',
+      // GPUI must follow the working scene these intents edit. Its motion
+      // preview substitutes a fixed synthetic request; a picker transaction
+      // can replace that scene without changing the request, so enabling the
+      // pattern below would not reload it. The command server still emits
+      // preview-motion-ready, and enable-synthetic-source seeds the fixture.
+      VIDEORC_SMOKE_PREVIEW_MOTION: gpuiApp ? '0' : '1',
       VIDEORC_USER_DATA_DIR: userDataDir
     },
     timeoutMs,
