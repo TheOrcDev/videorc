@@ -71,7 +71,12 @@ async function waitFor(predicate, label, deadlineMs = 15000) {
 let stopApp = async () => {}
 try {
   const launch = await launchDevApp({
-    env: { VIDEORC_USER_DATA_DIR: userDataDir },
+    env: {
+      VIDEORC_USER_DATA_DIR: userDataDir,
+      // The GPUI app prints its `backend-ready` marker from the smoke
+      // command server's start (Electron prints it on its own).
+      ...(process.env.VIDEORC_APP === 'gpui' ? { VIDEORC_SMOKE_COMMAND_SERVER: '1' } : {})
+    },
     timeoutMs,
     requiredMarkers: ['backend-ready'],
     onLine: (line) => {
