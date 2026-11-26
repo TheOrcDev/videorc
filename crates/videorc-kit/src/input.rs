@@ -37,6 +37,8 @@ pub struct Input {
     revert_on_escape: bool,
     /// Show Electron-style number steppers; `None` hides them.
     step: Option<f64>,
+    /// `text-right`: the value reads from the right edge (a number box).
+    align_right: bool,
     /// A call site's `text-base font-medium` (Avatar's name: 16 / 500).
     text_size: Option<f32>,
     font_weight: Option<gpui::FontWeight>,
@@ -56,6 +58,7 @@ impl Input {
             plain: false,
             revert_on_escape: false,
             step: None,
+            align_right: false,
             text_size: None,
             font_weight: None,
             ground: None,
@@ -92,6 +95,13 @@ impl Input {
     /// The value's weight (`font-medium`).
     pub fn font_weight(mut self, weight: gpui::FontWeight) -> Self {
         self.font_weight = Some(weight);
+        self
+    }
+
+    /// `text-right`: the value sits at the right edge, as a number box's
+    /// does (PowerSlider's typed value, Electron's `w-20 text-right`).
+    pub fn align_right(mut self, right: bool) -> Self {
+        self.align_right = right;
         self
     }
 
@@ -189,6 +199,14 @@ impl RenderOnce for Input {
             if state.presentation().is_readonly() != readonly {
                 state.set_readonly(readonly, cx);
             }
+            let align = if self.align_right {
+                gpui::TextAlign::Right
+            } else {
+                gpui::TextAlign::Left
+            };
+            if state.presentation().text_align() != align {
+                state.set_text_align(align, cx);
+            }
             state.set_editor_style(InputEditorStyle {
                 foreground: hsla(fade(t.foreground)),
                 muted_foreground: hsla(fade(t.muted_foreground)),
@@ -270,10 +288,14 @@ impl RenderOnce for Input {
         let up_id = SharedString::from(format!("{}/step-up", self.id));
         let down_id = SharedString::from(format!("{}/step-down", self.id));
         let disabled = self.disabled || readonly;
+        // A native number field shows its spin buttons only while it is
+        // hovered or focused (Output's shot: only the focused Width's).
+        let group = SharedString::from(format!("{}/stepper", self.id));
         div()
             .relative()
             .w_full()
             .min_w(px(0.0))
+            .group(group.clone())
             .child(editor)
             .child(
                 div()
@@ -285,6 +307,11 @@ impl RenderOnce for Input {
                     .flex_col()
                     .w(px(16.0))
                     .justify_between()
+                    .when(!focused, |steppers| {
+                        steppers
+                            .invisible()
+                            .group_hover(group, |style| style.visible())
+                    })
                     .child(stepper_btn(
                         up_id,
                         IconName::CaretUp,
