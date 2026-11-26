@@ -28,6 +28,7 @@ mod inhibit;
 pub mod secrets;
 pub mod shortcuts;
 pub mod v4l2loopback;
+pub mod x11_scale;
 
 use std::sync::{Arc, Mutex, OnceLock};
 
