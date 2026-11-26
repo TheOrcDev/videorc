@@ -3103,6 +3103,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
   // and stays off until the room's own phase holds the camera.
   const roomOpenHoldRef = useRef(false)
   const [cloudStatus, setCloudStatus] = useState<CloudStatus | null>(null)
+  // Plan 260 C4 gallery seed (DEV only): while a seeded room is on show, the
+  // backend's own cloud.status pushes go to the ref and are never drawn, so a
+  // push between the seed and the shot can't put the real (signed-out) status
+  // back. Unseeding draws the last real status again.
+  const smokeSeededCloudStatusRef = useRef(false)
   const cloudStatusRef = useRef<CloudStatus | null>(null)
   const [logs, setLogs] = useState<BackendLogEvent[]>([])
   const [healthEvents, setHealthEvents] = useState<HealthEvent[]>([])
@@ -5026,7 +5031,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }
     smokeWindow.__videorcSmokeSeedShowStage = (status, opts): boolean => {
       if (!status) {
-        setCloudStatus(null)
+        smokeSeededCloudStatusRef.current = false
+        setCloudStatus(cloudStatusRef.current)
         setSmokeTalkShowRoomOpen(false)
         setCaptureConfig((current) => ({
           ...current,
@@ -5034,6 +5040,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
         }))
         return true
       }
+      smokeSeededCloudStatusRef.current = true
       setCloudStatus(status)
       setSmokeTalkShowRoomOpen(status.room?.phase === 'open')
       if (opts?.cameraOff !== undefined) {
@@ -5957,6 +5964,7 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     (next: CloudStatus): void => {
       const previous = cloudStatusRef.current
       cloudStatusRef.current = next
+      if (import.meta.env.DEV && smokeSeededCloudStatusRef.current) return
       // Plan 243 D7: sent before the session stops, so its stop completes
       // nothing; this computer back on air (Continue here) ends the latch.
       const here = (status: CloudStatus | null) =>
