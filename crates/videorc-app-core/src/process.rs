@@ -858,6 +858,12 @@ fn backend_command(launch: &BackendLaunch, ownership_token: &str) -> Result<Comm
         .env("VIDEORC_SUPERVISOR_PID", std::process::id().to_string())
         // Root of the process tree Windows system audio excludes.
         .env("VIDEORC_ELECTRON_MAIN_PID", std::process::id().to_string())
+        // macOS system audio: this app plays no audio of its own (every
+        // sound plays from the backend, which keeps its own out), so the
+        // capture excludes no app. Excluding this app by its pid took every
+        // sound already playing from its responsible process (a terminal's,
+        // in dev and smokes) when System audio came on mid-take.
+        .env("VIDEORC_SYSTEM_AUDIO_EXCLUDE_HOST_APP", "0")
         .env(OWNERSHIP_TOKEN_ENV, ownership_token)
         // Plan 260 S1.8 (L1): this app has no renderer room, so the backend
         // holds the talk show's room (macOS today: the SDK's other builds
