@@ -16,6 +16,7 @@ use crate::app::permissions::Permissions;
 use gpui::{App, Context, EventEmitter, Window, prelude::*};
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
+use videorc_app_core::client::RpcError;
 use videorc_app_core::settings_page::{self as view, ChatEmotes, Loaded, SettingsTab, UsageStats};
 use videorc_app_core::settings_page::{
     agents::{ACTIVITY_ROWS, ActivityEntry, AgentsStatus, with_last_action},
@@ -33,6 +34,98 @@ pub const EVENTS: [&str; 6] = [
     "agents.activity",
     "account.changed",
 ];
+/// One log line per remote read that came back short: which read, its
+/// method, and the RPC's code and message or the shape it didn't match.
+/// Quoted text is cut (a status can carry a pairing token or an address), so
+/// the line names the failure, never a value.
+fn log_short_reads(
+    remote: &Result<Value, RpcError>,
+    phone: &Result<Value, RpcError>,
+    agents: &Result<Value, RpcError>,
+    activity: &Result<Value, RpcError>,
+) {
+    let activity_reason = match activity {
+        Ok(value) => match value.get("entries") {
+            Some(entries) => shape_reason::<Vec<ActivityEntry>>(entries),
+            None => Some("unexpected shape: no entries".to_string()),
+        },
+        Err(error) => Some(rpc_reason(error)),
+    };
+    let reads = [
+        (
+            "remote control",
+            "remote.control.status",
+            short_reason::<RemoteControlStatus>(remote),
+        ),
+        (
+            "phone remote",
+            "remote.lan.status",
+            short_reason::<RemoteLanStatus>(phone),
+        ),
+        (
+            "agents",
+            "agents.status",
+            short_reason::<AgentsStatus>(agents),
+        ),
+        ("agent activity", "agents.activity.list", activity_reason),
+    ];
+    for (read, method, reason) in reads {
+        if let Some(reason) = reason {
+            eprintln!(
+                "[videorc-app] settings: the {read} read came back short ({method}): {reason}"
+            );
+        }
+    }
+}
+
+fn short_reason<T: serde::de::DeserializeOwned>(
+    answer: &Result<Value, RpcError>,
+) -> Option<String> {
+    match answer {
+        Ok(value) => shape_reason::<T>(value),
+        Err(error) => Some(rpc_reason(error)),
+    }
+}
+
+fn shape_reason<T: serde::de::DeserializeOwned>(value: &Value) -> Option<String> {
+    serde_json::from_value::<T>(value.clone())
+        .err()
+        .map(|error| format!("unexpected shape: {}", without_quoted(&error.to_string())))
+}
+
+fn rpc_reason(error: &RpcError) -> String {
+    format!("{}: {}", error.code, without_quoted(&error.message))
+}
+
+/// The text with every quoted run (`"…"`, `` `…` ``) cut to `…`.
+fn without_quoted(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut open: Option<char> = None;
+    for c in text.chars() {
+        match open {
+            Some(quote) if c == quote => {
+                out.push('…');
+                out.push(c);
+                open = None;
+            }
+            Some(_) => {}
+            None if c == '"' || c == '`' => {
+                out.push(c);
+                open = Some(c);
+            }
+            None => out.push(c),
+        }
+    }
+    if open.is_some() {
+        out.push('…');
+    }
+    out
+}
+
+/// The remote settings couldn't be read (`remote.control.status`,
+/// `remote.lan.status`, `agents.status`, `agents.activity.list`).
+const REMOTE_READ_FAILED: &str = "Couldn't read the remote settings. Reopen Settings to try again.";
+
 pub struct Navigate(pub videorc_app_core::nav::PageId);
 impl EventEmitter<Navigate> for SettingsScreen {}
 
@@ -353,6 +446,9 @@ impl SettingsScreen {
                 this.reading = false;
                 if revision == this.revision {
                     if let Ok((chat, usage, remote, phone, agents, activity, account)) = answer {
+                        // Which remote read came back short, and why, before
+                        // the answers are taken (the notice alone doesn't say).
+                        log_short_reads(&remote, &phone, &agents, &activity);
                         if event_revisions[5] == this.event_revisions[5] {
                             this.account =
                                 account.ok().and_then(|v| serde_json::from_value(v).ok());
@@ -396,15 +492,18 @@ impl SettingsScreen {
                             }
                             rows.truncate(ACTIVITY_ROWS);
                         }
-                        if this.remote.is_none()
+                        // The remote settings' one notice: set while a read
+                        // came back short, cleared by the next whole read
+                        // (opening Settings reads again), so a failure at
+                        // startup doesn't stay for the session.
+                        let short = this.remote.is_none()
                             || this.phone.is_none()
                             || this.agents.is_none()
-                            || this.activity.is_none()
-                        {
-                            this.error = Some(
-                                "Couldn't read the remote settings. Reopen Settings to try again."
-                                    .into(),
-                            );
+                            || this.activity.is_none();
+                        if short {
+                            this.error = Some(REMOTE_READ_FAILED.into());
+                        } else if this.error.as_deref() == Some(REMOTE_READ_FAILED) {
+                            this.error = None;
                         }
                     }
                 }
@@ -563,5 +662,30 @@ impl Render for SettingsScreen {
             .child(self.obs_dialog(cx))
             .child(self.setup_dialog(window, cx))
             .child(self.changelog_dialog(cx))
+    }
+}
+
+#[cfg(test)]
+mod short_read_tests {
+    use super::*;
+
+    #[test]
+    fn a_logged_reason_never_carries_a_quoted_value() {
+        assert_eq!(
+            without_quoted("invalid type: string \"secret-token\", expected u16"),
+            "invalid type: string \"…\", expected u16"
+        );
+        assert_eq!(
+            without_quoted("missing field `enabled`"),
+            "missing field `…`"
+        );
+        assert_eq!(without_quoted("no quotes here"), "no quotes here");
+        assert_eq!(without_quoted("cut \"off"), "cut \"…");
+        let error = RpcError::new("agents.status", "timeout", "Timed out after 5s");
+        assert_eq!(rpc_reason(&error), "timeout: Timed out after 5s");
+        assert_eq!(
+            shape_reason::<Vec<u32>>(&json!({"token": "abc"})).map(|r| r.contains("abc")),
+            Some(false)
+        );
     }
 }
