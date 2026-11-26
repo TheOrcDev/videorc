@@ -809,6 +809,7 @@ async fn run(
     }
 }
 
+#[allow(clippy::large_enum_variant)] // one per backend exit; not worth a Box
 enum Flow {
     Restart(u32),
     Stopped(StopOutcome),

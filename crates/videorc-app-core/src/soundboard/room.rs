@@ -131,21 +131,11 @@ impl Default for ProgramAudio {
 }
 
 /// Room system audio (`roomAudioRouting.system`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct SystemAudio {
     pub enabled: bool,
     pub gain_db: i32,
     pub muted: bool,
-}
-
-impl Default for SystemAudio {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            gain_db: 0,
-            muted: false,
-        }
-    }
 }
 
 impl SystemAudio {

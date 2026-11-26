@@ -2049,7 +2049,7 @@ impl SessionNotices {
         _session_id: Option<&str>,
         _activity: RuntimeActivity,
     ) -> Vec<NoticeCommand> {
-        let mut commands = vec![dismiss(ids::STREAM_DELIVERY), dismiss(ids::STREAM_UPLINK)];
+        let commands = vec![dismiss(ids::STREAM_DELIVERY), dismiss(ids::STREAM_UPLINK)];
         if let Some(notice) = self.microphone.as_mut()
             && notice.phase != MicrophonePhase::Ended
         {

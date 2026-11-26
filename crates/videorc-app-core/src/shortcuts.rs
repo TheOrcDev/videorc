@@ -16,6 +16,10 @@ use crate::desktop::global_shortcuts::RECORD_SHORTCUT_LABEL;
 use crate::desktop::menu::WINDOWS;
 use crate::nav::page_keys;
 
+/// Each group's name and its rows: a row's label and its keys as
+/// accelerators.
+pub type ShortcutGroupRows = Vec<(&'static str, Vec<(String, Vec<String>)>)>;
+
 /// `ShortcutEntry['group']`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ShortcutGroup {
@@ -385,7 +389,7 @@ pub struct ShortcutsView {
     pub scene_rows: Vec<RecorderRow>,
     /// The reference list: each group's rows with their keys as
     /// accelerators ("CmdOrCtrl+Shift+G"), for the key chips to print.
-    pub app_groups: Vec<(&'static str, Vec<(String, Vec<String>)>)>,
+    pub app_groups: ShortcutGroupRows,
 }
 
 /// What the page reads.
@@ -445,7 +449,7 @@ pub fn shortcuts_view(input: ShortcutsInput<'_>) -> ShortcutsView {
                 scene_row
             })
             .collect();
-    let app_groups: Vec<(&'static str, Vec<(String, Vec<String>)>)> = shortcuts_by_group()
+    let app_groups: ShortcutGroupRows = shortcuts_by_group()
         .into_iter()
         .map(|(group, rows)| {
             // Raw accelerators: the page's key chips parse them, so a

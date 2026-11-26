@@ -1223,10 +1223,13 @@ mod tests {
         let queued = job(json!({}));
         let transcribing =
             job(json!({ "state": "transcribing", "updatedAt": "2026-10-03T15:01:00Z" }));
-        assert_eq!(upsert_job(&[], queued.clone()), [queued.clone()]);
+        assert_eq!(
+            upsert_job(&[], queued.clone()),
+            std::slice::from_ref(&queued)
+        );
         assert_eq!(
             upsert_job(std::slice::from_ref(&queued), transcribing.clone()),
-            [transcribing.clone()]
+            std::slice::from_ref(&transcribing)
         );
         assert_eq!(
             upsert_job(std::slice::from_ref(&transcribing), queued.clone()),

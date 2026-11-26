@@ -417,7 +417,7 @@ fn native_translation_copies_frames_and_skips_diagnostics() {
     assert_eq!(out.scene.items[0].fit, SceneFit::Contain);
     assert_eq!(out.scene.items[1].role, SceneRole::HostCamera);
     assert_eq!(out.scene.items[1].fit, SceneFit::Cover);
-    assert_eq!(out.scene.items[1].mirror, true);
+    assert!(out.scene.items[1].mirror);
     assert_eq!(
         out.scene.items[1].mask,
         SceneMask::Rounded { radius: 0.18 }

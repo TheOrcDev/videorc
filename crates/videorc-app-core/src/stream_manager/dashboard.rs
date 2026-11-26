@@ -427,30 +427,30 @@ impl LiveDashboard {
             .cloned()
             .unwrap_or_default();
         let mut bitrate_history = previous;
-        if let Some(kbps) = health.get("bitrateKbps").and_then(Value::as_f64) {
-            if kbps.is_finite() {
-                let created = health
-                    .get("createdAt")
-                    .and_then(Value::as_str)
-                    .unwrap_or(now);
-                let mut point = json!({ "at": created, "kbps": kbps });
-                if let Some(dropped) = health.get("droppedFrames").and_then(Value::as_u64) {
-                    point["droppedFrames"] = json!(dropped);
-                }
-                bitrate_history.push(point);
-                if let Some(latest) = parse_ms(created) {
-                    let cutoff = latest - 10 * 60_000;
-                    bitrate_history.retain(|point| {
-                        point
-                            .get("at")
-                            .and_then(Value::as_str)
-                            .and_then(parse_ms)
-                            .is_none_or(|at| at >= cutoff)
-                    });
-                }
-                let over = bitrate_history.len().saturating_sub(300);
-                bitrate_history.drain(..over);
+        if let Some(kbps) = health.get("bitrateKbps").and_then(Value::as_f64)
+            && kbps.is_finite()
+        {
+            let created = health
+                .get("createdAt")
+                .and_then(Value::as_str)
+                .unwrap_or(now);
+            let mut point = json!({ "at": created, "kbps": kbps });
+            if let Some(dropped) = health.get("droppedFrames").and_then(Value::as_u64) {
+                point["droppedFrames"] = json!(dropped);
             }
+            bitrate_history.push(point);
+            if let Some(latest) = parse_ms(created) {
+                let cutoff = latest - 10 * 60_000;
+                bitrate_history.retain(|point| {
+                    point
+                        .get("at")
+                        .and_then(Value::as_str)
+                        .and_then(parse_ms)
+                        .is_none_or(|at| at >= cutoff)
+                });
+            }
+            let over = bitrate_history.len().saturating_sub(300);
+            bitrate_history.drain(..over);
         }
         self.health = Some(json!({
             "latest": health,

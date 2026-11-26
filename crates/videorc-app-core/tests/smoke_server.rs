@@ -425,6 +425,3 @@ async fn refuses_oversized_bodies_and_reads_chunked_ones() {
     assert_eq!(calls.lock().unwrap().len(), 1);
     server.shutdown().await;
 }
-
-/// A backend that is never there: every request fails as not connected.
-struct Offline;

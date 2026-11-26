@@ -164,9 +164,7 @@ mod tests {
 
     #[test]
     fn clamp_respects_the_million_char_bound() {
-        let over: String = std::iter::repeat('a')
-            .take(copy::MAX_TEXT_LENGTH + 10)
-            .collect();
+        let over: String = std::iter::repeat_n('a', copy::MAX_TEXT_LENGTH + 10).collect();
         assert_eq!(clamp_text(&over).chars().count(), copy::MAX_TEXT_LENGTH);
         assert_eq!(clamp_text("short"), "short");
     }

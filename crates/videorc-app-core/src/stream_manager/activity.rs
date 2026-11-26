@@ -645,10 +645,9 @@ pub fn activity_items(
         };
         if str_field(details, "kind") == Some("subscription")
             && str_field(details, "subscription") == Some("community-sub-gift")
+            && let Some(id) = str_field(details, "communityGiftId")
         {
-            if let Some(id) = str_field(details, "communityGiftId") {
-                community_gifts.insert(id.to_string());
-            }
+            community_gifts.insert(id.to_string());
         }
     }
     let mut items = Vec::new();
@@ -669,7 +668,7 @@ pub fn activity_items(
         items.push(item_from_destination(event));
     }
     items.extend(items_from_follower_gains(audience));
-    items.sort_by(|left, right| parse_at(&right.at).cmp(&parse_at(&left.at)));
+    items.sort_by_key(|item| std::cmp::Reverse(parse_at(&item.at)));
     items
 }
 

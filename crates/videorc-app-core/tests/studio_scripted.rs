@@ -3547,7 +3547,7 @@ async fn a_chosen_folder_rides_each_start_as_a_capability() {
     assert!(view.custom && view.can_reveal && view.problem.is_none());
 
     assert_eq!(studio.start_recording().await, StartOutcome::Started);
-    assert_eq!(*asked.lock().unwrap(), [takes.clone()]);
+    assert_eq!(*asked.lock().unwrap(), std::slice::from_ref(&takes));
     stop_to_idle(&studio).await;
 
     // The issuer refuses: not available, nothing sent.

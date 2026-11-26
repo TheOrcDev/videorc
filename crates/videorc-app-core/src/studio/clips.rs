@@ -160,7 +160,7 @@ pub fn clip_last_words(seconds: Option<u32>) -> String {
 pub fn clip_length_label(seconds: u32) -> String {
     if seconds < 60 {
         format!("{seconds} s")
-    } else if seconds % 60 == 0 {
+    } else if seconds.is_multiple_of(60) {
         format!("{} min", seconds / 60)
     } else {
         format!("{} min", f64::from(seconds) / 60.0)
