@@ -287,6 +287,12 @@ impl RenderOnce for ListRow {
             }))
             .children(self.alias);
         let has_status = !self.status_icons.is_empty();
+        // Electron's end cluster (`ml-auto flex shrink-0 items-center
+        // gap-2`) is there only when it holds something.
+        let has_end = !self.children.is_empty()
+            || has_status
+            || self.meta.is_some()
+            || self.meta_element.is_some();
         // A row button with a control in it (a Switch in the meta slot) is
         // Electron's ListRowButton: the button is stretched over the row
         // (`after:absolute after:inset-0`) and the control sits on top of
@@ -294,6 +300,7 @@ impl RenderOnce for ListRow {
         let stretched = self.on_click.is_some() && self.meta_element.is_some();
         let end = div()
             .flex_none()
+            .ml_auto()
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -338,9 +345,11 @@ impl RenderOnce for ListRow {
                 .children(overlay)
                 .children(self.leading)
                 .children(tile)
+                // No spacer: `ml-auto` pushes the end cluster right, so the
+                // words pay one gap, not two (a spacer cost them 10 px: G5f2e,
+                // the Show stage's backstage names cut short).
                 .child(words)
-                .child(div().flex_1())
-                .child(end)
+                .when(has_end, |row| row.child(end))
         };
         match self.on_click {
             Some(on_click) if stretched => {
