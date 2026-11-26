@@ -155,7 +155,8 @@ impl ToggleGroup {
         self
     }
 
-    /// Caption style cards: selected chip uses primary wash, not chrome plate.
+    /// Caption style cards: the selected card is the chrome plate over a
+    /// primary wash, with a primary/50 border.
     pub fn card(mut self, card: bool) -> Self {
         self.card = card;
         self
@@ -310,6 +311,15 @@ impl RenderOnce for ToggleGroup {
                     });
                 }
 
+                // A pressed card is Electron's `data-pressed:chrome-plate`
+                // with Captions' `bg-primary/10` under it: the plate's
+                // gradient draws over the primary wash, so each stop is
+                // composited over the wash over the ground (GPUI has one fill
+                // a box), and the plate's inset highlight and rim come from
+                // `plate_shadows`. Without it the card read darker than
+                // Electron's (L1 on 94172f216: light 238 vs 231, dark 19 vs 28).
+                let card_wash = faded_over(with_alpha(t.primary, 0.1), ground, 1.0);
+                let card_stop = |plate| faded_over(plate, card_wash, 1.0);
                 if disabled && pressed {
                     // A disabled group keeps its choice on show, faded
                     // (`disabled:opacity-50` over the pressed look),
@@ -317,9 +327,22 @@ impl RenderOnce for ToggleGroup {
                     let fade = |color| faded_over(color, ground, 0.5);
                     chip = chip.text_color(hsla(fade(t.foreground)));
                     if self.card {
+                        let mut plate = plate_shadows(t);
+                        for shadow in &mut plate {
+                            shadow.color.a *= 0.5;
+                        }
                         chip = chip
                             .border_color(hsla(fade(with_alpha(t.primary, 0.5))))
-                            .bg(hsla(fade(with_alpha(t.primary, 0.1))));
+                            .bg(linear_gradient(
+                                180.0,
+                                linear_color_stop(hsla(fade(card_stop(t.chrome_plate_top))), 0.0),
+                                linear_color_stop(
+                                    hsla(fade(card_stop(t.chrome_plate_bottom))),
+                                    1.0,
+                                ),
+                            )
+                            .color_space(ColorSpace::Oklab))
+                            .shadow(plate);
                     } else {
                         let mut plate = plate_shadows(t);
                         for shadow in &mut plate {
@@ -346,7 +369,13 @@ impl RenderOnce for ToggleGroup {
                     chip = chip
                         .text_color(hsla(t.foreground))
                         .border_color(hsla(with_alpha(t.primary, 0.5)))
-                        .bg(hsla(with_alpha(t.primary, 0.1)));
+                        .bg(linear_gradient(
+                            180.0,
+                            linear_color_stop(hsla(card_stop(t.chrome_plate_top)), 0.0),
+                            linear_color_stop(hsla(card_stop(t.chrome_plate_bottom)), 1.0),
+                        )
+                        .color_space(ColorSpace::Oklab))
+                        .shadow(plate_shadows(t));
                 } else if pressed {
                     chip = chip
                         .text_color(hsla(t.foreground))
