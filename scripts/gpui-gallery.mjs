@@ -389,9 +389,24 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
     const raised = await command('raise-window', {
       role: 'main',
       level: 'floating',
-      focus: values.focus
+      focus: false
     })
     raisedWindowId = Number.isInteger(raised?.windowId) ? raised.windowId : null
+    // `--focus`: the GPUI app's raise-window has no focus yet, so activate
+    // the app by its pid (AppKit, no Accessibility grant); its window is
+    // then shot active.
+    if (values.focus) {
+      try {
+        execFileSync('osascript', [
+          '-l',
+          'JavaScript',
+          '-e',
+          `ObjC.import('AppKit'); $.NSRunningApplication.runningApplicationWithProcessIdentifier(${app.process.pid}).activateWithOptions($.NSApplicationActivateIgnoringOtherApps)`
+        ])
+      } catch (error) {
+        log(`could not activate the app: ${error.message}`)
+      }
+    }
     await sleep(800)
     // Electron's baselines launch with VIDEORC_DISABLE_AUTO_PREVIEW and shoot
     // the page through DevTools, which can't hold the native Preview layer:
