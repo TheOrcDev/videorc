@@ -922,7 +922,8 @@ fn chat_row(
         // are in the row's name.
         .child({
             let platform = chat_platform(&row.platform);
-            icon(platform.icon(), MARK_PX, platform.tint_hsla(t))
+            // `ChatPlatformIcon weight="fill"`: the filled mark.
+            icon(platform.icon().filled(), MARK_PX, platform.tint_hsla(t))
         });
 
     let focused = active == Some(row.id.as_str());
