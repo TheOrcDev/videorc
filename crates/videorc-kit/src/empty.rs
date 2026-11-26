@@ -6,6 +6,7 @@
 use gpui::{AnyElement, App, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px};
 use smallvec::SmallVec;
 
+use crate::balanced_text::BalancedText;
 use crate::theme::{Appearance, hsla, resolve};
 
 #[derive(IntoElement)]
@@ -78,12 +79,17 @@ impl RenderOnce for Empty {
             })
             .when_some(self.description, |header, description| {
                 // Electron Empty: `text-sm` 14/20 (not META 12/16).
+                // `text-balance`: lines of near-equal length.
                 header.child(
-                    div()
-                        .text_size(px(14.0))
-                        .line_height(px(20.0))
-                        .text_color(hsla(t.muted_foreground))
-                        .child(description),
+                    div().w_full().text_color(hsla(t.muted_foreground)).child(
+                        BalancedText::new(
+                            SharedString::from(format!("empty/{description}")),
+                            description,
+                            14.0,
+                            20.0,
+                        )
+                        .centered(true),
+                    ),
                 )
             });
 
