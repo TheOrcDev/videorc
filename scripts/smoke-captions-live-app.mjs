@@ -11,7 +11,8 @@ import {
 import { tmpdir } from 'node:os'
 import { extname, join, resolve } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
+import { createUiDriver } from './lib/ui-driver.mjs'
 import { analyzeMediaAudioAmplitude } from './lib/audio-amplitude.mjs'
 import {
   captionsPlatformUnavailableReason,
@@ -40,6 +41,7 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 // The smoke never calls captions.overlay.set. Passing pixels therefore proves
 // that the renderer consumed the caption update and generated the PNG itself.
 
+const gpuiApp = smokeAppIsGpui()
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 240_000)
 const baselineMs = Number(process.env.VIDEORC_CAPTIONS_LIVE_BASELINE_MS ?? 1_800)
 const captionCaptureMs = Number(process.env.VIDEORC_CAPTIONS_LIVE_CAPTURE_MS ?? 3_000)
@@ -50,7 +52,7 @@ const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-captions-live-${Date.now()}`)
 )
 const stateRoot = join(outputDirectory, 'app-state')
-const appDataDir = join(stateRoot, 'app-data')
+const appDataDir = join(stateRoot, gpuiApp ? 'user-data' : 'app-data')
 const receivedPath = join(outputDirectory, 'captions-live-received.flv')
 const reportPath = join(outputDirectory, 'captions-live-artifact.json')
 const smokeSessionToken = 'captions-live-session-token'
@@ -110,9 +112,11 @@ try {
   backend = await connectBackend(launched.connections['backend-ready'], timeoutMs)
   const smoke = launched.connections['preview-motion-ready']
   observed = collectCaptionEvents(backend)
-  captionsUnavailableReason = await captionsPlatformUnavailableReason(
-    async (code) => (await smokeCommand(smoke, 'eval-js', { code }))?.result
-  )
+  captionsUnavailableReason = gpuiApp
+    ? await gpuiCaptionsPlatformReason(smoke)
+    : await captionsPlatformUnavailableReason(
+        async (code) => (await smokeCommand(smoke, 'eval-js', { code }))?.result
+      )
   if (captionsUnavailableReason) throw new CaptionsPlatformSkip(captionsUnavailableReason)
 
   fake.state.realtimeAvailable = false
@@ -173,8 +177,10 @@ try {
     const [captionStatus, recordingStatus, rendererState] = await Promise.all([
       request(backend, timeoutMs, 'captions.status.get', {}).catch(() => null),
       request(backend, timeoutMs, 'recording.status', {}).catch(() => null),
-      smokeCommand(smoke, 'eval-js', {
-        code: `
+      (gpuiApp
+        ? gpuiCaptureConfig().then((result) => ({ result }))
+        : smokeCommand(smoke, 'eval-js', {
+            code: `
           const stored = JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}')
           return {
             ready: document.readyState,
@@ -183,7 +189,8 @@ try {
             streamEnabled: stored.streamEnabled
           }
         `
-      }).catch(() => null)
+          })
+      ).catch(() => null)
     ])
     throw new Error(
       `${error instanceof Error ? error.message : String(error)} ` +
@@ -610,7 +617,35 @@ if (captionsUnavailableReason) {
   console.log(captionsSkipLine('Captions live smoke', 'every check', captionsUnavailableReason))
 }
 
+async function gpuiCaptureConfig() {
+  const snapshot = await request(backend, timeoutMs, 'ui.settings.get', {
+    keys: ['videorc.captureConfig']
+  })
+  const raw = snapshot.entries?.['videorc.captureConfig']
+  return typeof raw === 'string' ? JSON.parse(raw) : (raw ?? {})
+}
+
+async function gpuiCaptionsPlatformReason(smoke) {
+  const ui = createUiDriver(smoke)
+  await ui.openTab('captions', { waitFor: { id: 'captions-enabled' } })
+  try {
+    await ui.waitFor({ id: 'captions-platform-unavailable' }, { timeoutMs: 300 })
+    return await ui.readText({ id: 'captions-platform-unavailable' })
+  } catch (error) {
+    if (String(error.message).startsWith('Timed out waiting for id captions-platform-unavailable'))
+      return null
+    throw error
+  }
+}
+
 async function enableCaptionsMidSession(smoke) {
+  if (gpuiApp) {
+    const ui = createUiDriver(smoke)
+    await ui.openTab('captions', { waitFor: { id: 'captions-enabled' } })
+    if (!(await ui.isChecked({ id: 'captions-enabled' })))
+      await ui.click({ id: 'captions-enabled' })
+    return
+  }
   await smokeCommand(smoke, 'eval-js', {
     code: `
       if (!window.__videorcSmokeSetCaptionsEnabled) throw new Error('Caption toggle is unavailable.')
@@ -644,9 +679,11 @@ async function proveStreamOnlyMidSession(smoke, target) {
   if (started.state !== 'streaming')
     throw new Error(`Expected stream-only: ${JSON.stringify(started)}`)
   sessionActive = true
-  await smokeCommand(smoke, 'eval-js', {
-    code: 'return await window.__videorcSmokeHydrateRecordingStatus()'
-  })
+  if (gpuiApp) await hydrateRendererActiveSession(smoke, 'streaming')
+  else
+    await smokeCommand(smoke, 'eval-js', {
+      code: 'return await window.__videorcSmokeHydrateRecordingStatus()'
+    })
   await sleep(baselineMs)
   await enableCaptionsMidSession(smoke)
   await waitForCaptionStatus(backend, (status) => status.transport === 'chunked')
@@ -673,6 +710,43 @@ async function proveStreamOnlyMidSession(smoke, target) {
 }
 
 async function seedRendererCaptionsProfile(smoke, recordEnabled = true) {
+  if (gpuiApp) {
+    await smokeCommand(smoke, 'studio-capture-configure', {
+      config: {
+        recordEnabled,
+        streamEnabled: true,
+        streaming: { enabled: false },
+        video: { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 },
+        captions: {
+          enabled: false,
+          burnTarget: 'both',
+          styleId: 'high-contrast',
+          language: 'en',
+          styleRevision: 1,
+          position: 'bottom',
+          textSize: 'l'
+        }
+      }
+    })
+    await waitFor(
+      async () => {
+        const stored = await gpuiCaptureConfig()
+        return (
+          stored.captions?.styleId === 'high-contrast' &&
+          stored.captions.enabled === false &&
+          stored.captions.burnTarget === 'both' &&
+          stored.recordEnabled === recordEnabled &&
+          stored.streamEnabled === true &&
+          Boolean(stored.streaming) &&
+          stored.video?.width === 640 &&
+          stored.video?.height === 360
+        )
+      },
+      timeoutMs,
+      'the Studio to save the caption profile'
+    )
+    return
+  }
   const seeded = await smokeCommand(smoke, 'eval-js', {
     code: `
       const settings = await ${UI_SETTINGS_READY_JS}
@@ -767,7 +841,23 @@ async function seedRendererCaptionsProfile(smoke, recordEnabled = true) {
 // The session records and streams: the backend reports it as `recording`, and
 // the status bar's state reads "On air" because it is (plan 095 S5, plan 174
 // D4; the status bar holds the hook since plan 235 D1).
-async function hydrateRendererActiveSession(smoke) {
+async function hydrateRendererActiveSession(smoke, expectedState = 'recording') {
+  if (gpuiApp) {
+    const ui = createUiDriver(smoke)
+    await ui.openTab('studio')
+    await waitFor(
+      async () => {
+        const state = await smokeCommand(smoke, 'studio-state')
+        return (
+          state.status?.state === expectedState &&
+          (await ui.waitFor({ id: 'open-health' })).label === 'On air'
+        )
+      },
+      timeoutMs,
+      `the Studio to show ${expectedState} and On air`
+    )
+    return
+  }
   const hydrated = await smokeCommand(smoke, 'eval-js', {
     code: `
       if (typeof window.__videorcSmokeHydrateRecordingStatus !== 'function') {
@@ -884,6 +974,22 @@ async function waitForCaptionOverlay(smoke) {
 }
 
 async function waitForRendererRuntimeNotice(smoke, expectedText, label) {
+  if (gpuiApp) {
+    const ui = createUiDriver(smoke)
+    await ui.openTab('studio')
+    await waitFor(
+      async () => {
+        const notice = await ui.waitFor({ id: 'session-runtime-notice' }, { timeoutMs: 1000 })
+        return (
+          ['alert', 'status'].includes(notice.role) &&
+          (await ui.readText({ id: 'session-runtime-notice' })).includes(expectedText)
+        )
+      },
+      Math.min(timeoutMs, 30_000),
+      label
+    )
+    return
+  }
   const deadline = Date.now() + Math.min(timeoutMs, 30_000)
   let latest = null
   while (Date.now() < deadline) {
@@ -1120,9 +1226,9 @@ async function smokeCommand(smoke, command, params = {}) {
 function waitFor(predicate, deadlineMs, label) {
   return new Promise((resolveWait, rejectWait) => {
     const startedAt = Date.now()
-    const tick = () => {
+    const tick = async () => {
       try {
-        if (predicate()) {
+        if (await predicate()) {
           resolveWait()
           return
         }
