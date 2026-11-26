@@ -178,7 +178,8 @@ async function setElectronMargin(smoke, marginValue) {
  * no focus from a pointer click, so the press lands on its track at the
  * wanted fraction (the 16 px thumb travels the track less its width). A
  * pointer press rounds to a step near the wanted one: the answer is the
- * margin the compositor committed.
+ * margin the compositor committed. With a slider that focuses on a press
+ * (kit #2350) the keys set it exactly instead.
  */
 async function setGpuiMargin(smoke, wanted) {
   const ui = createUiDriver(smoke, { app: 'gpui' })
@@ -210,6 +211,29 @@ async function setGpuiMargin(smoke, wanted) {
   if (!bounds) return { ok: false, reason: 'the Margin slider has no bounds' }
   const thumb = 16
   const before = (await request(ws, timeoutMs, 'compositor.status')).sceneLayout?.cameraMargin
+  // The keyboard path: a press on the thumb where it stands focuses the
+  // slider (kit #2350) without moving it, then Home and one arrow at a time
+  // land on the value exactly. A build whose slider takes no focus from a
+  // press falls back to pressing the track at the wanted fraction.
+  if (typeof before === 'number') {
+    await ui.clickAt(
+      bounds.x + thumb / 2 + (bounds.width - thumb) * (before / 96),
+      bounds.y + bounds.height / 2
+    )
+    await sleep(200)
+    if ((await ui.waitFor(margin)).focused) {
+      await ui.press('Home')
+      let value = before
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        value = (await request(ws, timeoutMs, 'compositor.status')).sceneLayout?.cameraMargin
+        if (value === wanted) return { ok: true, value, via: 'keys' }
+        await ui.press(typeof value === 'number' && value > wanted ? 'ArrowLeft' : 'ArrowRight')
+        await sleep(120)
+      }
+      return { ok: false, reason: `the Margin slider's keys left it at ${value}, wanted ${wanted}` }
+    }
+  }
   await ui.clickAt(
     bounds.x + thumb / 2 + (bounds.width - thumb) * (wanted / 96),
     bounds.y + bounds.height / 2
