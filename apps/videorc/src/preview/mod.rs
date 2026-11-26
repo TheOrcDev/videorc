@@ -1425,8 +1425,6 @@ fn open_floating(preview: WeakEntity<Preview>, cx: &mut App) {
     }
 }
 
-/// The output's size (`captureConfig.video`'s width and height).
-#[cfg(target_os = "macos")]
 /// A performance check holds the Preview's last picture (plan 212 S2,
 /// Electron's `compositor.status.previewHold`): a check this app started,
 /// or the backend's check still running, as the Studio's hold label reads it.
@@ -1440,6 +1438,8 @@ fn check_holds_preview(snapshot: &videorc_app_core::StudioSnapshot) -> bool {
             .is_some_and(|state| state.running)
 }
 
+/// The output's size (`captureConfig.video`'s width and height).
+#[cfg(target_os = "macos")]
 fn output_size(snapshot: &videorc_app_core::StudioSnapshot) -> (u32, u32) {
     let video = videorc_app_core::livestream::plan::recording_video(&snapshot.settings.capture_doc);
     (video.width, video.height)
