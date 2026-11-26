@@ -94,9 +94,6 @@ export const SCREENS = Object.freeze([
     title: 'Scene ⌘3',
     deck: 'shell-studio',
     open: page('layout'),
-    // The Scene page opens a closed Preview docked (P532); Electron's
-    // baseline has none, so its Canvas draws the schematic. Close it here too.
-    closePreview: true,
     baseline: { screen: 'scene', state: 'default' },
     sections: ['Scene ⌘3: Scenes list', 'Scene ⌘3: Layout section', 'Scene ⌘3: Hide screen']
   },
@@ -396,7 +393,6 @@ export const SCREENS = Object.freeze([
     title: 'Scene ⌘3, Test pattern selected',
     deck: 'shell-studio',
     open: page('layout'),
-    closePreview: true,
     clicks: [
       { names: ['Select Test pattern', 'Select Test pattern, on', 'Select Test pattern, off'] }
     ],
