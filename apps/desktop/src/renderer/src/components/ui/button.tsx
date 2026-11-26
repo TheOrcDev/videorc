@@ -61,11 +61,20 @@ function Button({
   className,
   variant = 'default',
   size = 'default',
+  /** Pad 6 px (`px-1.5`) at the control height — Electron account-menu trigger. */
+  dense = false,
   ...props
-}: ButtonPrimitive.Props & VariantProps<typeof buttonVariants>) {
+}: ButtonPrimitive.Props &
+  VariantProps<typeof buttonVariants> & {
+    dense?: boolean
+  }) {
   return (
     <ButtonPrimitive
-      className={cn(buttonVariants({ className, size, variant }))}
+      className={cn(
+        buttonVariants({ className, size, variant }),
+        dense && size === 'default' && 'px-1.5'
+      )}
+      data-dense={dense || undefined}
       data-size={size}
       data-slot="button"
       data-variant={variant}
