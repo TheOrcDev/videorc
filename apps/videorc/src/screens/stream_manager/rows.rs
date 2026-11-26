@@ -113,7 +113,7 @@ pub fn chat_row(
     let has_person =
         !author.is_empty() && message.event_type != "system" && message.event_type != "moderation";
 
-    let body = row_body(&view, &message.platform, pictures);
+    let body = row_body(&view, &message.platform, live, pictures);
     let chips = view.row.chips.iter().map(|(label, chip)| {
         Badge::new(*label).variant(match chip {
             StatusChip::Neutral => BadgeVariant::Default,
@@ -124,6 +124,7 @@ pub fn chat_row(
     let message_id = message.id.clone();
     let row = div()
         .id(SharedString::from(format!("chat-row-{}", view.row.id)))
+        .group(SharedString::from(format!("chat-row-{}", view.row.id)))
         .w_full()
         .flex()
         .items_start()
@@ -183,7 +184,15 @@ fn person_menu(name: &str, platform: &str) -> Menu {
 /// `CommentContent` at the Stream Manager's comfortable density: the 40 px
 /// avatar (picture, else the monogram), then the name line closed by the
 /// 20 px platform mark on the far right, then the words at 15 px.
-fn row_body(view: &ManagerRow, platform: &str, pictures: &HashMap<String, Picture>) -> AnyElement {
+fn row_body(
+    view: &ManagerRow,
+    platform: &str,
+    live: bool,
+    pictures: &HashMap<String, Picture>,
+) -> AnyElement {
+    // While live the time waits for the pointer, like the row's ⋯ (plan 057,
+    // D3): a clock on every row is noise mid-stream.
+    let group = SharedString::from(format!("chat-row-{}", view.row.id));
     let picture = view
         .row
         .avatar_url
@@ -237,6 +246,10 @@ fn row_body(view: &ManagerRow, platform: &str, pictures: &HashMap<String, Pictur
                     .flex_none()
                     .text_size(px(11.))
                     .opacity(0.7)
+                    .when(live, |time| {
+                        time.opacity(0.)
+                            .group_hover(group.clone(), |style| style.opacity(0.7))
+                    })
                     .child(view.time.clone()),
             )
         })
