@@ -795,15 +795,18 @@ mod tests {
 
     #[test]
     fn isolation_paths_resolve_like_node() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = cwd.join("a");
+        assert_eq!(lexical_absolute(&root.join("b/../c/./d")), root.join("c/d"));
         assert_eq!(
-            lexical_absolute(Path::new("/a/b/../c/./d")),
-            PathBuf::from("/a/c/d")
+            lexical_absolute(Path::new("a/b/../c/./d")),
+            root.join("c/d")
         );
-        assert!(path_inside(Path::new("/a/b/c"), Path::new("/a/b")));
-        assert!(!path_inside(Path::new("/a/b"), Path::new("/a/b")));
-        assert!(!path_inside(Path::new("/a/bc"), Path::new("/a/b")));
-        assert!(!path_inside(Path::new("/a"), Path::new("/a/b")));
-        assert_eq!(display_name(Path::new("/tmp/clip.mp4")), "clip.mp4");
+        assert!(path_inside(&root.join("b/c"), &root.join("b")));
+        assert!(!path_inside(&root.join("b"), &root.join("b")));
+        assert!(!path_inside(&root.join("bc"), &root.join("b")));
+        assert!(!path_inside(&root, &root.join("b")));
+        assert_eq!(display_name(&root.join("clip.mp4")), "clip.mp4");
     }
 
     /// A backend that answers from a table and records each request.
