@@ -151,6 +151,9 @@ enum Entry {
         on_select: MenuHandler,
     },
     Label(SharedString),
+    /// A heading row with the menu's subject (Electron's account menu:
+    /// `DropdownMenuLabel` as `flex justify-between`), not a quiet label.
+    Header(MenuHeader),
     Separator,
     Submenu {
         label: SharedString,
@@ -159,15 +162,67 @@ enum Entry {
     },
 }
 
+/// Builds an element for a header's slot each time the menu draws.
+type MenuSlot = Rc<dyn Fn() -> AnyElement>;
+
+/// A menu's heading row: the subject at 14 px medium in the foreground
+/// (truncating), an optional mark before it (a 20 px avatar) and an element
+/// at its right end (a tier badge). Electron's account menu header:
+/// `DropdownMenuLabel className="flex items-center justify-between gap-2
+/// py-1.5"`.
+#[derive(Clone)]
+pub struct MenuHeader {
+    title: SharedString,
+    leading: Option<MenuSlot>,
+    end: Option<MenuSlot>,
+}
+
+impl MenuHeader {
+    pub fn new(title: impl Into<SharedString>) -> Self {
+        MenuHeader {
+            title: title.into(),
+            leading: None,
+            end: None,
+        }
+    }
+
+    /// A mark before the title (`gap-2`), such as a 20 px avatar.
+    pub fn leading<E: IntoElement>(mut self, leading: impl Fn() -> E + 'static) -> Self {
+        self.leading = Some(Rc::new(move || leading().into_any_element()));
+        self
+    }
+
+    /// An element at the row's right end, such as a `Badge`.
+    pub fn end<E: IntoElement>(mut self, end: impl Fn() -> E + 'static) -> Self {
+        self.end = Some(Rc::new(move || end().into_any_element()));
+        self
+    }
+}
+
 /// A menu's rows, in order.
 #[derive(Clone, Default)]
 pub struct Menu {
     entries: Vec<Entry>,
+    /// A fixed panel width (Electron's `w-56`, 224 px); else at least 128 px.
+    width: Option<f32>,
 }
 
 impl Menu {
     pub fn new() -> Self {
         Menu::default()
+    }
+
+    /// A heading row with the menu's subject and an element at its right
+    /// end (the account menu's name and tier badge).
+    pub fn header(mut self, header: MenuHeader) -> Self {
+        self.entries.push(Entry::Header(header));
+        self
+    }
+
+    /// A fixed panel width in px (Electron's `w-56` is 224).
+    pub fn width(mut self, width: f32) -> Self {
+        self.width = Some(width);
+        self
     }
 
     /// A quiet heading row ("Send to"); it labels the rows under it.
@@ -434,6 +489,7 @@ pub(crate) fn menu_panel(panel: Panel, window: &mut Window, cx: &mut App) -> Sta
         exits,
         progress,
     } = panel;
+    let width = menu.width;
     let (focus, highlighted, open_submenu) = {
         let state = nav.read(cx);
         (state.focus.clone(), state.highlighted, state.submenu)
@@ -464,6 +520,40 @@ pub(crate) fn menu_panel(panel: Panel, window: &mut Window, cx: &mut App) -> Sta
                     .line_height(px(16.0))
                     .text_color(hsla(t.muted_foreground))
                     .child(label.clone())
+                    .into_any_element(),
+            ),
+            Entry::Header(header) => rows.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .px(px(8.0))
+                    .py(px(6.0))
+                    .child(
+                        div()
+                            .flex()
+                            .min_w(px(0.0))
+                            .items_center()
+                            .gap(px(8.0))
+                            .children(header.leading.as_ref().map(|leading| leading()))
+                            .child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .text_size(px(14.0))
+                                    .line_height(px(20.0))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(hsla(t.foreground))
+                                    .child(header.title.clone()),
+                            ),
+                    )
+                    .children(
+                        header
+                            .end
+                            .as_ref()
+                            .map(|end| div().flex_none().child(end())),
+                    )
                     .into_any_element(),
             ),
             Entry::Separator => rows.push(
@@ -722,6 +812,7 @@ pub(crate) fn menu_panel(panel: Panel, window: &mut Window, cx: &mut App) -> Sta
             )
             .id("menu-scroll")
             .min_w(px(128.0))
+            .when_some(width, |panel, width| panel.w(px(width)))
             .max_h(max_height)
             .overflow_y_scroll()
             .p(px(4.0))
