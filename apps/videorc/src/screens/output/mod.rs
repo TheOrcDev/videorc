@@ -1833,21 +1833,21 @@ impl Render for OutputPanel {
         preset = preset.on_change(move |value, _, cx| {
             entity.update(cx, |this, cx| this.set_preset(value, cx));
         });
-        let mut quality_fields = FieldGroup::new().child(
-            Field::new("output-preset")
-                .label("Recording preset")
-                .child(preset)
-                // `FieldDescription` after the trigger.
-                .child(
-                    div()
-                        .type_scale(text::META)
-                        .line_height(px(18.))
-                        .text_color(hsla(t.muted_foreground))
-                        .child("Editing a value below switches the preset to Custom."),
-                )
-                .children(self.performance_row(&model, t, cx))
-                .children(self.quality_alerts(&model, cx)),
-        );
+        // `FieldDescription` after the trigger, then the check line and the
+        // alerts as the Field's footer: the kit pulls the description up 4 px
+        // when anything follows it, as Electron's `nth-last-2:-mt-1`.
+        let mut preset_field = Field::new("output-preset")
+            .label("Recording preset")
+            .child(preset)
+            .description("Editing a value below switches the preset to Custom.");
+        for footer in self
+            .performance_row(&model, t, cx)
+            .into_iter()
+            .chain(self.quality_alerts(&model, cx))
+        {
+            preset_field = preset_field.footer(footer);
+        }
+        let mut quality_fields = FieldGroup::new().child(preset_field);
         let entity = cx.entity();
         let mut resolution = SegmentedControl::new("output-resolution")
             .accessibility_label("Resolution")
