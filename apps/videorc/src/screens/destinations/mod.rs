@@ -38,7 +38,7 @@ use videorc_app_core::studio::watchdog_settings::WatchdogSettingsStore;
 use videorc_app_core::{BackendClient, StopOrigin, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
-use videorc_kit::button::{Button, ButtonVariant};
+use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::DialogHandle;
 use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
@@ -117,6 +117,12 @@ pub struct DestinationsPanel {
     /// Per-destination draft for the stream key field while expanded.
     manual_key_drafts: std::collections::BTreeMap<String, Entity<InputState>>,
     manual_url_drafts: std::collections::BTreeMap<String, Entity<InputState>>,
+    /// What each card's URL and key boxes last showed (placeholders and the
+    /// URL box's mask), so they're only set again when the saved key changes.
+    manual_looks: std::collections::BTreeMap<String, (String, bool, String)>,
+    /// The destination whose saved key (or full URL) Clear asks to remove.
+    clear_key_target: Option<String>,
+    clear_key_confirm: DialogHandle,
     /// P1493: keyring LinuxSetupAlert before sign-in (Linux only).
     keyring_issue: Option<videorc_app_core::studio::linux_desktop::LinuxSetupIssue>,
     youtube_consent: DialogHandle,
@@ -260,6 +266,9 @@ impl DestinationsPanel {
             discord_memory: DiscordMemory::default(),
             discord_paste: None,
             manual_key_drafts: std::collections::BTreeMap::new(),
+            manual_looks: std::collections::BTreeMap::new(),
+            clear_key_target: None,
+            clear_key_confirm: DialogHandle::new(false),
             manual_url_drafts: std::collections::BTreeMap::new(),
             keyring_issue: None,
             youtube_consent: DialogHandle::new(false),
@@ -456,6 +465,88 @@ impl DestinationsPanel {
         });
     }
 
+    /// Clear: ask first (Electron's "Remove the … stream key?"), then save an
+    /// empty key, which the backend keeps as the previous one.
+    fn ask_clear_key(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_key_target = Some(id);
+        self.clear_key_confirm.open(window, cx);
+        cx.notify();
+    }
+
+    fn close_clear_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_key_target = None;
+        if self.clear_key_confirm.is_open() {
+            self.clear_key_confirm.close(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn confirm_clear_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.clear_key_target.take() {
+            for drafts in [&self.manual_key_drafts, &self.manual_url_drafts] {
+                if let Some(input) = drafts.get(&id) {
+                    input.update(cx, |state, cx| state.set_value("", window, cx));
+                }
+            }
+            self.save_manual_key(id, String::new());
+        }
+        if self.clear_key_confirm.is_open() {
+            self.clear_key_confirm.close(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn clear_key_dialog(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(target_id) = &self.clear_key_target else {
+            return div().into_any_element();
+        };
+        if !self.clear_key_confirm.is_open() {
+            return div().into_any_element();
+        }
+        let capture = self.studio.snapshot().settings.capture_doc;
+        let list = videorc_app_core::livestream::targets::targets(&capture);
+        let Some(words) = setup::question_view(
+            &setup::Question::RemoveKey {
+                target_id: target_id.clone(),
+            },
+            &list,
+        ) else {
+            return div().into_any_element();
+        };
+        let entity = cx.entity();
+        videorc_kit::dialog::Dialog::new("dest-clear-key", &self.clear_key_confirm, words.title)
+            .description(words.description)
+            .close_button(false)
+            .on_open_change({
+                let entity = entity.clone();
+                move |open, _, window, cx| {
+                    if !open {
+                        entity.update(cx, |this, cx| this.close_clear_key(window, cx));
+                    }
+                }
+            })
+            .footer(
+                Button::new("dest-clear-key-cancel")
+                    .label(page_copy::CANCEL)
+                    .variant(ButtonVariant::Outline)
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_, window, cx| {
+                            entity.update(cx, |this, cx| this.close_clear_key(window, cx));
+                        }
+                    }),
+            )
+            .footer(
+                Button::new("dest-clear-key-confirm")
+                    .label(words.confirm)
+                    .variant(ButtonVariant::Destructive)
+                    .on_click(move |_, window, cx| {
+                        entity.update(cx, |this, cx| this.confirm_clear_key(window, cx));
+                    }),
+            )
+            .into_any_element()
+    }
+
     fn ensure_manual_inputs(
         &mut self,
         dest: &DestinationView,
@@ -480,6 +571,31 @@ impl DestinationsPanel {
                     state
                 });
                 self.manual_key_drafts.insert(dest.id.clone(), input);
+            }
+            // Electron: the key box (and a full URL, which holds the key) is a
+            // password box, and with a key saved it says "Paste a new key to
+            // replace it".
+            let look = (
+                manual.server_placeholder.clone(),
+                manual.full_url,
+                manual.key_placeholder.clone(),
+            );
+            if self.manual_looks.get(&dest.id) != Some(&look) {
+                if let Some(input) = self.manual_url_drafts.get(&dest.id) {
+                    let (placeholder, masked) = (look.0.clone(), look.1);
+                    input.update(cx, |state, cx| {
+                        state.set_placeholder(placeholder, window, cx);
+                        state.set_masked(masked, window, cx);
+                    });
+                }
+                if let Some(input) = self.manual_key_drafts.get(&dest.id) {
+                    let placeholder = look.2.clone();
+                    input.update(cx, |state, cx| {
+                        state.set_placeholder(placeholder, window, cx);
+                        state.set_masked(true, window, cx);
+                    });
+                }
+                self.manual_looks.insert(dest.id.clone(), look);
             }
         }
     }
@@ -648,37 +764,67 @@ impl DestinationsPanel {
                         .title(reason.clone()),
                 );
             }
-            if let Some(line) = &dest.key_only_line {
+            if dest.quality.options.len() > 1 {
+                let quality = dest.quality.clone();
+                let dest_id = dest.id.clone();
+                // Electron's card holds the same `StreamQualityControl` as the
+                // page (`inherit`): a vertical field, the control filling the
+                // card. A side-by-side row left its label one letter wide.
+                let control = quality::quality_control(
+                    format!("dest-quality-control-{}", dest.id),
+                    &quality,
+                    dest.disabled,
+                    {
+                        let entity = entity.clone();
+                        move |value, _, cx| {
+                            entity.update(cx, |this, _| {
+                                this.set_destination_quality(dest_id.clone(), value.to_string())
+                            })
+                        }
+                    },
+                );
                 detail = detail.child(
                     div()
-                        .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
-                        .child(line.clone()),
+                        .id(SharedString::from(format!("dest-quality-{}", dest.id)))
+                        .child(quality::quality_field(
+                            t,
+                            control,
+                            quality.description.clone(),
+                            dest.disabled,
+                        )),
                 );
             }
-            if let Some(quota) = &dest.quota_paused {
-                detail = detail.child(
-                    Alert::new(format!("dest-quota-{}", dest.id))
-                        .variant(AlertVariant::Warning)
-                        .title(quota.clone()),
-                );
-            }
-            if let Some((guidance, link)) = &dest.guidance {
-                detail = detail.child(
-                    div()
-                        .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
-                        .child(guidance.clone()),
-                );
-                if let Some(link) = link {
-                    let url = link.url.clone();
-                    detail = detail.child(
-                        Button::new(format!("dest-guide-{}", dest.id))
-                            .label(link.label.clone())
-                            .variant(ButtonVariant::Ghost)
-                            .on_click(move |_, _, cx| cx.open_url(&url)),
-                    );
-                }
+            // Custom RTMP: URL mode under Stream quality, as Electron.
+            if let (Some(_), Some(mode)) = (&dest.manual, dest.url_mode) {
+                detail = detail.child(card_field(
+                    t,
+                    format!("dest-url-mode-{}", dest.id),
+                    page_copy::URL_MODE,
+                    None,
+                    dest.disabled,
+                    SegmentedControl::new(format!("dest-url-mode-control-{}", dest.id))
+                        // Electron fills it (`w-full`, or a vertical Field's `*:w-full`).
+                        .full(true)
+                        .small(true)
+                        .accessibility_label(page_copy::URL_MODE)
+                        .disabled(dest.disabled)
+                        .value(Some(SharedString::from(if mode == 1 {
+                            "full"
+                        } else {
+                            "server"
+                        })))
+                        .option(Segment::new("server", page_copy::URL_MODE_SERVER_AND_KEY))
+                        .option(Segment::new("full", page_copy::URL_MODE_FULL_URL))
+                        .on_change({
+                            let entity = entity.clone();
+                            let id = id.clone();
+                            move |value, _, cx| {
+                                entity.update(cx, |this, _| {
+                                    this.set_url_mode(id.clone(), value.as_ref() == "full")
+                                })
+                            }
+                        }),
+                ));
             }
             if let Some((labels, selected)) = &dest.auth_mode {
                 let mut control = SegmentedControl::new(format!("dest-auth-{}", dest.id))
@@ -719,34 +865,46 @@ impl DestinationsPanel {
                     control,
                 ));
             }
-            if dest.quality.options.len() > 1 {
-                let quality = dest.quality.clone();
-                let dest_id = dest.id.clone();
-                // Electron's card holds the same `StreamQualityControl` as the
-                // page (`inherit`): a vertical field, the control filling the
-                // card. A side-by-side row left its label one letter wide.
-                let control = quality::quality_control(
-                    format!("dest-quality-control-{}", dest.id),
-                    &quality,
-                    dest.disabled,
-                    {
-                        let entity = entity.clone();
-                        move |value, _, cx| {
-                            entity.update(cx, |this, _| {
-                                this.set_destination_quality(dest_id.clone(), value.to_string())
-                            })
-                        }
-                    },
-                );
+            if let Some(line) = &dest.key_only_line {
                 detail = detail.child(
                     div()
-                        .id(SharedString::from(format!("dest-quality-{}", dest.id)))
-                        .child(quality::quality_field(
-                            t,
-                            control,
-                            quality.description.clone(),
-                            dest.disabled,
-                        )),
+                        .type_scale(text::META)
+                        .text_color(hsla(t.muted_foreground))
+                        .child(line.clone()),
+                );
+            }
+            if let Some((guidance, link)) = &dest.guidance {
+                // Electron: one muted paragraph, the dashboard a small link
+                // with the external mark right after the words.
+                let mut paragraph = div()
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .type_scale(text::META)
+                    .text_color(hsla(t.muted_foreground))
+                    .child(guidance.clone());
+                if let Some(link) = link {
+                    let url = link.url.clone();
+                    paragraph = paragraph.child(
+                        Button::new(format!("dest-guide-{}", dest.id))
+                            .label(link.label.clone())
+                            .variant(ButtonVariant::Link)
+                            .size(ButtonSize::Xs)
+                            .child(div().pl(px(4.)).child(icon(
+                                IconName::ArrowSquareOut,
+                                12.,
+                                hsla(t.primary),
+                            )))
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    );
+                }
+                detail = detail.child(paragraph);
+            }
+            if let Some(quota) = &dest.quota_paused {
+                detail = detail.child(
+                    Alert::new(format!("dest-quota-{}", dest.id))
+                        .variant(AlertVariant::Warning)
+                        .title(quota.clone()),
                 );
             }
             if let Some(oauth) = &dest.oauth {
@@ -913,37 +1071,6 @@ impl DestinationsPanel {
                 }
             }
             if let Some(manual) = &dest.manual {
-                if let Some(mode) = dest.url_mode {
-                    detail = detail.child(card_field(
-                        t,
-                        format!("dest-url-mode-{}", dest.id),
-                        page_copy::URL_MODE,
-                        None,
-                        dest.disabled,
-                        SegmentedControl::new(format!("dest-url-mode-control-{}", dest.id))
-                            // Electron fills it (`w-full`, or a vertical Field's `*:w-full`).
-                            .full(true)
-                            .small(true)
-                            .accessibility_label(page_copy::URL_MODE)
-                            .disabled(dest.disabled)
-                            .value(Some(SharedString::from(if mode == 1 {
-                                "full"
-                            } else {
-                                "server"
-                            })))
-                            .option(Segment::new("server", page_copy::URL_MODE_SERVER_AND_KEY))
-                            .option(Segment::new("full", page_copy::URL_MODE_FULL_URL))
-                            .on_change({
-                                let entity = entity.clone();
-                                let id = id.clone();
-                                move |value, _, cx| {
-                                    entity.update(cx, |this, _| {
-                                        this.set_url_mode(id.clone(), value.as_ref() == "full")
-                                    })
-                                }
-                            }),
-                    ));
-                }
                 if let Some(url_input) = self.manual_url_drafts.get(&dest.id) {
                     detail = detail.child(card_field(
                         t,
@@ -974,6 +1101,21 @@ impl DestinationsPanel {
                                             let url = url_input.read(cx).value().to_string();
                                             entity.update(cx, |this, _| {
                                                 this.save_manual_url(id.clone(), url)
+                                            })
+                                        }),
+                                )
+                            })
+                            .when(manual.clear_url, |row| {
+                                let entity = entity.clone();
+                                let id = id.clone();
+                                row.child(
+                                    Button::new(format!("dest-clear-url-{}", dest.id))
+                                        .label(page_copy::CLEAR)
+                                        .variant(ButtonVariant::Outline)
+                                        .disabled(dest.disabled)
+                                        .on_click(move |_, window, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.ask_clear_key(id.clone(), window, cx)
                                             })
                                         }),
                                 )
@@ -1017,6 +1159,21 @@ impl DestinationsPanel {
                                             let key = key_input.read(cx).value().to_string();
                                             entity.update(cx, |this, _| {
                                                 this.save_manual_key(id.clone(), key)
+                                            })
+                                        }),
+                                )
+                            })
+                            .when(manual.clear_key, |row| {
+                                let entity = entity.clone();
+                                let id = id.clone();
+                                row.child(
+                                    Button::new(format!("dest-clear-key-{}", dest.id))
+                                        .label(page_copy::CLEAR)
+                                        .variant(ButtonVariant::Outline)
+                                        .disabled(dest.disabled)
+                                        .on_click(move |_, window, cx| {
+                                            entity.update(cx, |this, cx| {
+                                                this.ask_clear_key(id.clone(), window, cx)
                                             })
                                         }),
                                 )
@@ -1256,6 +1413,7 @@ impl Render for DestinationsPanel {
         let command_dialog = self.command_dialog_element(window, cx);
         let youtube_consent = self.youtube_consent_dialog(window, cx);
         let disconnect = self.disconnect_dialog(window, cx);
+        let clear_key = self.clear_key_dialog(cx);
         let schedule = self.schedule_dialog(window, cx);
 
         div()
@@ -1274,6 +1432,7 @@ impl Render for DestinationsPanel {
             .child(command_dialog)
             .child(youtube_consent)
             .child(disconnect)
+            .child(clear_key)
             .child(schedule)
     }
 }
