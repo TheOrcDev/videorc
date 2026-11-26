@@ -37,6 +37,9 @@ pub struct LibraryScreen {
     rename_dialog: DialogHandle,
     delete_dialog: DialogHandle,
     focus: FocusHandle,
+    /// The list's focus came from a key (Electron's `focus-visible`): only
+    /// then the active row shows its focus ring.
+    keyboard_focus: bool,
     busy: BTreeSet<String>,
     message: Option<String>,
     cloud: videorc_app_core::library::cloud::CloudTab,
@@ -172,6 +175,7 @@ impl LibraryScreen {
             rename_dialog: DialogHandle::new(false),
             delete_dialog: DialogHandle::new(false),
             focus: cx.focus_handle(),
+            keyboard_focus: false,
             busy: BTreeSet::new(),
             message: None,
             cloud: Default::default(),
@@ -209,6 +213,9 @@ impl LibraryScreen {
             self.search
                 .update(cx, |input, cx| input.set_value("", window, cx));
         }
+        // Focused for the keys, without a ring: Electron's rows show it only
+        // once a key moves focus (`focus-visible`).
+        self.keyboard_focus = false;
         self.focus.focus(window, cx);
         cx.notify();
     }
