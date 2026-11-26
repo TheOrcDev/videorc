@@ -471,7 +471,7 @@ impl CameraFixture {
         let (size, colour) = value.trim().split_once(':')?;
         let (width, height) = size.split_once('x')?;
         let (width, height) = (width.parse::<u32>().ok()?, height.parse::<u32>().ok()?);
-        let side = |value: u32| (2..=4096).contains(&value) && value % 2 == 0;
+        let side = |value: u32| (2..=4096).contains(&value) && value.is_multiple_of(2);
         if !side(width) || !side(height) {
             return None;
         }

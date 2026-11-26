@@ -509,7 +509,7 @@ mod tests {
             current: true,
             ..hidden
         };
-        let plan = subscription_plan(&[current.clone()], &tracks(), false);
+        let plan = subscription_plan(std::slice::from_ref(&current), &tracks(), false);
         assert_eq!(
             allowed(&plan, &current.identity),
             vec!["TR_aux", "TR_cam", "TR_mic", "TR_sheet"]

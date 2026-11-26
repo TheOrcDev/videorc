@@ -767,8 +767,6 @@ mod tests {
 
     // --- R6b: the pose set and the motion stream ---------------------------------------------
 
-    use base64::Engine as _;
-
     use crate::buddy_pet::PetFrameKind;
     use crate::buddy_sprite::BuddySpritePackMeta;
 
