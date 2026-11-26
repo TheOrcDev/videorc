@@ -3723,6 +3723,30 @@
       "appCommit": "2857b0207a3437ab5072e87932afd3f7e93e0928"
     },
     {
+      "screen": "livestream-setup",
+      "state": "stream-quality",
+      "theme": "dark",
+      "contrast": "normal",
+      "width": 1280,
+      "height": 800,
+      "path": "livestream-setup/stream-quality-1280x800-dark.png",
+      "bytes": null,
+      "sha256": null,
+      "appCommit": null
+    },
+    {
+      "screen": "livestream-setup",
+      "state": "stream-quality",
+      "theme": "light",
+      "contrast": "normal",
+      "width": 1280,
+      "height": 800,
+      "path": "livestream-setup/stream-quality-1280x800-light.png",
+      "bytes": null,
+      "sha256": null,
+      "appCommit": null
+    },
+    {
       "screen": "livestream-upcoming",
       "state": "default",
       "theme": "dark",
