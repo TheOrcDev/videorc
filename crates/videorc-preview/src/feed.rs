@@ -445,6 +445,10 @@ pub struct Telemetry {
     /// The Preview is closed: the surface is down until it opens
     /// ([`FeedCommand::Park`]).
     pub parked: bool,
+    /// The host hid the video on purpose (its page is away, or a dialog is
+    /// over the slot): the watchdog doesn't judge it until it shows again.
+    /// The surface stays up, unlike [`Self::parked`].
+    pub hidden_by_host: bool,
     /// S3.1b: the backend's native host commands the feed took.
     pub host_commands_taken: u64,
     /// S3.1b: the backend's latest `preview.surface.status`.
