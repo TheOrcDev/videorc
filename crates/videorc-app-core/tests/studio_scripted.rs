@@ -123,6 +123,11 @@ struct Script {
     sound_ids: Option<Vec<String>>,
     screen_hidden: bool,
     remote_requests: Vec<(String, Value)>,
+    /// Sidekick's settings (`cohost.settings.get`; none: not connected; a
+    /// save merges its patch) and the plan (`entitlements.get`; none: not
+    /// connected).
+    cohost: Option<Value>,
+    entitlements: Option<Value>,
 }
 
 struct Scripted {
@@ -383,6 +388,38 @@ impl StudioBackend for Scripted {
             .remote_requests
             .push((method.to_string(), params));
         Ok(Value::Null)
+    }
+
+    /// Sidekick's settings and the plan, as scripted; a save is noted with
+    /// the remote's requests.
+    async fn buddy_request(&self, method: &'static str, params: Value) -> Result<Value, RpcError> {
+        self.note(method);
+        let mut script = self.script.lock().unwrap();
+        match method {
+            "cohost.settings.get" => script
+                .cohost
+                .clone()
+                .ok_or_else(|| RpcError::not_connected(method)),
+            "cohost.settings.set" => {
+                script
+                    .remote_requests
+                    .push((method.to_string(), params.clone()));
+                let Some(settings) = script.cohost.as_mut().and_then(Value::as_object_mut) else {
+                    return Err(RpcError::not_connected(method));
+                };
+                if let Some(patch) = params.as_object() {
+                    for (key, value) in patch {
+                        settings.insert(key.clone(), value.clone());
+                    }
+                }
+                Ok(Value::Object(settings.clone()))
+            }
+            "entitlements.get" => script
+                .entitlements
+                .clone()
+                .ok_or_else(|| RpcError::not_connected(method)),
+            _ => Err(RpcError::not_connected(method)),
+        }
     }
 
     async fn remote_intent_ack(&self, params: RemoteIntentAckParams) -> Result<(), RpcError> {
@@ -5690,6 +5727,246 @@ async fn a_layout_key_switches_to_the_first_scene_with_that_layout() {
         )
         .await,
         refused_ack(remote_copy::SCREEN_MISSING)
+    );
+}
+
+fn backend_event(event: &str, payload: Value) -> BackendEvent {
+    BackendEvent::Untyped {
+        event: event.to_string(),
+        payload,
+    }
+}
+
+fn surface(studio: &Studio<Scripted>) -> Value {
+    serde_json::to_value(studio.remote_surface()).unwrap()
+}
+
+#[tokio::test]
+async fn the_surface_reads_its_lists_once_and_then_follows_their_events() {
+    let (_backend, studio) = remote_studio(|script| {
+        script.takeovers = vec!["brb".to_string()];
+        script.banners = Some(json!([
+            { "id": "sale", "name": "Sale", "shown": true, "imageFile": "sale.png" }
+        ]));
+        script.sound_ids = Some(vec!["airhorn".to_string()]);
+        script.screen_hidden = true;
+        script.cohost = Some(json!({ "enabled": true }));
+    })
+    .await;
+    studio.read_remote_lists().await;
+    let read = surface(&studio);
+    assert_eq!(
+        read["describe"]["takeovers"],
+        json!([{ "id": "brb", "name": "brb" }])
+    );
+    assert_eq!(
+        read["describe"]["banners"],
+        json!([{ "id": "sale", "name": "Sale", "shown": true }])
+    );
+    assert_eq!(
+        read["describe"]["sounds"],
+        json!([{ "id": "airhorn", "name": "airhorn", "playing": false }])
+    );
+    assert_eq!(read["state"]["screenHidden"], json!(true));
+    assert_eq!(read["state"]["buddyLive"], json!(true));
+    assert_eq!(read["state"]["activeTakeoverId"], json!(null));
+
+    // Pushed: each event is the truth, and a later read on the same
+    // connection never takes it back.
+    for (event, payload) in [
+        ("screens.changed", json!([])),
+        (
+            "screens.active.changed",
+            json!({ "id": "brb", "name": "brb" }),
+        ),
+        (
+            "banners.changed",
+            json!([{ "id": "sale", "name": "Sale", "shown": false }]),
+        ),
+        (
+            "sounds.playback",
+            json!({ "voices": [{ "voiceId": "v1", "soundId": "airhorn" }] }),
+        ),
+        (
+            "screen.privacy.changed",
+            json!({ "hidden": false, "generation": 3 }),
+        ),
+    ] {
+        studio.handle_event(backend_event(event, payload)).await;
+    }
+    studio.read_remote_lists().await;
+    let pushed = surface(&studio);
+    assert_eq!(pushed["describe"]["takeovers"], json!([]));
+    assert_eq!(pushed["state"]["activeTakeoverId"], json!("brb"));
+    assert_eq!(pushed["describe"]["banners"][0]["shown"], json!(false));
+    assert_eq!(pushed["describe"]["sounds"][0]["playing"], json!(true));
+    assert_eq!(pushed["state"]["screenHidden"], json!(false));
+
+    // A new connection reads afresh; nothing plays on it yet.
+    studio
+        .handle_event(BackendEvent::ConnectionClosed {
+            reason: "gone".to_string(),
+        })
+        .await;
+    studio.handle_event(ready()).await;
+    studio.read_remote_lists().await;
+    let again = surface(&studio);
+    assert_eq!(again["describe"], read["describe"]);
+    for field in ["screenHidden", "buddyLive", "activeTakeoverId"] {
+        assert_eq!(again["state"][field], read["state"][field], "{field}");
+    }
+}
+
+#[tokio::test]
+async fn the_driver_reads_the_lists_after_the_bootstrap() {
+    let backend = Scripted::new();
+    backend.with(|script| script.takeovers = vec!["brb".to_string()]);
+    let studio = new_studio(&backend);
+    let (events, receiver) = broadcast::channel(16);
+    let driver = tokio::spawn(Arc::clone(&studio).drive(receiver));
+    events.send(ready()).unwrap();
+    eventually("the backend holds the takeovers", || {
+        backend
+            .script
+            .lock()
+            .unwrap()
+            .remote_surfaces
+            .last()
+            .is_some_and(|published| {
+                published["describe"]["takeovers"] == json!([{ "id": "brb", "name": "brb" }])
+            })
+    })
+    .await;
+    driver.abort();
+}
+
+/// An `entitlements.get` answer with Sidekick Live in the plan.
+fn sidekick_plan() -> Value {
+    json!({
+        "schemaVersion": 1,
+        "tier": "premium",
+        "source": "creem",
+        "capabilities": [{ "featureId": "live-cohost", "state": "enabled" }],
+        "limits": {
+            "recording": { "maxWidth": 3840, "maxHeight": 2160, "maxFps": 60 },
+            "streaming": {
+                "maxWidth": 1920, "maxHeight": 1080, "maxFps": 60,
+                "maxBitrateKbps": 6000, "maxDestinations": 4
+            }
+        }
+    })
+}
+
+fn said_ack(message: &str) -> RemoteIntentAckParams {
+    RemoteIntentAckParams {
+        intent_id: "key-1".to_string(),
+        ok: true,
+        message: Some(message.to_string()),
+    }
+}
+
+#[tokio::test]
+async fn sidekick_keys_check_the_plan_and_the_consent_only_to_turn_it_on() {
+    use videorc_app_core::studio::remote_app::buddy_copy;
+
+    // The settings never read: "Loading".
+    let (backend, studio) = remote_studio(|_| {}).await;
+    assert_eq!(
+        press(&backend, &studio, json!({ "kind": "buddyLiveOn" })).await,
+        refused_ack(buddy_copy::LOADING)
+    );
+
+    // No plan: Premium's lock. Then the plan, without Cloud AI's consent.
+    let (backend, studio) = remote_studio(|script| {
+        script.cohost = Some(json!({ "enabled": false, "listen": true }));
+    })
+    .await;
+    assert_eq!(
+        press(&backend, &studio, json!({ "kind": "buddyLiveOn" })).await,
+        refused_ack(buddy_copy::PREMIUM)
+    );
+    backend.with(|script| script.entitlements = Some(sidekick_plan()));
+    assert_eq!(
+        press(&backend, &studio, json!({ "kind": "buddyLiveToggle" })).await,
+        refused_ack(buddy_copy::CONSENT)
+    );
+    // Off is always allowed, and already off saves nothing.
+    assert_eq!(
+        press(&backend, &studio, json!({ "kind": "buddyLiveOff" })).await,
+        said_ack(buddy_copy::OFF)
+    );
+    assert!(remote_requests(&backend).is_empty());
+
+    // Premium and the consent: on, then the toggle turns it off.
+    let (backend, studio) = remote_studio(|script| {
+        script.cohost = Some(json!({ "enabled": false, "listen": true }));
+        script.entitlements = Some(sidekick_plan());
+        script
+            .settings
+            .insert(keys::AI_CONSENT.to_string(), Value::String("1".to_string()));
+    })
+    .await;
+    assert_eq!(
+        press(&backend, &studio, json!({ "kind": "buddyLiveOn" })).await,
+        said_ack(buddy_copy::ON)
+    );
+    assert_eq!(surface(&studio)["state"]["buddyLive"], json!(true));
+    assert_eq!(
+        press(&backend, &studio, json!({ "kind": "buddyLiveToggle" })).await,
+        said_ack(buddy_copy::OFF)
+    );
+    assert_eq!(surface(&studio)["state"]["buddyLive"], json!(false));
+    // `enabled` alone: never the microphone.
+    assert_eq!(
+        remote_requests(&backend),
+        [
+            (
+                "cohost.settings.set".to_string(),
+                json!({ "enabled": true })
+            ),
+            (
+                "cohost.settings.set".to_string(),
+                json!({ "enabled": false })
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn window_keys_reach_the_app_and_without_it_ask_for_an_update() {
+    use videorc_app_core::studio::remote::accepted;
+    use videorc_app_core::studio::remote_app::{AppRemoteAction, RemoteWindow};
+
+    let (backend, studio) = remote_studio(|_| {}).await;
+    assert_eq!(
+        press(
+            &backend,
+            &studio,
+            json!({ "kind": "windowFront", "window": "notes" })
+        )
+        .await,
+        refused_ack(remote_copy::UNSUPPORTED)
+    );
+    let (listener, mut keys) = tokio::sync::mpsc::unbounded_channel();
+    studio.set_remote_app_listener(Some(listener));
+    let app = tokio::spawn(async move {
+        let key = keys.recv().await.expect("a key");
+        let action = key.action;
+        key.answer(accepted());
+        action
+    });
+    assert_eq!(
+        press(
+            &backend,
+            &studio,
+            json!({ "kind": "windowFront", "window": "comments" })
+        )
+        .await,
+        accepted_ack()
+    );
+    assert_eq!(
+        app.await.unwrap(),
+        AppRemoteAction::WindowFront(RemoteWindow::Comments)
     );
 }
 

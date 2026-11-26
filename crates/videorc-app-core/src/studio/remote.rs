@@ -14,18 +14,20 @@
 //! receive: booleans, opaque ids and the names the streamer typed. Never a
 //! token, a path, a URL, a device name or a frame.
 //!
-//! What only the app holds (its windows, the takeovers, the banners, the
-//! sounds, Buddy Live, the Stream Manager's screen, Hide screen) reaches
-//! the surface through [`Studio::set_remote_extras`]; until the app sets
-//! them they read closed, empty and off.
+//! What the scene does not hold reaches the surface as [`RemoteExtras`]:
+//! the takeovers, the banners, the sounds, Hide screen and Sidekick Live
+//! the Studio reads and follows itself (`remote_lists.rs`); the app's
+//! windows and the Stream Manager's screen the app reports
+//! ([`Studio::set_remote_app_facts`]). Until then they read closed, empty
+//! and off.
 //!
 //! An admitted `remote.intent` runs here too, beside the event receiver,
 //! and is answered with `remote.intent.ack` (`{intentId, ok, message?}`).
 //! The session's, the microphone's and System audio's intents run below;
 //! the picture's, the banners', the sounds', Hide screen's, the clip's and
-//! the comment's in `remote_actions.rs`. The app's windows, the
-//! Stream Manager's screen and Sidekick Live still answer "Update
-//! Videorc" from here.
+//! the comment's in `remote_actions.rs`; the windows', the Stream
+//! Manager's and Sidekick Live's in `remote_app.rs` (a window key is the
+//! app's to run, and answers "Update Videorc" while no app listens).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +40,7 @@ use videorc_protocol::{DeviceKind, DeviceStatus, RecordingState};
 
 use super::audio_mixer;
 use super::remote_actions::{BannerVerb, PrivacyMode, SoundVerb};
+use super::remote_app::BuddyLiveVerb;
 use super::session::{SessionActivity, SessionStartIntent};
 use super::{Connection, MicrophoneMode, StartOutcome, Studio, StudioBackend, StudioSnapshot};
 use crate::client::RemoteIntentEnvelope;
@@ -81,6 +84,10 @@ pub mod copy {
     pub const SCREEN_MISSING: &str = "That screen isn't connected. Pick your screens again.";
     pub const MESSAGE_MISSING: &str = "Choose a message to put on stream.";
     pub const CLIPS_OFF: &str = crate::studio::clips::copy::CLIPS_OFF_INTENT;
+    pub const WINDOW_MISSING: &str = "That window isn't available.";
+    pub const SCREENS_SAME: &str = "Pick two different screens.";
+    pub const STREAM_MANAGER_WAYLAND: &str =
+        "Wayland doesn't let Videorc move windows. Hold the key to bring the Stream Manager up.";
     pub const UNSUPPORTED: &str = "This version of Videorc can't do that. Update Videorc.";
     /// What a key reads when its executor failed in a way it has no words
     /// for (Electron's `catch`); the raw error is for the log only.
@@ -88,16 +95,17 @@ pub mod copy {
 }
 
 /// An intent's answer: whether Videorc did it, and the words the remote
-/// shows when it didn't (a refusal's own sentence where one exists).
-pub(super) type IntentOutcome = (bool, Option<String>);
+/// shows (a refusal's own sentence where one exists; a done key's only
+/// where Electron says one, as Sidekick Live's).
+pub type IntentOutcome = (bool, Option<String>);
 
 /// Done: the remote reads the result from `remote.state`.
-pub(super) fn accepted() -> IntentOutcome {
+pub fn accepted() -> IntentOutcome {
     (true, None)
 }
 
 /// Refused, with the words the remote shows.
-pub(super) fn refused(message: impl Into<String>) -> IntentOutcome {
+pub fn refused(message: impl Into<String>) -> IntentOutcome {
     (false, Some(message.into()))
 }
 
@@ -208,7 +216,9 @@ pub struct RemoteDescribe {
     pub screen_moves: ScreenMoves,
 }
 
-/// What only the app holds, for the surface.
+/// What the surface shows past the snapshot: the lists and states the
+/// Studio follows (`remote_lists.rs`) and the app's facts
+/// ([`RemoteAppFacts`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemoteExtras {
     pub screen_hidden: bool,
@@ -223,9 +233,19 @@ pub struct RemoteExtras {
     pub screen_moves: ScreenMoves,
 }
 
+/// What only the app can tell the surface: which of its windows are open,
+/// where the Stream Manager is, and the screens its Screen key can pick.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteAppFacts {
+    pub windows: RemoteWindows,
+    pub stream_manager: RemoteStreamManager,
+    pub screens: Vec<RemoteNamed>,
+    pub screen_moves: ScreenMoves,
+}
+
 /// An intent's string field (`typeof fields.x === 'string' ? fields.x :
 /// undefined`).
-fn text_field<'a>(intent: &'a Value, key: &str) -> Option<&'a str> {
+pub(super) fn text_field<'a>(intent: &'a Value, key: &str) -> Option<&'a str> {
     intent.get(key).and_then(Value::as_str)
 }
 
@@ -404,14 +424,35 @@ pub(super) struct RemotePublisher {
     generation: u64,
     /// Intents waiting for the driver.
     intents: Vec<RemoteIntentEnvelope>,
+    /// The app's receiver for the keys only it can run (`remote_app.rs`);
+    /// `None` while no app listens.
+    pub(super) app_intents:
+        Option<tokio::sync::mpsc::UnboundedSender<super::remote_app::AppRemoteIntent>>,
+    /// Which lists this connection's events already said (`remote_lists.rs`):
+    /// a read that answers later never overwrites them.
+    pub(super) heard: super::remote_lists::ListsHeard,
+    /// The soundboard in board order, and the sounds playing now, for
+    /// `describe.sounds`.
+    pub(super) board: Vec<RemoteNamed>,
+    pub(super) playing: Vec<String>,
 }
 
 impl RemotePublisher {
-    /// A new connection (or none): its backend holds nothing published.
+    /// A new connection (or none): its backend holds nothing published,
+    /// and its lists are read afresh.
     pub(super) fn forget_connection(&mut self) {
         self.latest = None;
         self.published = None;
         self.generation += 1;
+        self.heard = super::remote_lists::ListsHeard::default();
+        // No sound plays on a backend that is gone (`disconnect`).
+        self.playing.clear();
+        self.extras.sounds = super::remote_lists::sounds_of(&self.board, &self.playing);
+    }
+
+    /// This connection's number, for a read that answers after it.
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Records the newest surface. True when it is news for the backend.
@@ -441,19 +482,40 @@ impl RemotePublisher {
 }
 
 impl<B: StudioBackend> Studio<B> {
-    /// What the app holds for the remote surface: its windows, the
-    /// takeovers, the banners, the sounds, Buddy Live, the Stream Manager's
-    /// screen and Hide screen. Republishes when it changed.
+    /// Every extra at once (tests, a smoke): the windows, the takeovers,
+    /// the banners, the sounds, Buddy Live, the Stream Manager's screen and
+    /// Hide screen. Republishes when it changed. The app reports only its
+    /// own facts ([`Self::set_remote_app_facts`]); the Studio follows the
+    /// rest itself.
     pub fn set_remote_extras(&self, extras: RemoteExtras) {
-        {
+        self.edit_remote(|remote| remote.extras = extras);
+    }
+
+    /// The app's windows and the Stream Manager's screen, for the surface.
+    /// Call it whenever they may have changed: the same facts are not news.
+    pub fn set_remote_app_facts(&self, facts: RemoteAppFacts) {
+        self.edit_remote(|remote| {
+            let extras = &mut remote.extras;
+            extras.windows = facts.windows;
+            extras.stream_manager = facts.stream_manager;
+            extras.screens = facts.screens;
+            extras.screen_moves = facts.screen_moves;
+        });
+    }
+
+    /// One edit of the publisher; the surface is noted again when the
+    /// extras changed. Never holds the lock past the edit.
+    pub(super) fn edit_remote(&self, edit: impl FnOnce(&mut RemotePublisher)) {
+        let changed = {
             let mut remote = self.remote_lock();
-            if remote.extras == extras {
-                return;
-            }
-            remote.extras = extras;
+            let before = remote.extras.clone();
+            edit(&mut remote);
+            remote.extras != before
+        };
+        if changed {
+            let snapshot = self.snapshot();
+            self.note_remote_surface(&snapshot);
         }
-        let snapshot = self.snapshot();
-        self.note_remote_surface(&snapshot);
     }
 
     /// The surface of what the Studio just published, once the bootstrap
@@ -671,8 +733,12 @@ impl<B: StudioBackend> Studio<B> {
                 None => refused(copy::MESSAGE_MISSING),
             },
             "commentHighlightClear" => self.remote_comment_highlight_clear().await,
-            // The app's windows, the Stream Manager's screen and Sidekick
-            // Live are the GPUI app's to drive: they answer from there.
+            "windowFront" => self.remote_window_front(intent).await,
+            "streamManagerScreenSwap" => self.remote_screen_swap(intent),
+            "streamManagerFrontOrClose" => self.remote_stream_manager_front_or_close().await,
+            "buddyLiveOn" => self.remote_buddy_live(BuddyLiveVerb::On).await,
+            "buddyLiveOff" => self.remote_buddy_live(BuddyLiveVerb::Off).await,
+            "buddyLiveToggle" => self.remote_buddy_live(BuddyLiveVerb::Toggle).await,
             _ => refused(copy::UNSUPPORTED),
         }
     }

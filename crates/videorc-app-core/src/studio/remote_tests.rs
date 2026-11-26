@@ -272,25 +272,253 @@ async fn refused_intents_say_why_in_the_remotes_words() {
 }
 
 #[tokio::test]
-async fn the_apps_own_intents_still_ask_for_an_update() {
-    // The windows, the Stream Manager's screen and Sidekick Live are the
-    // GPUI app's to drive (a follow-up).
+async fn the_apps_keys_ask_for_an_update_while_no_app_listens() {
     let studio = silent_studio();
-    for kind in [
-        "windowFront",
-        "streamManagerScreenSwap",
-        "streamManagerFrontOrClose",
-        "buddyLiveOn",
-        "buddyLiveOff",
-        "buddyLiveToggle",
-        "somethingNew",
+    for fields in [
+        json!({"kind": "windowFront", "window": "notes"}),
+        json!({"kind": "streamManagerFrontOrClose"}),
+        json!({"kind": "somethingNew"}),
     ] {
         assert_eq!(
-            studio.execute_remote_intent(&intent(kind)).await,
+            studio
+                .execute_remote_intent(&intent_with(fields.clone()))
+                .await,
             no(copy::UNSUPPORTED),
+            "{fields}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_window_key_needs_a_window_videorc_has() {
+    let studio = silent_studio();
+    let (listener, _keys) = tokio::sync::mpsc::unbounded_channel();
+    studio.set_remote_app_listener(Some(listener));
+    for fields in [
+        json!({"kind": "windowFront"}),
+        json!({"kind": "windowFront", "window": "chat"}),
+        json!({"kind": "windowFront", "window": 3}),
+    ] {
+        assert_eq!(
+            studio
+                .execute_remote_intent(&intent_with(fields.clone()))
+                .await,
+            no(copy::WINDOW_MISSING),
+            "{fields}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_app_answers_its_keys_through_the_listener() {
+    use super::super::remote_app::{AppRemoteAction, RemoteWindow};
+
+    let studio = silent_studio();
+    let (listener, mut keys) = tokio::sync::mpsc::unbounded_channel();
+    studio.set_remote_app_listener(Some(listener));
+    // The app: the Preview isn't there, the rest runs.
+    let app = tokio::spawn(async move {
+        let mut asked = Vec::new();
+        while let Some(key) = keys.recv().await {
+            asked.push(key.action);
+            let outcome = match key.action {
+                AppRemoteAction::WindowFront(RemoteWindow::Preview) => {
+                    refused(copy::WINDOW_MISSING)
+                }
+                _ => accepted(),
+            };
+            key.answer(outcome);
+            if asked.len() == 3 {
+                break;
+            }
+        }
+        asked
+    });
+    let press = |fields: Value| {
+        let studio = studio.clone();
+        async move { studio.execute_remote_intent(&intent_with(fields)).await }
+    };
+    assert_eq!(
+        press(json!({"kind": "windowFront", "window": "notes"})).await,
+        accepted()
+    );
+    assert_eq!(
+        press(json!({"kind": "windowFront", "window": "preview"})).await,
+        no(copy::WINDOW_MISSING)
+    );
+    assert_eq!(
+        press(json!({"kind": "streamManagerFrontOrClose"})).await,
+        accepted()
+    );
+    assert_eq!(
+        app.await.expect("the app"),
+        [
+            AppRemoteAction::WindowFront(RemoteWindow::Notes),
+            AppRemoteAction::WindowFront(RemoteWindow::Preview),
+            AppRemoteAction::StreamManagerFrontOrClose,
+        ]
+    );
+    // The app stopped listening: an update again, never a hang.
+    assert_eq!(
+        press(json!({"kind": "windowFront", "window": "notes"})).await,
+        no(copy::UNSUPPORTED)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_key_the_app_never_answers_fails_after_the_wait() {
+    let studio = silent_studio();
+    let (listener, keys) = tokio::sync::mpsc::unbounded_channel();
+    studio.set_remote_app_listener(Some(listener));
+    // Held in the queue, never answered.
+    let before = tokio::time::Instant::now();
+    assert_eq!(
+        studio
+            .execute_remote_intent(&intent("streamManagerFrontOrClose"))
+            .await,
+        no(copy::FAILED)
+    );
+    assert!(before.elapsed() >= super::super::remote_app::APP_ANSWER_TIMEOUT);
+    drop(keys);
+}
+
+#[tokio::test]
+async fn a_key_the_app_drops_unanswered_fails() {
+    let studio = silent_studio();
+    let (listener, mut keys) = tokio::sync::mpsc::unbounded_channel();
+    studio.set_remote_app_listener(Some(listener));
+    let app = tokio::spawn(async move {
+        if let Some(key) = keys.recv().await {
+            drop(key);
+        }
+        keys
+    });
+    assert_eq!(
+        studio
+            .execute_remote_intent(&intent_with(
+                json!({"kind": "windowFront", "window": "notes"})
+            ))
+            .await,
+        no(copy::FAILED)
+    );
+    drop(app.await);
+}
+
+#[tokio::test]
+async fn a_screen_tap_is_refused_with_its_reason_and_never_an_update() {
+    let studio = silent_studio();
+    let tap = |fields: Value| {
+        let studio = studio.clone();
+        async move { studio.execute_remote_intent(&intent_with(fields)).await }
+    };
+    assert_eq!(
+        tap(json!({"kind": "streamManagerScreenSwap"})).await,
+        no(copy::WINDOW_MISSING)
+    );
+    assert_eq!(
+        tap(json!({"kind": "streamManagerScreenSwap", "presentingScreen": "1", "monitorScreen": "1"}))
+            .await,
+        no(copy::SCREENS_SAME)
+    );
+    let both =
+        json!({"kind": "streamManagerScreenSwap", "presentingScreen": "1", "monitorScreen": "2"});
+    assert_eq!(tap(both.clone()).await, no(copy::SCREEN_MISSING));
+    // The app reports both screens: it still can't move the window.
+    studio.set_remote_app_facts(RemoteAppFacts {
+        screens: vec![
+            RemoteNamed {
+                id: "1".to_string(),
+                name: "Built-in".to_string(),
+            },
+            RemoteNamed {
+                id: "2".to_string(),
+                name: "Studio Display".to_string(),
+            },
+        ],
+        ..RemoteAppFacts::default()
+    });
+    assert_eq!(tap(both).await, no(copy::WINDOW_MISSING));
+}
+
+#[tokio::test]
+async fn a_sidekick_key_waits_for_the_settings_to_read() {
+    let studio = silent_studio();
+    for kind in ["buddyLiveOn", "buddyLiveOff", "buddyLiveToggle"] {
+        assert_eq!(
+            studio.execute_remote_intent(&intent(kind)).await,
+            no(super::super::remote_app::buddy_copy::LOADING),
             "{kind}"
         );
     }
+}
+
+#[test]
+fn the_lists_follow_their_events_and_a_late_read_never_wins() {
+    let studio = silent_studio();
+    studio.follow_remote_list(
+        "screens.changed",
+        &json!([{ "id": "brb", "name": "Be right back" }]),
+    );
+    studio.follow_remote_takeover(&json!({ "id": "brb", "name": "Be right back" }));
+    studio.follow_remote_list(
+        "banners.changed",
+        &json!([{ "id": "sale", "name": "Sale", "shown": true }]),
+    );
+    studio.follow_remote_list(
+        "sounds.changed",
+        &json!({ "sounds": [{ "id": "airhorn", "name": "Airhorn" }] }),
+    );
+    studio.follow_remote_list(
+        "sounds.playback",
+        &json!({ "voices": [{ "soundId": "airhorn" }] }),
+    );
+    studio.follow_remote_list("screen.privacy.changed", &json!({ "hidden": true }));
+    studio.note_cohost_settings(&json!({ "enabled": true, "persona": { "name": "Orc" } }));
+    let extras = studio.remote_lock().extras.clone();
+    assert_eq!(
+        extras.takeovers,
+        [RemoteNamed {
+            id: "brb".to_string(),
+            name: "Be right back".to_string()
+        }]
+    );
+    assert_eq!(extras.active_takeover_id.as_deref(), Some("brb"));
+    assert_eq!(
+        extras.banners,
+        [RemoteBanner {
+            id: "sale".to_string(),
+            name: "Sale".to_string(),
+            shown: true
+        }]
+    );
+    assert_eq!(
+        extras.sounds,
+        [RemoteSound {
+            id: "airhorn".to_string(),
+            name: "Airhorn".to_string(),
+            playing: true
+        }]
+    );
+    assert!(extras.screen_hidden);
+    assert!(extras.buddy_live);
+
+    // A read that answers now (this connection heard every list) keeps them.
+    let generation = studio.remote_lock().generation();
+    studio.take_list_read(generation, |remote| {
+        if !remote.heard.takeovers {
+            remote.extras.takeovers.clear();
+        }
+    });
+    assert_eq!(studio.remote_lock().extras.takeovers.len(), 1);
+
+    // The takeover ends; a backend that goes away plays no sound.
+    studio.follow_remote_takeover(&Value::Null);
+    assert_eq!(studio.remote_lock().extras.active_takeover_id, None);
+    studio.remote_lock().forget_connection();
+    assert!(!studio.remote_lock().extras.sounds[0].playing);
+    // A read from the last connection is dropped.
+    studio.take_list_read(generation, |remote| remote.extras.banners.clear());
+    assert_eq!(studio.remote_lock().extras.banners.len(), 1);
 }
 
 #[tokio::test]

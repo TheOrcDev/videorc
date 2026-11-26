@@ -24,6 +24,8 @@ use videorc_app_core::stream_manager::copy::WINDOW_NAME;
 use videorc_app_core::stream_manager::dashboard::{LiveDashboard, SessionState};
 use videorc_app_core::studio::StudioBackend;
 use videorc_app_core::studio::families::{self, StatsLayout};
+use videorc_app_core::studio::remote::RemoteStreamManager;
+use videorc_app_core::studio::remote_app::{HoldAction, stream_manager_hold_action};
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
 use videorc_kit::{
@@ -62,6 +64,9 @@ struct Open {
     runtime: tokio::runtime::Handle,
     window: Option<WindowHandle<StreamManager>>,
     quitting: bool,
+    /// Viewers really don't see the open window (the remotes' Hidden
+    /// title, `streamManagerHiddenFromViewers`).
+    hidden_from_viewers: bool,
 }
 
 impl Global for Open {}
@@ -91,6 +96,7 @@ pub fn install(
         runtime,
         window: None,
         quitting: false,
+        hidden_from_viewers: false,
     });
     cx.on_action(|_: &ToggleStreamManager, cx| toggle(cx));
     cx.on_window_closed(|cx, id| {
@@ -173,6 +179,53 @@ pub fn show(cx: &mut App) {
         Ok(window) => cx.global_mut::<Open>().window = Some(window),
         Err(error) => eprintln!("[videorc-app] the Stream Manager did not open: {error:#}"),
     }
+    crate::app::remote_keys::report(cx);
+}
+
+/// The Stream Manager Screen key held (`frontOrCloseCommentsWindow`): the
+/// window the streamer is using closes, else it comes to the front, opened
+/// when it is closed. False when the window isn't installed.
+pub fn front_or_close(cx: &mut App) -> bool {
+    let Some(window) = cx.try_global::<Open>().map(|open| open.window) else {
+        return false;
+    };
+    // GPUI can't tell a minimized window; a focused one is showing.
+    let focused = window
+        .and_then(|window| {
+            window
+                .update(cx, |_, window, _| window.is_window_active())
+                .ok()
+        })
+        .unwrap_or(false);
+    let open = window.is_some();
+    match stream_manager_hold_action(open, open, focused) {
+        HoldAction::Close => toggle(cx),
+        HoldAction::Front => show(cx),
+    }
+    true
+}
+
+/// Where the remotes see the Stream Manager (plan 230 D5): open reads as
+/// showing (GPUI can't tell a minimized window), and Hidden only while
+/// viewers really don't see it. No screen: this app can't move it yet.
+pub fn remote_place(cx: &App) -> RemoteStreamManager {
+    let Some(open) = cx.try_global::<Open>() else {
+        return RemoteStreamManager::default();
+    };
+    let shown = open.window.is_some();
+    RemoteStreamManager {
+        screen_id: None,
+        visible: shown,
+        hidden_from_stream: shown && open.hidden_from_viewers,
+    }
+}
+
+/// Notes whether viewers don't see the window, for the remotes.
+fn note_hidden_from_viewers(hidden: bool, method: HideMethod, cx: &mut App) {
+    if cx.has_global::<Open>() {
+        cx.global_mut::<Open>().hidden_from_viewers = hidden && method != HideMethod::Unsupported;
+    }
+    crate::app::remote_keys::report(cx);
 }
 
 /// What the keys' gates read. The chat driver fills the chat's half and
@@ -280,6 +333,7 @@ impl StreamManager {
         if hide_method != HideMethod::Unsupported {
             let _ = HideFromStream::apply(window, WindowRole::Comments, hidden, cx);
         }
+        note_hidden_from_viewers(hidden, hide_method, cx);
         let now = chrono::Utc::now().timestamp_millis();
         let stats = StatsView::from_dashboard(&dashboard.borrow(), now);
         let stats_layout = studio.read_ui_settings(families::stats_layout);
@@ -629,6 +683,7 @@ impl StreamManager {
         self.hidden = hidden;
         self.frame.set_hidden_from_stream(hidden);
         let _ = HideFromStream::apply(window, WindowRole::Comments, hidden, cx);
+        note_hidden_from_viewers(hidden, self.hide_method, cx);
         cx.notify();
     }
 

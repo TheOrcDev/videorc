@@ -822,6 +822,8 @@ impl SidekickPane {
             let _ = this.update(cx, |pane, cx| {
                 match answer {
                     Ok(Ok(value)) => {
+                        // The remotes' Sidekick key shows it too.
+                        pane.studio.note_cohost_settings(&value);
                         if let Some(settings) = CohostSettingsView::from_json(&value) {
                             pane.settings = settings;
                         }

@@ -486,6 +486,7 @@ fn main() -> Result<()> {
         Rc::new(RefCell::new(None));
     let quit_preview = preview_slot.clone();
     let smoke_preview = preview_slot.clone();
+    let remote_preview = preview_slot.clone();
     let studio_state = studio.watch();
     // Taken by the quit: the shutdown handshake runs once.
     let supervisor = Rc::new(RefCell::new(Some(supervisor)));
@@ -977,6 +978,9 @@ fn main() -> Result<()> {
             core_handle.clone(),
         );
         screens::notes::window::install(cx, notes_frame, APP_ID);
+        // Stream Deck and the phone's window keys, and what they see of the
+        // app's windows (plan 260, L7).
+        app::remote_keys::install(cx, studio.clone(), remote_preview.clone());
 
         // Follow the app in front and the password-manager hide (plan 210
         // D10/D11): the core's follower, fed by the platform's front-app

@@ -1186,7 +1186,11 @@ impl SidekickScreen {
             let result = job.await;
             let _ = this.update(cx, |screen, cx| {
                 match result {
-                    Ok(Ok(value)) => screen.settings = CohostSettingsView::from_json(&value),
+                    Ok(Ok(value)) => {
+                        // The remotes' Sidekick key shows it too.
+                        screen.studio.note_cohost_settings(&value);
+                        screen.settings = CohostSettingsView::from_json(&value);
+                    }
                     Ok(Err(error)) if from_consent => screen.consent_failed(&error, true, cx),
                     Ok(Err(error)) => {
                         let context = if on { TURN_ON_LIVE } else { TURN_OFF_LIVE };

@@ -22,6 +22,7 @@ pub mod links;
 pub mod menus;
 pub mod permissions;
 pub mod posters;
+pub mod remote_keys;
 pub mod shell;
 pub mod sleep;
 #[cfg(target_os = "macos")]
