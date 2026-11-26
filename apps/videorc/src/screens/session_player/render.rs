@@ -259,7 +259,9 @@ impl Render for Player {
             return body.into_any_element();
         }
         if let Some(view) = marker_view {
-            let mut list = GroupedList::new().label(copy::SAVED_MARKERS);
+            // `session-markers-dialog.tsx`: "Saved markers" names the list for
+            // assistive tech only (`aria-label`); nothing shows above it.
+            let mut list = GroupedList::new().accessibility_label(copy::SAVED_MARKERS);
             for row in view.rows {
                 let id = row.id.clone();
                 let mut line = ListRow::new(SharedString::from(format!("marker-{id}")), row.name)
