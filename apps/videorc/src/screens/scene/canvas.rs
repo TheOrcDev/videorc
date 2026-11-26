@@ -147,7 +147,8 @@ impl ScenePage {
             .disabled(!editor.chips_enabled || self.stage.phase() != StagePhase::Idle)
             .value(editor.selected_stage_id.clone());
         for chip in &editor.chips {
-            let glyph = |name| Some(icon(name, 14., muted).into_any_element());
+            // Electron's Toggle marks are `size-4`.
+            let glyph = |name| Some(icon(name, 16., muted).into_any_element());
             let mark = match chip.kind {
                 ChipKind::Camera => glyph(IconName::VideoCamera),
                 ChipKind::Source => glyph(IconName::Monitor),
@@ -157,7 +158,7 @@ impl ScenePage {
                     Some("captions") => glyph(IconName::ClosedCaptioning),
                     Some("buddy") => Some(
                         img(pictures::emblem())
-                            .size(px(14.))
+                            .size(px(16.))
                             .flex_none()
                             .object_fit(ObjectFit::Contain)
                             .into_any_element(),
@@ -178,7 +179,12 @@ impl ScenePage {
                         .text_color(muted)
                         .child(badge.label())
                 }));
-            toolbar = toolbar.item(ToggleItem::new(chip.stage_id.clone(), chip.name()).child(body));
+            // An inline chip (`pl-2` beside the mark, `pr-2.5`), not a card.
+            toolbar = toolbar.item(
+                ToggleItem::new(chip.stage_id.clone(), chip.name())
+                    .chip(true)
+                    .child(body),
+            );
         }
         let select_page = page;
         toolbar = toolbar.on_change(move |values, _, cx| {

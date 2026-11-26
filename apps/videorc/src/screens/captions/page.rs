@@ -19,7 +19,9 @@ use videorc_kit::{
     alert::{Alert, AlertVariant},
     badge::{Badge, BadgeVariant},
     button::{Button, ButtonSize, ButtonVariant},
-    caption_preview_backdrop::{CaptionPreviewBackdrop, CaptionPreviewBackdropEl},
+    caption_preview_backdrop::{
+        CaptionPreviewBackdrop, CaptionPreviewBackdropEl, MINIATURE_TEXT_PX,
+    },
     field::{Field, FieldGroup},
     icon::{IconName, icon},
     list_row::GroupedList,
@@ -900,13 +902,14 @@ fn style_chip(t: &Theme, style: &c::CaptionStyle, width: f32, disabled: bool) ->
     // A black plate at `alpha` composited over the swatch's ground.
     let plate_over = |alpha: f32| faded_over(with_alpha(t.video_ground, alpha), t.video_ground, 1.);
     let plate_fill = |alpha: f32| fade(plate_over(alpha));
-    // 11 px is the floor (Electron draws the sample at 8 px).
+    // `text-[8px] leading-none`: the kit's named miniature size, the one
+    // exception to the 11 px floor.
     let words = div()
         .max_w_full()
         .px(px(8.))
         .py(px(4.))
-        .text_size(px(11.))
-        .line_height(px(11.))
+        .text_size(px(MINIATURE_TEXT_PX))
+        .line_height(px(MINIATURE_TEXT_PX))
         .truncate()
         .text_color(hsla(fade(t.video_ground_foreground)));
     let plate = match style.id {
