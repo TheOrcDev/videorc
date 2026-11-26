@@ -71,8 +71,10 @@ pub(super) fn quality_control(
         .get(quality.selected.max(0) as usize)
         .filter(|_| quality.selected >= 0)
         .map(|option| option.value.clone());
+    // Electron's StreamQualityControl is the default size (13 px words, 12 px
+    // sides, a 28 px track): at that size its three options wrap onto two
+    // rows of the Output quality column, as Electron's do.
     let mut control = SegmentedControl::new(id)
-        .small(true)
         .accessibility_label(page_copy::OUTPUT_QUALITY)
         .disabled(disabled)
         .value(selected.map(SharedString::from))
