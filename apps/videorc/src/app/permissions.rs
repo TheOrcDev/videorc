@@ -23,8 +23,9 @@
 //! [`Permissions::relaunch`] when they land (Phase 3); until then the
 //! launch log, the watcher and the deferred restart run on their own.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use gpui::{App, Task};
 use tokio::runtime::Handle;
@@ -59,8 +60,58 @@ pub struct PermissionsGlobal(pub Arc<Permissions>);
 
 impl gpui::Global for PermissionsGlobal {}
 
+/// How often the cached grants are read again, off the main thread: a grant
+/// made in System Settings, a device that came or went, a prompt answered
+/// elsewhere all show within this. The main window coming to the front and
+/// a prompt's answer read at once.
+pub const GRANT_REFRESH: Duration = Duration::from_secs(3);
+
+/// The grants as last read, and whether a read is on its way. Reading a
+/// grant is a synchronous round trip to the OS (`TCCAccessPreflight`, to
+/// tccd), which a busy Mac holds for seconds: it never runs on the main
+/// thread, and the pages read this copy (L6, 2324f3f09: the Sources page read
+/// the three grants on the main thread on every meter tick and the UI hung).
+pub struct GrantCache {
+    snapshot: Mutex<MediaAccessSnapshot>,
+    reading: AtomicBool,
+}
+
+impl GrantCache {
+    pub fn new(initial: MediaAccessSnapshot) -> Self {
+        Self {
+            snapshot: Mutex::new(initial),
+            reading: AtomicBool::new(false),
+        }
+    }
+
+    /// The grants as last read: no OS call.
+    pub fn get(&self) -> MediaAccessSnapshot {
+        *self
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Claims the next read; false while one is on its way (they coalesce).
+    pub fn begin_read(&self) -> bool {
+        !self.reading.swap(true, Ordering::AcqRel)
+    }
+
+    /// The read is in: the pages see it from now.
+    pub fn finish_read(&self, snapshot: MediaAccessSnapshot) {
+        *self
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = snapshot;
+        self.reading.store(false, Ordering::Release);
+    }
+}
+
 /// The grants, the watcher, the deferred restart and Reopen Videorc.
 pub struct Permissions {
+    /// The grants the pages read ([`Self::snapshot`]), refreshed off the
+    /// main thread.
+    grants: GrantCache,
     platform: PermissionPlatform,
     restarts: Arc<PermissionRestarts>,
     watcher: GrantWatcher,
@@ -106,6 +157,8 @@ impl Permissions {
             )
         };
         let permissions = Arc::new(Self {
+            // One read at launch, before the first window draws.
+            grants: GrantCache::new(read_grants(&logger)),
             platform: PermissionPlatform::current(),
             restarts,
             watcher,
@@ -114,6 +167,21 @@ impl Permissions {
             relaunch: AtomicBool::new(false),
         });
         permissions.log_launch_grant();
+
+        // The grants are read again on a slow timer, on the core's runtime
+        // (never per page wake or meter tick).
+        let refresher = Arc::downgrade(&permissions);
+        runtime.spawn(async move {
+            let mut ticks = tokio::time::interval(GRANT_REFRESH);
+            ticks.tick().await;
+            loop {
+                ticks.tick().await;
+                let Some(permissions) = refresher.upgrade() else {
+                    break;
+                };
+                permissions.refresh();
+            }
+        });
 
         // A restart a grant asked for while capture was busy runs once
         // capture is idle.
@@ -139,26 +207,23 @@ impl Permissions {
         permissions
     }
 
-    /// The grant now, `unknown` (logged) when it can't be read.
-    fn status(&self, permission: MediaAccessPermission) -> MediaAccessStatus {
-        platform::current()
-            .media_access(permission)
-            .unwrap_or_else(|error| {
-                self.logger.warn(format!(
-                    "[permissions] Could not read {} access status: {error}",
-                    permission.as_str()
-                ));
-                MediaAccessStatus::Unknown
-            })
+    /// The OS's exact grants as last read, for the permission rows and the
+    /// Clips ring. Never an OS call: safe from a render or a page's wake.
+    pub fn snapshot(&self) -> MediaAccessSnapshot {
+        self.grants.get()
     }
 
-    /// The OS's exact grants, for the permission rows and the Clips ring.
-    pub fn snapshot(&self) -> MediaAccessSnapshot {
-        MediaAccessSnapshot {
-            camera: self.status(MediaAccessPermission::Camera),
-            microphone: self.status(MediaAccessPermission::Microphone),
-            screen: self.status(MediaAccessPermission::Screen),
+    /// Reads the grants again, off the main thread (a blocking task on the
+    /// core's runtime); a read already on its way covers this one.
+    pub fn refresh(self: &Arc<Self>) {
+        if !self.grants.begin_read() {
+            return;
         }
+        let permissions = self.clone();
+        self.runtime.spawn_blocking(move || {
+            let snapshot = read_grants(&permissions.logger);
+            permissions.grants.finish_read(snapshot);
+        });
     }
 
     /// `primeScreenCapturePermission`: launch only logs the screen grant.
@@ -221,7 +286,13 @@ impl Permissions {
                 }
             }
         });
-        cx.spawn(async move |_| job.await.map_err(|error| error.to_string())?)
+        let refresher = self.clone();
+        cx.spawn(async move |_| {
+            let answer = job.await.map_err(|error| error.to_string())?;
+            // The prompt's answer shows at once.
+            refresher.refresh();
+            answer
+        })
     }
 
     /// `openSystemPermissions`: the OS settings page for `pane`, the grant
@@ -240,6 +311,7 @@ impl Permissions {
     /// `recheckPermissionGrants`: the main window came to the front, maybe
     /// from System Settings with the grant made.
     pub fn recheck(self: &Arc<Self>) {
+        self.refresh();
         let permissions = self.clone();
         self.runtime.spawn(async move {
             permissions.watcher.recheck().await;
@@ -345,5 +417,61 @@ impl MediaAccessDeps for Permissions {
 
     fn log(&self, level: Level, message: String) {
         self.logger.log(level, &format!("[permissions] {message}"));
+    }
+}
+
+/// The OS's grants now, `unknown` (logged) for one that can't be read.
+/// Synchronous OS calls: only at launch and from [`Permissions::refresh`]'s
+/// blocking task.
+fn read_grants(logger: &Logger) -> MediaAccessSnapshot {
+    let status = |permission: MediaAccessPermission| {
+        platform::current()
+            .media_access(permission)
+            .unwrap_or_else(|error| {
+                logger.warn(format!(
+                    "[permissions] Could not read {} access status: {error}",
+                    permission.as_str()
+                ));
+                MediaAccessStatus::Unknown
+            })
+    };
+    MediaAccessSnapshot {
+        camera: status(MediaAccessPermission::Camera),
+        microphone: status(MediaAccessPermission::Microphone),
+        screen: status(MediaAccessPermission::Screen),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grants(camera: MediaAccessStatus) -> MediaAccessSnapshot {
+        MediaAccessSnapshot {
+            camera,
+            microphone: MediaAccessStatus::Granted,
+            screen: MediaAccessStatus::Granted,
+        }
+    }
+
+    #[test]
+    fn the_pages_read_the_cached_grants_until_a_read_lands() {
+        let cache = GrantCache::new(grants(MediaAccessStatus::NotDetermined));
+        assert_eq!(cache.get().camera, MediaAccessStatus::NotDetermined);
+        assert!(cache.begin_read());
+        // Still the last read while the new one is on its way.
+        assert_eq!(cache.get().camera, MediaAccessStatus::NotDetermined);
+        cache.finish_read(grants(MediaAccessStatus::Granted));
+        assert_eq!(cache.get().camera, MediaAccessStatus::Granted);
+    }
+
+    #[test]
+    fn reads_coalesce_while_one_is_on_its_way() {
+        let cache = GrantCache::new(grants(MediaAccessStatus::Denied));
+        assert!(cache.begin_read());
+        assert!(!cache.begin_read(), "a second read waits for the first");
+        assert!(!cache.begin_read());
+        cache.finish_read(grants(MediaAccessStatus::Granted));
+        assert!(cache.begin_read(), "the next read after it lands");
     }
 }
