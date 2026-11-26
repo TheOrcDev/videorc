@@ -177,7 +177,11 @@ export async function runBaseline({
       VIDEORC_SMOKE_OUTPUT_DIR: join(base, 'scratch'),
       VIDEORC_USER_DATA_DIR: userDir,
       VIDEORC_DATABASE_PATH: join(userDir, 'videorc.sqlite3'),
-      ...(fakes ? { VIDEORC_MOCK_ACCOUNT: 'baseline', VIDEORC_API_BASE_URL: fakes.origin } : {})
+      // Signed out, a debug backend grants the Developer tier; force Basic,
+      // as the GPUI gallery does (VIDEORC_PREMIUM_FEATURES is downgrade-only).
+      ...(fakes
+        ? { VIDEORC_MOCK_ACCOUNT: 'baseline', VIDEORC_API_BASE_URL: fakes.origin }
+        : { VIDEORC_PREMIUM_FEATURES: 'basic' })
     },
     onLine: (line) => {
       const match = /DevTools listening on (ws:\/\/[^\s]+)/.exec(line)
