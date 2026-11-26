@@ -37,7 +37,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import {
   BackendEventRecorder,
@@ -59,6 +59,7 @@ import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import { requestSmokeCommand, waitForRendererHook } from './lib/smoke-command-client.mjs'
 import { RELOAD_KEEPING_SEED_JS, UI_SETTINGS_READY_JS } from './lib/renderer-profile-seed.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+import { createUiDriver } from './lib/ui-driver.mjs'
 import { removeProfileDir } from './lib/profile-dir-removal.mjs'
 
 const { values: args } = parseArgs({
@@ -73,6 +74,7 @@ const { values: args } = parseArgs({
   strict: true
 })
 
+const gpuiApp = smokeAppIsGpui()
 const seconds = Number(args.seconds)
 if (!Number.isInteger(seconds) || seconds < 5) fail('--seconds must be an integer of at least 5')
 const SEGMENT_SECONDS = 2
@@ -91,7 +93,9 @@ const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-replay-buffer-${Date.now()}`)
 )
-const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-replay-buffer-user-data-'))
+const userDataDir = gpuiApp
+  ? join(outputDirectory, 'user-data')
+  : mkdtempSync(join(tmpdir(), 'videorc-replay-buffer-user-data-'))
 const reportPath = resolve(args.report ?? join(outputDirectory, 'replay-buffer-report.json'))
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = siblingFfprobePath(ffmpegPath) ?? 'ffprobe'
@@ -121,6 +125,23 @@ let remote = null
 let recorder = null
 
 async function seedRendererProfile(smoke) {
+  if (gpuiApp) {
+    await requestSmokeCommand(
+      smoke,
+      'studio-capture-configure',
+      {
+        config: {
+          video: VIDEO_PROFILE,
+          layout: { layoutPreset: 'screen-only' },
+          recordEnabled: true,
+          streamEnabled: false,
+          replayBuffer: { enabled: true, explicit: false }
+        }
+      },
+      { timeoutMs }
+    )
+    return
+  }
   await requestSmokeCommand(
     smoke,
     'eval-js',
@@ -162,6 +183,17 @@ async function waitForBackendState(method, predicate, label, waitMs = timeoutMs)
 }
 
 async function setReplayBuffer(smoke, armed) {
+  if (gpuiApp) {
+    const outcome = await requestSmokeCommand(
+      smoke,
+      'studio-replay-buffer',
+      { armed, seconds },
+      { timeoutMs }
+    )
+    if (outcome.armed !== armed || outcome.seconds !== seconds)
+      fail('Studio did not acknowledge the buffer switch')
+    return
+  }
   await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer', { timeoutMs })
   const outcome = await requestSmokeCommand(
     smoke,
@@ -185,7 +217,7 @@ function replayOutcome(saveLabel, predicate = () => true) {
 
 /** The clip files in `<recordings>/Clips`, to prove a refused press wrote nothing. */
 function clipFiles() {
-  const dir = join(outputDirectory, 'app-data', 'recordings', 'Clips')
+  const dir = join(gpuiApp ? userDataDir : join(outputDirectory, 'app-data'), 'recordings', 'Clips')
   return existsSync(dir) ? readdirSync(dir).filter((name) => name.endsWith('.mp4')) : []
 }
 
@@ -213,6 +245,9 @@ async function verifyReplay(event, label, clipSeconds) {
     ffprobePath,
     intendedFps: VIDEO_PROFILE.fps,
     expectAudio: true,
+    // This fixture explicitly disables the native microphone at launch. The
+    // AAC bus must be continuous, but digital silence is expected content.
+    microphoneAvailable: false,
     gates: {
       requireMotion: true,
       requireColorTags: true,
@@ -358,17 +393,19 @@ try {
   if (rows?.items?.some((item) => item.id === ringOn.sessionId)) {
     fail(`the buffer-only session ${ringOn.sessionId} has a Library row`)
   }
-  const statusBar = await requestSmokeCommand(
-    smoke,
-    'eval-js',
-    {
-      code: `
+  const statusBar = gpuiApp
+    ? { result: { state: await createUiDriver(smoke).readText({ id: 'open-health' }) } }
+    : await requestSmokeCommand(
+        smoke,
+        'eval-js',
+        {
+          code: `
         const state = document.querySelector('[data-slot="status-bar-state"]')?.textContent ?? '';
         return { state };
       `
-    },
-    { timeoutMs }
-  )
+        },
+        { timeoutMs }
+      )
   if (/Recording|On air/.test(statusBar?.result?.state ?? '')) {
     fail(`the status bar calls the ring a session: ${JSON.stringify(statusBar.result)}`)
   }
