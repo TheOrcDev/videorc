@@ -689,25 +689,31 @@ impl DestinationsPanel {
             if dest.quality.options.len() > 1 {
                 let quality = dest.quality.clone();
                 let dest_id = dest.id.clone();
+                // Electron's card holds the same `StreamQualityControl` as the
+                // page (`inherit`): a vertical field, the control filling the
+                // card. A side-by-side row left its label one letter wide.
+                let control = quality::quality_control(
+                    format!("dest-quality-control-{}", dest.id),
+                    &quality,
+                    dest.disabled,
+                    {
+                        let entity = entity.clone();
+                        move |value, _, cx| {
+                            entity.update(cx, |this, _| {
+                                this.set_destination_quality(dest_id.clone(), value.to_string())
+                            })
+                        }
+                    },
+                );
                 detail = detail.child(
-                    SettingsRow::new(
-                        format!("dest-quality-{}", dest.id),
-                        page_copy::OUTPUT_QUALITY,
-                    )
-                    .description(quality.description.clone())
-                    .child(quality::quality_control(
-                        format!("dest-quality-control-{}", dest.id),
-                        &quality,
-                        dest.disabled,
-                        {
-                            let entity = entity.clone();
-                            move |value, _, cx| {
-                                entity.update(cx, |this, _| {
-                                    this.set_destination_quality(dest_id.clone(), value.to_string())
-                                })
-                            }
-                        },
-                    )),
+                    div()
+                        .id(SharedString::from(format!("dest-quality-{}", dest.id)))
+                        .child(quality::quality_field(
+                            t,
+                            control,
+                            quality.description.clone(),
+                            dest.disabled,
+                        )),
                 );
             }
             if let Some(oauth) = &dest.oauth {
