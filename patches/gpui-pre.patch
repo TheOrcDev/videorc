@@ -1,10 +1,14 @@
-# gpui-pre 0.3.14, two Videorc patches. Drop each when a gpui-pre release
+# gpui-pre 0.3.14, three Videorc patches. Drop each when a gpui-pre release
 # carries the same lines upstream.
 # 1. Print AccessKit node bounds in debug_a11y_tree_json (plan 260 S2.5 UI
 #    driver gap 1).
 # 2. Window::activate_a11y_in_process: build the accessibility tree without
 #    assistive technology, for the in-process UI driver on Linux, where the
 #    switch is the desktop's AT-SPI flag (plan 260, L6).
+# 3. NativeView::set_ignores_mouse: mouse input over a native view, the scroll
+#    wheel included, goes to what is behind it (AppKit's
+#    setIgnoresMouseEvents), so the wheel over the docked Preview scrolls the
+#    page as in Electron (plan 260, L1).
 #
 --- a/src/window/a11y/debug.rs
 +++ b/src/window/a11y/debug.rs
@@ -66,3 +70,68 @@
      }
  
      /// Debug representation of the last frame's accessibility information.
+--- a/src/window/native_view.rs
++++ b/src/window/native_view.rs
+@@ -76,6 +76,8 @@
+     /// The hitbox of the occurrence that shows the view, which is the one
+     /// painted first in a frame that paints the view more than once.
+     shown_hitbox: Cell<Option<HitboxId>>,
++    /// Videorc plan 260 (patch): mouse input passes through the view.
++    ignores_mouse: Cell<bool>,
+     reserved_actions: RefCell<HashSet<TypeId>>,
+     _attachment: Box<dyn Any>,
+ }
+@@ -111,6 +113,7 @@
+             focus_handle: cx.focus_handle(),
+             background: Cell::new(Hsla::transparent_black()),
+             shown_hitbox: Cell::new(None),
++            ignores_mouse: Cell::new(false),
+             reserved_actions: RefCell::default(),
+             _attachment: attachment,
+         });
+@@ -133,6 +136,21 @@
+             return;
+         }
+         // The color is part of what the element paints.
++        let window = self.0.window;
++        cx.defer(move |cx| {
++            window.update(cx, |_, window, _| window.refresh()).ok();
++        });
++    }
++
++    /// Videorc plan 260 (patch): lets mouse input over the view, the scroll
++    /// wheel included, go to what is behind it, as if the view were not
++    /// there, like AppKit's `setIgnoresMouseEvents:`. For a view that only
++    /// shows something, such as video, inside a scrolling page.
++    pub fn set_ignores_mouse(&self, ignores: bool, cx: &mut App) {
++        if self.0.ignores_mouse.replace(ignores) == ignores {
++            return;
++        }
++        // The view's hitbox changes with the next frame.
+         let window = self.0.window;
+         cx.defer(move |cx| {
+             window.update(cx, |_, window, _| window.refresh()).ok();
+@@ -225,7 +243,7 @@
+                 .any(|hitbox| hitbox.id == shown)
+         });
+         let shows_view = is_visible && !is_shown_elsewhere;
+-        let behavior = if shows_view {
++        let behavior = if shows_view && !state.ignores_mouse.get() {
+             HitboxBehavior::BlockMouse
+         } else {
+             HitboxBehavior::Normal
+@@ -319,6 +337,14 @@
+             .iter()
+             .find(|native_view| native_view.hitbox_id == *topmost)
+             .map(|native_view| native_view.id)
++            // Videorc plan 260 (patch): a view that ignores the mouse is
++            // reached by nothing; GPUI's own content takes the event.
++            .filter(|id| {
++                !self.native_views.iter().any(|view| {
++                    view.upgrade()
++                        .is_some_and(|view| view.id == *id && view.ignores_mouse.get())
++                })
++            })
+     }
+ 
+     /// Dispatches a key press that the focused native view has not seen yet, if

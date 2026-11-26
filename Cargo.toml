@@ -59,7 +59,9 @@ qrcode = { version = "0.14", default-features = false }
 # 2. gpui-pre 0.3.14: AccessKit node bounds in `debug_a11y_tree_json` so the
 #    UI driver can click and focus (plan 260 S2.5 gap 1), and
 #    `Window::activate_a11y_in_process` so the driver builds the tree on Linux,
-#    where the switch is the desktop's AT-SPI flag (L6). The diff is
+#    where the switch is the desktop's AT-SPI flag (L6), and
+#    `NativeView::set_ignores_mouse` so the wheel over the docked Preview
+#    scrolls the page as in Electron (L1). The diff is
 #    `patches/gpui-pre.patch`. Drop each part when a gpui-pre release has it.
 [patch.crates-io]
 gpui-pre-apple = { path = "patches/gpui-pre-apple" }

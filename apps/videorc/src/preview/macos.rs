@@ -43,6 +43,10 @@ impl HostView {
         // What shows for a frame or two while GPUI moves the view: the
         // slot's own black.
         native.set_background(hsla(DARK.video_ground), cx);
+        // The video takes no mouse input, as Electron's preview window
+        // (`setIgnoresMouseEvents`): the scroll wheel over the docked slot
+        // scrolls the page, and a press reaches what is behind the slot.
+        native.set_ignores_mouse(true, cx);
         Ok(Self { view, native })
     }
 }
