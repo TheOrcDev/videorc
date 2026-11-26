@@ -621,9 +621,9 @@ fn main() -> Result<()> {
         cx.on_app_quit(move |cx| {
             // The preview releases its lease and destroys its surface while
             // the backend still answers.
-            if let Some(preview) = quit_preview.borrow_mut().take() {
+            app::remote_keys::stop_taken_preview(&quit_preview, |preview| {
                 preview.update(cx, |preview, cx| preview.stop(cx));
-            }
+            });
             quit_keys.release_all();
             sleep::release(&quit_guard);
             stop_backend(&quit_supervisor, &runtime_handle);
