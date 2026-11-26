@@ -19,6 +19,19 @@ pub(super) struct Native {
     pub before_frame: u64,
     last_status: Option<PlaybackStatus>,
 }
+/// The frames that reached the picture: on macOS the layer's presented
+/// count (a hidden layer still presents); on Windows and Linux the frames the
+/// presenter took, since a hidden presenter only acknowledges them and its
+/// presented count would wait for the show that waits for it.
+#[cfg(target_os = "macos")]
+fn reached_frames(view: &PlaybackView) -> u64 {
+    view.presented_frames
+}
+#[cfg(not(target_os = "macos"))]
+fn reached_frames(view: &PlaybackView) -> u64 {
+    view.delivered_frames
+}
+
 impl Drop for Native {
     fn drop(&mut self) {
         if let Some(element) = self.element.take() {
@@ -137,7 +150,7 @@ impl Player {
         let Some(session) = &self.session else {
             return;
         };
-        native.before_frame = view.presented_frames;
+        native.before_frame = reached_frames(&view);
         element.set_visible(false);
         self.opening_from = view.status.playback_id;
         self.need_open = false;
@@ -182,7 +195,7 @@ impl Player {
             );
         if let Some(native) = self.native.as_mut() {
             if let Some(element) = native.element.as_mut() {
-                element.set_visible(ready && view.presented_frames > native.before_frame);
+                element.set_visible(ready && reached_frames(&view) > native.before_frame);
             }
         }
         let resuming = ready && self.resume.is_some();

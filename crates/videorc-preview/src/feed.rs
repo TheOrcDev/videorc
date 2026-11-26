@@ -366,6 +366,11 @@ pub struct Telemetry {
     /// S2.3c: frames the layer's presenter committed (the texture route's
     /// frames count in `presented` too; the route switch waits on this one).
     pub layer_presented: u64,
+    /// Frames the layer's presenter took, shown or hidden: a hidden presenter
+    /// only acknowledges a frame, so `layer_presented` waits for something to
+    /// show it. What waits for a first frame before showing the presenter
+    /// (the Library player) waits on this one.
+    pub layer_delivered: u64,
     /// S2.3c: frames bound on the texture route.
     pub texture_frames: u64,
     /// S2.3c: the texture route's sink is set.

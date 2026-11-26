@@ -66,6 +66,10 @@ pub struct PlaybackView {
     /// per-frame id on this side).
     pub presented_frame_id: u64,
     pub presented_frames: u64,
+    /// Frames the presenter took, shown or hidden (`layer_delivered`): the
+    /// player shows its presenter once this passes the count at its open,
+    /// since a hidden presenter's frames never count as presented.
+    pub delivered_frames: u64,
     pub connected: bool,
     /// The last failure of the feed's own (a socket, the ring), for the log;
     /// the backend's refusals are in `status`.
@@ -78,6 +82,7 @@ impl Default for PlaybackView {
             status: PlaybackStatus::closed(String::new()),
             presented_frame_id: 0,
             presented_frames: 0,
+            delivered_frames: 0,
             connected: false,
             last_error: None,
         }
@@ -110,6 +115,10 @@ pub enum PlaybackCommand {
     Close,
     /// Where the leased frames go (the presenter, or none while it is away).
     Sinks(CpuSinks),
+    /// The latest frame again, even one the presenter already took: a hidden
+    /// presenter only acknowledges frames, so one shown while the recording
+    /// is paused would otherwise wait for a frame that never comes.
+    Kick,
     Stop,
 }
 
@@ -311,6 +320,10 @@ async fn session(
                         source.set_sinks(sinks.clone());
                         continue;
                     }
+                    PlaybackCommand::Kick => {
+                        source.kick();
+                        continue;
+                    }
                     PlaybackCommand::Open { session_id, max_width, max_height } => {
                         control
                             .call::<PlaybackOpen>(&PlaybackOpenParams {
@@ -370,14 +383,19 @@ async fn session(
                 }
             }
             _ = tick.tick() => {
-                let presented = telemetry
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .layer_presented;
-                if presented != view.borrow().presented_frames {
+                let (presented, delivered) = {
+                    let t = telemetry.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    (t.layer_presented, t.layer_delivered)
+                };
+                let (was_presented, was_delivered) = {
+                    let v = view.borrow();
+                    (v.presented_frames, v.delivered_frames)
+                };
+                if presented != was_presented || delivered != was_delivered {
                     view.send_modify(|v| {
                         v.presented_frames = presented;
                         v.presented_frame_id = presented;
+                        v.delivered_frames = delivered;
                     });
                 }
                 // Before the first frame the ring has no size: ask again
@@ -520,10 +538,16 @@ impl PlaybackElement {
 
     /// The host's visibility decision (no frame yet, the player closed).
     pub fn set_visible(&mut self, visible: bool) {
+        let shown_now = visible && !self.visible;
         self.visible = visible;
         #[cfg(target_os = "linux")]
         if let Some(presenter) = self.presenter.as_mut() {
             presenter.set_hidden(!visible);
+        }
+        // Shown: the frame it only acknowledged while hidden, again (it goes
+        // to the presenter after the unhide, on the same command channel).
+        if shown_now {
+            self.send(PlaybackCommand::Kick);
         }
     }
 
