@@ -124,7 +124,13 @@ pub fn picker_trigger(theme: &Theme) -> impl FnOnce(SelectTriggerState) -> AnyEl
             .when(!state.disabled, |trigger| {
                 trigger.hover(move |style| style.bg(unlit_ink))
             })
-            .child(div().min_w_0().truncate().child(caps(words)))
+            // A pick (a device's name) can be long: tracked, cut with a
+            // tracked "…" (`TrackedText::truncate`).
+            .child(
+                div()
+                    .min_w_0()
+                    .child(tracked(words).truncate("lcd-picker-words")),
+            )
             .child(pixel_chevron(ink))
             .into_any_element()
     }
