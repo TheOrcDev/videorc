@@ -48,6 +48,11 @@ pub(crate) fn remote_displays(
             if let Some(native) = crate::platform::macos::remote_display(u64::from(display.id())) {
                 return native;
             }
+            #[cfg(target_os = "windows")]
+            if let Some(native) = crate::platform::windows::remote_display(u64::from(display.id()))
+            {
+                return native;
+            }
             videorc_app_core::studio::remote_screens::RemoteDisplay {
                 id: u64::from(display.id()).to_string(),
                 name: String::new(),

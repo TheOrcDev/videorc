@@ -233,6 +233,19 @@ impl Platform for Linux {
         x11_place(x11_window_id(window)?, frame)
     }
 
+    fn set_remote_window_frame(&self, window: &Window, frame: ScreenFrame) -> OsResult<()> {
+        let scale = f64::from(window.scale_factor());
+        self.set_window_frame(
+            window,
+            ScreenFrame {
+                x: frame.x * scale,
+                y: frame.y * scale,
+                width: frame.width * scale,
+                height: frame.height * scale,
+            },
+        )
+    }
+
     fn show_window(&self, window: &Window, _focus: bool) -> OsResult<()> {
         use x11rb::connection::Connection;
         use x11rb::protocol::xproto::ConnectionExt;
@@ -285,10 +298,10 @@ impl Platform for Linux {
             .reply()
             .map_err(|e| e.to_string())?;
         Ok(videorc_app_core::desktop::window_frames::Rect::new(
-            f64::from(position.dst_x),
-            f64::from(position.dst_y),
-            f64::from(geometry.width),
-            f64::from(geometry.height),
+            f64::from(position.dst_x) / f64::from(window.scale_factor()),
+            f64::from(position.dst_y) / f64::from(window.scale_factor()),
+            f64::from(geometry.width) / f64::from(window.scale_factor()),
+            f64::from(geometry.height) / f64::from(window.scale_factor()),
         ))
     }
 

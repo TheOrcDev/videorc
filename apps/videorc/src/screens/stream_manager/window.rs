@@ -325,14 +325,22 @@ pub fn screen_swap(
         return refused(copy::WINDOW_MISSING);
     };
     let moved = handle.update(cx, |_, window, cx| {
-        window.resize(size(px(frame.width as f32), px(frame.height as f32)));
+        let scale = if cfg!(target_os = "windows") {
+            f64::from(window.scale_factor())
+        } else {
+            1.
+        };
+        window.resize(size(
+            px((frame.width / scale) as f32),
+            px((frame.height / scale) as f32),
+        ));
         let target = platform::ScreenFrame {
             x: frame.x,
             y: frame.y,
             width: frame.width,
             height: frame.height,
         };
-        platform::current().set_window_frame(window, target)?;
+        platform::current().set_remote_window_frame(window, target)?;
         platform::current().show_window(window, focus)?;
         if focus {
             window.activate_window();

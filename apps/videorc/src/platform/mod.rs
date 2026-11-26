@@ -65,6 +65,11 @@ pub trait Platform: Send + Sync {
         ))
     }
 
+    /// Screen-key placement in the coordinates returned by `window_frame`.
+    fn set_remote_window_frame(&self, window: &Window, frame: ScreenFrame) -> OsResult<()> {
+        self.set_window_frame(window, frame)
+    }
+
     /// Global screen coordinates, matching the Screen key's placement API.
     fn window_frame(
         &self,

@@ -60,6 +60,37 @@ fn hwnd(window: &Window) -> OsResult<HWND> {
     Ok(handle.hwnd.get() as HWND)
 }
 
+/// Use native monitor coordinates for remote placement, including mixed-DPI
+/// desktops. GPUI's per-display logical coordinates cannot be passed directly
+/// to SetWindowPos. IDs and enumeration order still come from GPUI.
+pub fn remote_display(id: u64) -> Option<videorc_app_core::studio::remote_screens::RemoteDisplay> {
+    use videorc_app_core::desktop::window_frames::Rect;
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: GPUI display IDs are live HMONITORs; info has its required size.
+    if unsafe { GetMonitorInfoW(id as usize as _, &mut info) } == 0 {
+        return None;
+    }
+    let rect = |r: windows_sys::Win32::Foundation::RECT| {
+        Rect::new(
+            f64::from(r.left),
+            f64::from(r.top),
+            f64::from(r.right - r.left),
+            f64::from(r.bottom - r.top),
+        )
+    };
+    Some(videorc_app_core::studio::remote_screens::RemoteDisplay {
+        id: id.to_string(),
+        name: String::new(),
+        bounds: rect(info.rcMonitor),
+        work_area: rect(info.rcWork),
+        primary: info.dwFlags & 1 != 0,
+    })
+}
+
 pub struct WindowsOs;
 
 impl Platform for WindowsOs {
@@ -128,6 +159,26 @@ impl Platform for WindowsOs {
             return Err("SetWindowPos(place) failed".into());
         }
         Ok(())
+    }
+
+    fn window_frame(
+        &self,
+        window: &Window,
+    ) -> OsResult<videorc_app_core::desktop::window_frames::Rect> {
+        use windows_sys::Win32::Foundation::RECT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+        let mut rect = RECT::default();
+        // SAFETY: live HWND and writable RECT. Read native coordinates, not
+        // GPUI's cached origin (the WM_MOVE callback runs after this intent).
+        if unsafe { GetWindowRect(hwnd(window)?, &mut rect) } == 0 {
+            return Err("GetWindowRect failed".into());
+        }
+        Ok(videorc_app_core::desktop::window_frames::Rect::new(
+            f64::from(rect.left),
+            f64::from(rect.top),
+            f64::from(rect.right - rect.left),
+            f64::from(rect.bottom - rect.top),
+        ))
     }
 
     fn window_shown(&self, window: &Window) -> bool {
