@@ -838,9 +838,13 @@ impl StreamManager {
                     .w(px(right_pane_width(width)))
                     .border_l_1()
                     .border_color(border)
+                    // A flex row, so the tabs hug their triggers at the left
+                    // (`TabsList` is `inline-flex w-fit`), not the pane width.
                     .child(
                         div()
                             .flex_none()
+                            .flex()
+                            .items_center()
                             .px(px(8.))
                             .py(px(6.))
                             .border_b_1()
