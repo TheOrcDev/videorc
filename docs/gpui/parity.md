@@ -1026,60 +1026,60 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P681 | "Setup" / "Upcoming" / "Discord" view strip | Switches Destinations view; reopens the last one used | `renderer/components/tabs/streaming-tab.tsx:125 (labels renderer/lib/livestream-tabs.ts:16)` | [ ] | [ ] | [ ] |
-| P682 | "Loading upcoming streams…" / "Loading Discord settings…" / "Loading guests…" | Lazy-view loading status | `renderer/components/tabs/streaming-tab.tsx:120,138,143` | [ ] | [ ] | [ ] |
+| P681 | "Setup" / "Upcoming" / "Discord" view strip | Switches Destinations view; reopens the last one used | `renderer/components/tabs/streaming-tab.tsx:125 (labels renderer/lib/livestream-tabs.ts:16)` | [x] | [ ] | [ ] |
+| P682 | "Loading upcoming streams…" / "Loading Discord settings…" / "Loading guests…" | Lazy-view loading status | `renderer/components/tabs/streaming-tab.tsx:120,138,143` | [x] | [ ] | [ ] |
 | P683 | Linux keyring alert (LinuxSetupAlert) | Says what to install before Sign in fails *(Linux only (apps/desktop/src/renderer/src/hooks/use-linux-desktop-check.ts:22))* | `renderer/components/tabs/streaming-tab.tsx:310` | n/a | n/a | [ ] |
-| P684 | Livestreaming LockAlert | Entitlement lock reason and unlock action | `renderer/components/tabs/streaming-tab.tsx:312` | [ ] | [ ] | [ ] |
-| P685 | "Some destinations aren’t on air" banner | Lists failed/reconnecting/not-receiving/skipped destinations while live | `renderer/components/tabs/streaming-tab.tsx:508` | [ ] | [ ] | [ ] |
-| P686 | "End livestream" (banner) | Opens End livestream dialog for whole session | `renderer/components/tabs/streaming-tab.tsx:541` | [ ] | [ ] | [ ] |
-| P687 | "Continue streaming" (banner) | Dismisses this set of problems until new ones | `renderer/components/tabs/streaming-tab.tsx:544` | [ ] | [ ] | [ ] |
-| P688 | Session lock alert | "Destinations, stream quality, Videorc Cloud and stream details" locked while live | `renderer/components/tabs/streaming-tab.tsx:325,454` | [ ] | [ ] | [ ] |
-| P689 | Scheduled-event alert + "Use instant broadcast" | Drops the chosen scheduled event from the destination | `renderer/components/tabs/streaming-tab.tsx:327,346` | [ ] | [ ] | [ ] |
-| P690 | "Destinations" section + cap notice alert | Lists destination cards; explains destination cap | `renderer/components/tabs/streaming-tab.tsx:353,358` | [ ] | [ ] | [ ] |
-| P691 | Auto-open first destination needing setup / open-by-name | Expands, scrolls and focuses a destination card | `renderer/components/tabs/streaming-tab.tsx:265,277,285` | [ ] | [ ] | [ ] |
+| P684 | Livestreaming LockAlert | Entitlement lock reason and unlock action | `renderer/components/tabs/streaming-tab.tsx:312` | [x] | [ ] | [ ] |
+| P685 | "Some destinations aren’t on air" banner | Lists failed/reconnecting/not-receiving/skipped destinations while live | `renderer/components/tabs/streaming-tab.tsx:508` | [x] | [ ] | [ ] |
+| P686 | "End livestream" (banner) | Opens End livestream dialog for whole session | `renderer/components/tabs/streaming-tab.tsx:541` | [x] | [ ] | [ ] |
+| P687 | "Continue streaming" (banner) | Dismisses this set of problems until new ones | `renderer/components/tabs/streaming-tab.tsx:544` | [x] | [ ] | [ ] |
+| P688 | Session lock alert | "Destinations, stream quality, Videorc Cloud and stream details" locked while live | `renderer/components/tabs/streaming-tab.tsx:325,454` | [x] | [ ] | [ ] |
+| P689 | Scheduled-event alert + "Use instant broadcast" | Drops the chosen scheduled event from the destination | `renderer/components/tabs/streaming-tab.tsx:327,346` | [x] | [ ] | [ ] |
+| P690 | "Destinations" section + cap notice alert | Lists destination cards; explains destination cap | `renderer/components/tabs/streaming-tab.tsx:353,358` | [x] | [ ] | [ ] |
+| P691 | Auto-open first destination needing setup / open-by-name | Expands, scrolls and focuses a destination card | `renderer/components/tabs/streaming-tab.tsx:265,277,285` | [x] | [ ] | [ ] |
 
 ### Destination card (destination-card.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P692 | Row title button (destination label) | Click/Enter/Space expands or collapses the card | `renderer/components/streaming/destination-card.tsx:418` | [ ] | [ ] | [ ] |
-| P693 | Row context ("9:16 · account" / "Stream key") | Shows orientation and how it connects | `renderer/components/streaming/destination-card.tsx:329` | [ ] | [ ] | [ ] |
-| P694 | State badge ("Needs setup", "Prepared", "API paused", runtime state) | Shows idle/saved/live state of destination | `renderer/components/streaming/destination-card.tsx:423` | [ ] | [ ] | [ ] |
-| P695 | "Falling behind" badge + uplink line | Uplink overflowed; viewers skipped seconds | `renderer/components/streaming/destination-card.tsx:424,463` | [ ] | [ ] | [ ] |
-| P696 | Quality tag badge | Names a per-destination quality override | `renderer/components/streaming/destination-card.tsx:429` | [ ] | [ ] | [ ] |
-| P697 | "Enable {label}" switch | Turns destination on/off; held off by cap | `renderer/components/streaming/destination-card.tsx:439` | [ ] | [ ] | [ ] |
-| P698 | Chevron | Shows expanded state | `renderer/components/streaming/destination-card.tsx:447` | [ ] | [ ] | [ ] |
-| P699 | Status message / lock reason text | Runtime message or why switch is locked | `renderer/components/streaming/destination-card.tsx:460,467` | [ ] | [ ] | [ ] |
-| P700 | "Stream quality" (with "Use default") | Per-destination quality override | `renderer/components/streaming/destination-card.tsx:472` | [ ] | [ ] | [ ] |
-| P701 | "URL mode" ("Server + key" / "Full URL") | Custom RTMP entry mode | `renderer/components/streaming/destination-card.tsx:481` | [ ] | [ ] | [ ] |
-| P702 | "Connect with" ("Sign in"/"Stream key"; X: "Sign in · Chat works"/"Stream key · No chat") | Picks OAuth or manual key | `renderer/components/streaming/destination-card.tsx:494` | [ ] | [ ] | [ ] |
-| P703 | Key-only note (Facebook / "{platform} uses a stream key.") | Explains sign-in unavailable | `renderer/components/streaming/destination-card.tsx:505` | [ ] | [ ] | [ ] |
-| P704 | Key guidance + external link (YouTube Studio, Twitch dashboard, Kick dashboard, Media Studio, TikTok LIVE Center, Live Producer) | Where to find the stream key | `renderer/components/streaming/destination-card.tsx:515,786` | [ ] | [ ] | [ ] |
-| P705 | YouTube quota paused alert + "Use stream key" + Studio link | Switch to key while API quota paused | `renderer/components/streaming/destination-card.tsx:529` | [ ] | [ ] | [ ] |
-| P706 | "Server URL" / "Full RTMP URL" field | Edits server URL; validated on blur; Enter saves full URL | `renderer/components/streaming/destination-card.tsx:570` | [ ] | [ ] | [ ] |
-| P707 | "Save URL" | Saves full RTMP URL securely | `renderer/components/streaming/destination-card.tsx:606` | [ ] | [ ] | [ ] |
-| P708 | "Clear" (URL/key) | Asks to remove saved credential | `renderer/components/streaming/destination-card.tsx:614,666` | [ ] | [ ] | [ ] |
-| P709 | "Stream key" password field (Enter saves) | Paste key; "Saved securely · ends ••••" hint | `renderer/components/streaming/destination-card.tsx:635` | [ ] | [ ] | [ ] |
-| P710 | "Save key" | Saves key (confirms replace or platform mismatch) | `renderer/components/streaming/destination-card.tsx:658` | [ ] | [ ] | [ ] |
-| P711 | "Restore previous {stream key/RTMP URL}" | Restores last replaced credential | `renderer/components/streaming/destination-card.tsx:684` | [ ] | [ ] | [ ] |
-| P712 | Dialog "Replace the … ?" / "Save this … to …?" | Confirms key save; warns on mismatched platform | `renderer/components/streaming/destination-card.tsx:698` | [ ] | [ ] | [ ] |
-| P713 | Dialog "Remove the {label} {credential}?" | Confirms clearing credential (kept as previous) | `renderer/components/streaming/destination-card.tsx:729` | [ ] | [ ] | [ ] |
-| P714 | "Connect {platform}" | Starts OAuth (YouTube opens consent first) | `renderer/components/streaming/destination-card.tsx:1130` | [ ] | [ ] | [ ] |
+| P692 | Row title button (destination label) | Click/Enter/Space expands or collapses the card | `renderer/components/streaming/destination-card.tsx:418` | [x] | [ ] | [ ] |
+| P693 | Row context ("9:16 · account" / "Stream key") | Shows orientation and how it connects | `renderer/components/streaming/destination-card.tsx:329` | [x] | [ ] | [ ] |
+| P694 | State badge ("Needs setup", "Prepared", "API paused", runtime state) | Shows idle/saved/live state of destination | `renderer/components/streaming/destination-card.tsx:423` | [x] | [ ] | [ ] |
+| P695 | "Falling behind" badge + uplink line | Uplink overflowed; viewers skipped seconds | `renderer/components/streaming/destination-card.tsx:424,463` | [x] | [ ] | [ ] |
+| P696 | Quality tag badge | Names a per-destination quality override | `renderer/components/streaming/destination-card.tsx:429` | [x] | [ ] | [ ] |
+| P697 | "Enable {label}" switch | Turns destination on/off; held off by cap | `renderer/components/streaming/destination-card.tsx:439` | [x] | [ ] | [ ] |
+| P698 | Chevron | Shows expanded state | `renderer/components/streaming/destination-card.tsx:447` | [x] | [ ] | [ ] |
+| P699 | Status message / lock reason text | Runtime message or why switch is locked | `renderer/components/streaming/destination-card.tsx:460,467` | [x] | [ ] | [ ] |
+| P700 | "Stream quality" (with "Use default") | Per-destination quality override | `renderer/components/streaming/destination-card.tsx:472` | [x] | [ ] | [ ] |
+| P701 | "URL mode" ("Server + key" / "Full URL") | Custom RTMP entry mode | `renderer/components/streaming/destination-card.tsx:481` | [x] | [ ] | [ ] |
+| P702 | "Connect with" ("Sign in"/"Stream key"; X: "Sign in · Chat works"/"Stream key · No chat") | Picks OAuth or manual key | `renderer/components/streaming/destination-card.tsx:494` | [x] | [ ] | [ ] |
+| P703 | Key-only note (Facebook / "{platform} uses a stream key.") | Explains sign-in unavailable | `renderer/components/streaming/destination-card.tsx:505` | [x] | [ ] | [ ] |
+| P704 | Key guidance + external link (YouTube Studio, Twitch dashboard, Kick dashboard, Media Studio, TikTok LIVE Center, Live Producer) | Where to find the stream key | `renderer/components/streaming/destination-card.tsx:515,786` | [x] | [ ] | [ ] |
+| P705 | YouTube quota paused alert + "Use stream key" + Studio link | Switch to key while API quota paused | `renderer/components/streaming/destination-card.tsx:529` | [x] | [ ] | [ ] |
+| P706 | "Server URL" / "Full RTMP URL" field | Edits server URL; validated on blur; Enter saves full URL | `renderer/components/streaming/destination-card.tsx:570` | [x] | [ ] | [ ] |
+| P707 | "Save URL" | Saves full RTMP URL securely | `renderer/components/streaming/destination-card.tsx:606` | [x] | [ ] | [ ] |
+| P708 | "Clear" (URL/key) | Asks to remove saved credential | `renderer/components/streaming/destination-card.tsx:614,666` | [x] | [ ] | [ ] |
+| P709 | "Stream key" password field (Enter saves) | Paste key; "Saved securely · ends ••••" hint | `renderer/components/streaming/destination-card.tsx:635` | [x] | [ ] | [ ] |
+| P710 | "Save key" | Saves key (confirms replace or platform mismatch) | `renderer/components/streaming/destination-card.tsx:658` | [x] | [ ] | [ ] |
+| P711 | "Restore previous {stream key/RTMP URL}" | Restores last replaced credential | `renderer/components/streaming/destination-card.tsx:684` | [x] | [ ] | [ ] |
+| P712 | Dialog "Replace the … ?" / "Save this … to …?" | Confirms key save; warns on mismatched platform | `renderer/components/streaming/destination-card.tsx:698` | [x] | [ ] | [ ] |
+| P713 | Dialog "Remove the {label} {credential}?" | Confirms clearing credential (kept as previous) | `renderer/components/streaming/destination-card.tsx:729` | [x] | [ ] | [ ] |
+| P714 | "Connect {platform}" | Starts OAuth (YouTube opens consent first) | `renderer/components/streaming/destination-card.tsx:1130` | [x] | [ ] | [ ] |
 | P715 | "Environment override" badge | OAuth client from env var *(dev builds only)* | `renderer/components/streaming/destination-card.tsx:1146` | dev | dev | dev |
-| P716 | Sign-in pending: "Waiting for your browser…", "Copy link", "Cancel" | Shows browser wait; copy auth link; stop waiting | `renderer/components/streaming/destination-card.tsx:939` | [ ] | [ ] | [ ] |
-| P717 | Account row (avatar, name, handle, green "Connected" dot tooltip) | Signed-in account and last check on hover | `renderer/components/streaming/destination-card.tsx:1186` | [ ] | [ ] | [ ] |
-| P718 | "Needs reconnect" badge + "Reconnect" | Re-runs sign-in for lost access | `renderer/components/streaming/destination-card.tsx:1209,1214,1244` | [ ] | [ ] | [ ] |
-| P719 | "Disconnect" | Asks then signs account out | `renderer/components/streaming/destination-card.tsx:1219` | [ ] | [ ] | [ ] |
-| P720 | Dialog "Disconnect {platform}?" | Confirms sign-out (YouTube covers Vertical too) | `renderer/components/streaming/destination-card.tsx:1226` | [ ] | [ ] | [ ] |
-| P721 | Permissions row ("Reconnect" / "Reconnect Twitch") | Requests missing moderation/Twitch activity scopes | `renderer/components/streaming/destination-card.tsx:1249` | [ ] | [ ] | [ ] |
-| P722 | "Same account and channel as {label}." | Vertical twin shares YouTube account | `renderer/components/streaming/destination-card.tsx:1267` | [ ] | [ ] | [ ] |
-| P723 | "Channel" select | Picks YouTube channel for the account | `renderer/components/streaming/destination-card.tsx:1272` | [ ] | [ ] | [ ] |
-| P724 | "Refresh channels" icon button | Reloads YouTube channel list | `renderer/components/streaming/destination-card.tsx:1304` | [ ] | [ ] | [ ] |
-| P725 | X Live badge ("X Live ready", "Authorization needed", etc.) | X native broadcast capability state | `renderer/components/streaming/destination-card.tsx:1327` | [ ] | [ ] | [ ] |
-| P726 | "Check again" | Re-checks X native capability | `renderer/components/streaming/destination-card.tsx:1341` | [ ] | [ ] | [ ] |
-| P727 | "Authorize X Live" | Opens x.com to approve live broadcasting | `renderer/components/streaming/destination-card.tsx:1361` | [ ] | [ ] | [ ] |
-| P728 | "Use a stream key instead" | Switches X destination to manual RTMP | `renderer/components/streaming/destination-card.tsx:1366` | [ ] | [ ] | [ ] |
-| P729 | "X Producer docs" / "X API overview" links | Opens X docs externally | `renderer/components/streaming/destination-card.tsx:1373` | [ ] | [ ] | [ ] |
+| P716 | Sign-in pending: "Waiting for your browser…", "Copy link", "Cancel" | Shows browser wait; copy auth link; stop waiting | `renderer/components/streaming/destination-card.tsx:939` | [x] | [ ] | [ ] |
+| P717 | Account row (avatar, name, handle, green "Connected" dot tooltip) | Signed-in account and last check on hover | `renderer/components/streaming/destination-card.tsx:1186` | [x] | [ ] | [ ] |
+| P718 | "Needs reconnect" badge + "Reconnect" | Re-runs sign-in for lost access | `renderer/components/streaming/destination-card.tsx:1209,1214,1244` | [x] | [ ] | [ ] |
+| P719 | "Disconnect" | Asks then signs account out | `renderer/components/streaming/destination-card.tsx:1219` | [x] | [ ] | [ ] |
+| P720 | Dialog "Disconnect {platform}?" | Confirms sign-out (YouTube covers Vertical too) | `renderer/components/streaming/destination-card.tsx:1226` | [x] | [ ] | [ ] |
+| P721 | Permissions row ("Reconnect" / "Reconnect Twitch") | Requests missing moderation/Twitch activity scopes | `renderer/components/streaming/destination-card.tsx:1249` | [x] | [ ] | [ ] |
+| P722 | "Same account and channel as {label}." | Vertical twin shares YouTube account | `renderer/components/streaming/destination-card.tsx:1267` | [x] | [ ] | [ ] |
+| P723 | "Channel" select | Picks YouTube channel for the account | `renderer/components/streaming/destination-card.tsx:1272` | [x] | [ ] | [ ] |
+| P724 | "Refresh channels" icon button | Reloads YouTube channel list | `renderer/components/streaming/destination-card.tsx:1304` | [x] | [ ] | [ ] |
+| P725 | X Live badge ("X Live ready", "Authorization needed", etc.) | X native broadcast capability state | `renderer/components/streaming/destination-card.tsx:1327` | [x] | [ ] | [ ] |
+| P726 | "Check again" | Re-checks X native capability | `renderer/components/streaming/destination-card.tsx:1341` | [x] | [ ] | [ ] |
+| P727 | "Authorize X Live" | Opens x.com to approve live broadcasting | `renderer/components/streaming/destination-card.tsx:1361` | [x] | [ ] | [ ] |
+| P728 | "Use a stream key instead" | Switches X destination to manual RTMP | `renderer/components/streaming/destination-card.tsx:1366` | [x] | [ ] | [ ] |
+| P729 | "X Producer docs" / "X API overview" links | Opens X docs externally | `renderer/components/streaming/destination-card.tsx:1373` | [x] | [ ] | [ ] |
 
 ### YouTube consent dialog (destination-card.tsx)
 
@@ -1094,30 +1094,30 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P734 | "Stream details" status badge | Unsaved / validation status | `renderer/components/tabs/streaming-tab.tsx:623` | [ ] | [ ] | [ ] |
-| P735 | "Save" / "Saving…" | Saves stream metadata draft | `renderer/components/tabs/streaming-tab.tsx:628` | [ ] | [ ] | [ ] |
-| P736 | "Loading stream details…" | Draft loading state | `renderer/components/tabs/streaming-tab.tsx:645` | [ ] | [ ] | [ ] |
-| P737 | Thumbnail (only with YouTube on) | YouTube thumbnail; disabled unless YouTube signed in | `renderer/components/tabs/streaming-tab.tsx:655` | [ ] | [ ] | [ ] |
-| P738 | Per-destination accordion ("Details for each destination") | Rows per native destination with summary, "Needs attention" icon | `renderer/components/tabs/streaming-tab.tsx:684` | [ ] | [ ] | [ ] |
-| P739 | "Turn on YouTube, Twitch, Kick or X…" empty line | No native destinations on | `renderer/components/tabs/streaming-tab.tsx:731` | [ ] | [ ] | [ ] |
-| P740 | "Custom title and description" switch | Per-destination text override | `renderer/components/tabs/streaming-tab.tsx:786` | [ ] | [ ] | [ ] |
-| P741 | Override "Title" | Destination title; Twitch/X notes beneath | `renderer/components/tabs/streaming-tab.tsx:805` | [ ] | [ ] | [ ] |
-| P742 | Override "Description" | YouTube-only description override | `renderer/components/tabs/streaming-tab.tsx:828` | [ ] | [ ] | [ ] |
-| P743 | Override "Privacy" ("Private"/"Unlisted"/"Public") | YouTube-only privacy override | `renderer/components/tabs/streaming-tab.tsx:839` | [ ] | [ ] | [ ] |
-| P744 | "Made for kids" switch | YouTube audience flag | `renderer/components/tabs/streaming-tab.tsx:856` | [ ] | [ ] | [ ] |
-| P745 | Twitch "Category" combobox | Picks Twitch category | `renderer/components/tabs/streaming-tab.tsx:869` | [ ] | [ ] | [ ] |
-| P746 | Twitch "Language" select | Picks stream language | `renderer/components/tabs/streaming-tab.tsx:891` | [ ] | [ ] | [ ] |
-| P747 | Kick "Category" combobox | Picks required Kick category | `renderer/components/tabs/streaming-tab.tsx:917` | [ ] | [ ] | [ ] |
-| P748 | "Announce on X timeline" switch | Off skips the announcement post | `renderer/components/tabs/streaming-tab.tsx:950` | [ ] | [ ] | [ ] |
+| P734 | "Stream details" status badge | Unsaved / validation status | `renderer/components/tabs/streaming-tab.tsx:623` | [x] | [ ] | [ ] |
+| P735 | "Save" / "Saving…" | Saves stream metadata draft | `renderer/components/tabs/streaming-tab.tsx:628` | [x] | [ ] | [ ] |
+| P736 | "Loading stream details…" | Draft loading state | `renderer/components/tabs/streaming-tab.tsx:645` | [x] | [ ] | [ ] |
+| P737 | Thumbnail (only with YouTube on) | YouTube thumbnail; disabled unless YouTube signed in | `renderer/components/tabs/streaming-tab.tsx:655` | [x] | [ ] | [ ] |
+| P738 | Per-destination accordion ("Details for each destination") | Rows per native destination with summary, "Needs attention" icon | `renderer/components/tabs/streaming-tab.tsx:684` | [x] | [ ] | [ ] |
+| P739 | "Turn on YouTube, Twitch, Kick or X…" empty line | No native destinations on | `renderer/components/tabs/streaming-tab.tsx:731` | [x] | [ ] | [ ] |
+| P740 | "Custom title and description" switch | Per-destination text override | `renderer/components/tabs/streaming-tab.tsx:786` | [x] | [ ] | [ ] |
+| P741 | Override "Title" | Destination title; Twitch/X notes beneath | `renderer/components/tabs/streaming-tab.tsx:805` | [x] | [ ] | [ ] |
+| P742 | Override "Description" | YouTube-only description override | `renderer/components/tabs/streaming-tab.tsx:828` | [x] | [ ] | [ ] |
+| P743 | Override "Privacy" ("Private"/"Unlisted"/"Public") | YouTube-only privacy override | `renderer/components/tabs/streaming-tab.tsx:839` | [x] | [ ] | [ ] |
+| P744 | "Made for kids" switch | YouTube audience flag | `renderer/components/tabs/streaming-tab.tsx:856` | [x] | [ ] | [ ] |
+| P745 | Twitch "Category" combobox | Picks Twitch category | `renderer/components/tabs/streaming-tab.tsx:869` | [x] | [ ] | [ ] |
+| P746 | Twitch "Language" select | Picks stream language | `renderer/components/tabs/streaming-tab.tsx:891` | [x] | [ ] | [ ] |
+| P747 | Kick "Category" combobox | Picks required Kick category | `renderer/components/tabs/streaming-tab.tsx:917` | [x] | [ ] | [ ] |
+| P748 | "Announce on X timeline" switch | Off skips the announcement post | `renderer/components/tabs/streaming-tab.tsx:950` | [x] | [ ] | [ ] |
 
 ### Broadcast info fields (broadcast-info-fields.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P749 | "Title" + character counter | Broadcast title; required-error after touch | `renderer/components/streaming/broadcast-info-fields.tsx:79` | [ ] | [ ] | [ ] |
-| P750 | "Description" textarea | Optional broadcast description | `renderer/components/streaming/broadcast-info-fields.tsx:102` | [ ] | [ ] | [ ] |
-| P751 | "Privacy" segmented + hint ("Twitch, Kick and X are always public.") | YouTube privacy choice | `renderer/components/streaming/broadcast-info-fields.tsx:117` | [ ] | [ ] | [ ] |
-| P752 | "Made for kids" switch (when provided) | YouTube kids flag | `renderer/components/streaming/broadcast-info-fields.tsx:135` | [ ] | [ ] | [ ] |
+| P749 | "Title" + character counter | Broadcast title; required-error after touch | `renderer/components/streaming/broadcast-info-fields.tsx:79` | [x] | [ ] | [ ] |
+| P750 | "Description" textarea | Optional broadcast description | `renderer/components/streaming/broadcast-info-fields.tsx:102` | [x] | [ ] | [ ] |
+| P751 | "Privacy" segmented + hint ("Twitch, Kick and X are always public.") | YouTube privacy choice | `renderer/components/streaming/broadcast-info-fields.tsx:117` | [x] | [ ] | [ ] |
+| P752 | "Made for kids" switch (when provided) | YouTube kids flag | `renderer/components/streaming/broadcast-info-fields.tsx:135` | [x] | [ ] | [ ] |
 
 ### Category combobox (category-combobox.tsx)
 
@@ -1144,75 +1144,75 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P764 | "Stream quality" segmented (1080p30, 1080p60, "YouTube · 4K30", "Use default") | Picks stream preset; 4K only with YouTube | `renderer/components/streaming/stream-quality-control.tsx:26` | [ ] | [ ] | [ ] |
-| P765 | Hint ("Using a saved custom profile.", 4K latency note) | Explains quality/recording interplay | `renderer/components/streaming/stream-quality-control.tsx:41` | [ ] | [ ] | [ ] |
+| P764 | "Stream quality" segmented (1080p30, 1080p60, "YouTube · 4K30", "Use default") | Picks stream preset; 4K only with YouTube | `renderer/components/streaming/stream-quality-control.tsx:26` | [x] | [ ] | [ ] |
+| P765 | Hint ("Using a saved custom profile.", 4K latency note) | Explains quality/recording interplay | `renderer/components/streaming/stream-quality-control.tsx:41` | [x] | [ ] | [ ] |
 
 ### Go Live panel (go-live-panel.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P766 | Compatibility warning alert | Video profile blocking/warning reason | `renderer/components/streaming/go-live-panel.tsx:157` | [ ] | [ ] | [ ] |
-| P767 | "Output quality" section | Default stream quality for all destinations | `renderer/components/streaming/go-live-panel.tsx:164` | [ ] | [ ] | [ ] |
-| P768 | "Ready to go live" checklist | Plain-word readiness rows | `renderer/components/streaming/go-live-panel.tsx:308` | [ ] | [ ] | [ ] |
-| P769 | "Destinations" row + "{label} · {hint}" links | N of M ready; link opens/focuses card | `renderer/components/streaming/go-live-panel.tsx:309,323` | [ ] | [ ] | [ ] |
-| P770 | "Stream settings" row ("Checked"/"Checking…"/"Couldn't check") | Output-path preflight; detail on hover | `renderer/components/streaming/go-live-panel.tsx:404` | [ ] | [ ] | [ ] |
-| P771 | "Retry" (stream settings) | Re-runs output topology preflight | `renderer/components/streaming/go-live-panel.tsx:424` | [ ] | [ ] | [ ] |
-| P772 | "Stream" row (live) | Healthy / problem label; sentence on hover | `renderer/components/streaming/go-live-panel.tsx:472` | [ ] | [ ] | [ ] |
-| P773 | "Quality" row (+ per-destination lines) | Summarises output quality / "Varies by destination" | `renderer/components/streaming/go-live-panel.tsx:346` | [ ] | [ ] | [ ] |
-| P774 | "Captions" row | Caption output rule blocker | `renderer/components/streaming/go-live-panel.tsx:354` | [ ] | [ ] | [ ] |
-| P775 | "Recording" / "Upload needed" / "Disk" info rows | Recording quality, Mbps, GB per hour | `renderer/components/streaming/go-live-panel.tsx:367,375,378` | [ ] | [ ] | [ ] |
-| P776 | "FFmpeg · Missing" row | Navigates to Health page | `renderer/components/streaming/go-live-panel.tsx:384` | [ ] | [ ] | [ ] |
+| P766 | Compatibility warning alert | Video profile blocking/warning reason | `renderer/components/streaming/go-live-panel.tsx:157` | [x] | [ ] | [ ] |
+| P767 | "Output quality" section | Default stream quality for all destinations | `renderer/components/streaming/go-live-panel.tsx:164` | [x] | [ ] | [ ] |
+| P768 | "Ready to go live" checklist | Plain-word readiness rows | `renderer/components/streaming/go-live-panel.tsx:308` | [x] | [ ] | [ ] |
+| P769 | "Destinations" row + "{label} · {hint}" links | N of M ready; link opens/focuses card | `renderer/components/streaming/go-live-panel.tsx:309,323` | [x] | [ ] | [ ] |
+| P770 | "Stream settings" row ("Checked"/"Checking…"/"Couldn't check") | Output-path preflight; detail on hover | `renderer/components/streaming/go-live-panel.tsx:404` | [x] | [ ] | [ ] |
+| P771 | "Retry" (stream settings) | Re-runs output topology preflight | `renderer/components/streaming/go-live-panel.tsx:424` | [x] | [ ] | [ ] |
+| P772 | "Stream" row (live) | Healthy / problem label; sentence on hover | `renderer/components/streaming/go-live-panel.tsx:472` | [x] | [ ] | [ ] |
+| P773 | "Quality" row (+ per-destination lines) | Summarises output quality / "Varies by destination" | `renderer/components/streaming/go-live-panel.tsx:346` | [x] | [ ] | [ ] |
+| P774 | "Captions" row | Caption output rule blocker | `renderer/components/streaming/go-live-panel.tsx:354` | [x] | [ ] | [ ] |
+| P775 | "Recording" / "Upload needed" / "Disk" info rows | Recording quality, Mbps, GB per hour | `renderer/components/streaming/go-live-panel.tsx:367,375,378` | [x] | [ ] | [ ] |
+| P776 | "FFmpeg · Missing" row | Navigates to Health page | `renderer/components/streaming/go-live-panel.tsx:384` | [x] | [ ] | [ ] |
 
 ### Videorc Cloud section (cloud-section.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P777 | Premium / unavailable LockAlert ("View Premium") | Explains cloud lock | `renderer/components/streaming/cloud-section.tsx:101` | [ ] | [ ] | [ ] |
-| P778 | "Stream through Videorc Cloud" switch (+ hours lines) | Routes Go Live through cloud | `renderer/components/streaming/cloud-section.tsx:120` | [ ] | [ ] | [ ] |
-| P779 | "Test Videorc Cloud" → "Test"/"Testing…" | 10 s test upload; result in description | `renderer/components/streaming/cloud-section.tsx:132` | [ ] | [ ] | [ ] |
-| P780 | "If this computer drops, show" select ("Be right back card", screens) | Hold image while disconnected | `renderer/components/streaming/cloud-section.tsx:156` | [ ] | [ ] | [ ] |
-| P781 | "End the stream after" segmented | Max hold duration | `renderer/components/streaming/cloud-section.tsx:185` | [ ] | [ ] | [ ] |
-| P782 | Scroll-to-section on "Open Destinations" notice | Brings section into view | `renderer/components/streaming/cloud-section.tsx:56` | [ ] | [ ] | [ ] |
+| P777 | Premium / unavailable LockAlert ("View Premium") | Explains cloud lock | `renderer/components/streaming/cloud-section.tsx:101` | [x] | [ ] | [ ] |
+| P778 | "Stream through Videorc Cloud" switch (+ hours lines) | Routes Go Live through cloud | `renderer/components/streaming/cloud-section.tsx:120` | [x] | [ ] | [ ] |
+| P779 | "Test Videorc Cloud" → "Test"/"Testing…" | 10 s test upload; result in description | `renderer/components/streaming/cloud-section.tsx:132` | [x] | [ ] | [ ] |
+| P780 | "If this computer drops, show" select ("Be right back card", screens) | Hold image while disconnected | `renderer/components/streaming/cloud-section.tsx:156` | [x] | [ ] | [ ] |
+| P781 | "End the stream after" segmented | Max hold duration | `renderer/components/streaming/cloud-section.tsx:185` | [x] | [ ] | [ ] |
+| P782 | Scroll-to-section on "Open Destinations" notice | Brings section into view | `renderer/components/streaming/cloud-section.tsx:56` | [x] | [ ] | [ ] |
 
 ### Watchdog section (watchdog-section.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P783 | Check switches: "Microphone muted", "Microphone silent", "No voice", "Viewers hear nothing", "Black picture", "Picture stopped", "Destination down", "Platform reports a problem", "Connection too slow", "Sound and picture drift", "Chat says there is a problem", "Long Be right back", "Still there?", "Cloud program not reporting", "Not reaching the room" | Enable/disable each live check | `renderer/components/streaming/watchdog-section.tsx:26 (rows), :186 (switches)` | [ ] | [ ] | [ ] |
-| P784 | "Alert me after" (15 s/30 s/1 min/2 min) | Muted-mic alert delay | `renderer/components/streaming/watchdog-section.tsx:203` | [ ] | [ ] | [ ] |
-| P785 | "System notifications" switch | OS notifications when unfocused/critical | `renderer/components/streaming/watchdog-section.tsx:215` | [ ] | [ ] | [ ] |
-| P786 | Phone Premium LockAlert | "Alerts on your phone come with Premium." | `renderer/components/streaming/watchdog-section.tsx:224` | [ ] | [ ] | [ ] |
-| P787 | "Phone" switch (+ device count) | Push alerts to phone | `renderer/components/streaming/watchdog-section.tsx:241` | [ ] | [ ] | [ ] |
-| P788 | "Show QR code" / "Hide code" | Toggles QR to videorc.com/live | `renderer/components/streaming/watchdog-section.tsx:259` | [ ] | [ ] | [ ] |
-| P789 | "Copy link" | Copies live alerts URL | `renderer/components/streaming/watchdog-section.tsx:262` | [ ] | [ ] | [ ] |
-| P790 | "AI reads chat for problems" switch | AI reads chat for A/V reports | `renderer/components/streaming/watchdog-section.tsx:270` | [ ] | [ ] | [ ] |
+| P783 | Check switches: "Microphone muted", "Microphone silent", "No voice", "Viewers hear nothing", "Black picture", "Picture stopped", "Destination down", "Platform reports a problem", "Connection too slow", "Sound and picture drift", "Chat says there is a problem", "Long Be right back", "Still there?", "Cloud program not reporting", "Not reaching the room" | Enable/disable each live check | `renderer/components/streaming/watchdog-section.tsx:26 (rows), :186 (switches)` | [x] | [ ] | [ ] |
+| P784 | "Alert me after" (15 s/30 s/1 min/2 min) | Muted-mic alert delay | `renderer/components/streaming/watchdog-section.tsx:203` | [x] | [ ] | [ ] |
+| P785 | "System notifications" switch | OS notifications when unfocused/critical | `renderer/components/streaming/watchdog-section.tsx:215` | [x] | [ ] | [ ] |
+| P786 | Phone Premium LockAlert | "Alerts on your phone come with Premium." | `renderer/components/streaming/watchdog-section.tsx:224` | [x] | [ ] | [ ] |
+| P787 | "Phone" switch (+ device count) | Push alerts to phone | `renderer/components/streaming/watchdog-section.tsx:241` | [x] | [ ] | [ ] |
+| P788 | "Show QR code" / "Hide code" | Toggles QR to videorc.com/live | `renderer/components/streaming/watchdog-section.tsx:259` | [x] | [ ] | [ ] |
+| P789 | "Copy link" | Copies live alerts URL | `renderer/components/streaming/watchdog-section.tsx:262` | [x] | [ ] | [ ] |
+| P790 | "AI reads chat for problems" switch | AI reads chat for A/V reports | `renderer/components/streaming/watchdog-section.tsx:270` | [x] | [ ] | [ ] |
 
 ### Stream report email — "After the stream" (stream-report-email-section.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P791 | Signed-out LockAlert (Sign in) | Reports need a Videorc account | `renderer/components/streaming/stream-report-email-section.tsx:113` | [ ] | [ ] | [ ] |
-| P792 | "Email me a report after each stream" switch | Toggle post-stream email report | `renderer/components/streaming/stream-report-email-section.tsx:123` | [ ] | [ ] | [ ] |
-| P793 | "Try again" | Re-reads settings after failed load | `renderer/components/streaming/stream-report-email-section.tsx:127` | [ ] | [ ] | [ ] |
-| P794 | "Save my streams on videorc.com" switch | Keep stream history online 90 days | `renderer/components/streaming/stream-report-email-section.tsx:141` | [ ] | [ ] | [ ] |
-| P795 | "Your streams" → "Open" | Opens videorc.com/live | `renderer/components/streaming/stream-report-email-section.tsx:154` | [ ] | [ ] | [ ] |
-| P796 | "Send the last one" → "Send"/"Sending…" | Emails last report; result line beneath | `renderer/components/streaming/stream-report-email-section.tsx:168` | [ ] | [ ] | [ ] |
+| P791 | Signed-out LockAlert (Sign in) | Reports need a Videorc account | `renderer/components/streaming/stream-report-email-section.tsx:113` | [x] | [ ] | [ ] |
+| P792 | "Email me a report after each stream" switch | Toggle post-stream email report | `renderer/components/streaming/stream-report-email-section.tsx:123` | [x] | [ ] | [ ] |
+| P793 | "Try again" | Re-reads settings after failed load | `renderer/components/streaming/stream-report-email-section.tsx:127` | [x] | [ ] | [ ] |
+| P794 | "Save my streams on videorc.com" switch | Keep stream history online 90 days | `renderer/components/streaming/stream-report-email-section.tsx:141` | [x] | [ ] | [ ] |
+| P795 | "Your streams" → "Open" | Opens videorc.com/live | `renderer/components/streaming/stream-report-email-section.tsx:154` | [x] | [ ] | [ ] |
+| P796 | "Send the last one" → "Send"/"Sending…" | Emails last report; result line beneath | `renderer/components/streaming/stream-report-email-section.tsx:168` | [x] | [ ] | [ ] |
 
 ### Chat commands section (chat-commands-section.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P797 | Offline alert | Videorc reconnecting; section disabled | `renderer/components/streaming/chat-commands-section.tsx:90` | [ ] | [ ] | [ ] |
-| P798 | "Answer !commands" switch | Lists commands in chat | `renderer/components/streaming/chat-commands-section.tsx:94` | [ ] | [ ] | [ ] |
-| P799 | Command row "!name" (click/Enter) | Opens editor | `renderer/components/streaming/chat-commands-section.tsx:207` | [ ] | [ ] | [ ] |
-| P800 | "Answer !{name}" switch | Enable/disable one command | `renderer/components/streaming/chat-commands-section.tsx:214` | [ ] | [ ] | [ ] |
-| P801 | ⋯ menu "Edit…" / "Delete" | Row actions (hover reveal) | `renderer/components/streaming/chat-commands-section.tsx:197,221` | [ ] | [ ] | [ ] |
-| P802 | "No commands yet." | Empty state | `renderer/components/streaming/chat-commands-section.tsx:118` | [ ] | [ ] | [ ] |
-| P803 | "Couldn't read your chat commands." + "Try again" | Load failure + retry | `renderer/components/streaming/chat-commands-section.tsx:124` | [ ] | [ ] | [ ] |
-| P804 | "Loading chat commands…" | Loading state | `renderer/components/streaming/chat-commands-section.tsx:131` | [ ] | [ ] | [ ] |
-| P805 | "Add command…" | Opens add dialog; disabled at max/offline | `renderer/components/streaming/chat-commands-section.tsx:143` | [ ] | [ ] | [ ] |
-| P806 | Dialog "Delete !{name}?" ("Delete command") | Confirms deletion | `renderer/components/streaming/chat-commands-section.tsx:157` | [ ] | [ ] | [ ] |
-| P807 | Reveal from Stream Manager "Chat commands…" | Scrolls/focuses this section | `renderer/components/streaming/chat-commands-section.tsx:62` | [ ] | [ ] | [ ] |
+| P797 | Offline alert | Videorc reconnecting; section disabled | `renderer/components/streaming/chat-commands-section.tsx:90` | [x] | [ ] | [ ] |
+| P798 | "Answer !commands" switch | Lists commands in chat | `renderer/components/streaming/chat-commands-section.tsx:94` | [x] | [ ] | [ ] |
+| P799 | Command row "!name" (click/Enter) | Opens editor | `renderer/components/streaming/chat-commands-section.tsx:207` | [x] | [ ] | [ ] |
+| P800 | "Answer !{name}" switch | Enable/disable one command | `renderer/components/streaming/chat-commands-section.tsx:214` | [x] | [ ] | [ ] |
+| P801 | ⋯ menu "Edit…" / "Delete" | Row actions (hover reveal) | `renderer/components/streaming/chat-commands-section.tsx:197,221` | [x] | [ ] | [ ] |
+| P802 | "No commands yet." | Empty state | `renderer/components/streaming/chat-commands-section.tsx:118` | [x] | [ ] | [ ] |
+| P803 | "Couldn't read your chat commands." + "Try again" | Load failure + retry | `renderer/components/streaming/chat-commands-section.tsx:124` | [x] | [ ] | [ ] |
+| P804 | "Loading chat commands…" | Loading state | `renderer/components/streaming/chat-commands-section.tsx:131` | [x] | [ ] | [ ] |
+| P805 | "Add command…" | Opens add dialog; disabled at max/offline | `renderer/components/streaming/chat-commands-section.tsx:143` | [x] | [ ] | [ ] |
+| P806 | Dialog "Delete !{name}?" ("Delete command") | Confirms deletion | `renderer/components/streaming/chat-commands-section.tsx:157` | [x] | [ ] | [ ] |
+| P807 | Reveal from Stream Manager "Chat commands…" | Scrolls/focuses this section | `renderer/components/streaming/chat-commands-section.tsx:62` | [x] | [ ] | [ ] |
 
 ### Chat command dialog (chat-command-dialog.tsx)
 
@@ -1229,33 +1229,33 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P814 | Dialog "Go live" | Pre-flight check before starting | `renderer/components/go-live-dialog.tsx:285` | [ ] | [ ] | [ ] |
-| P815 | "Stream details" (Title/Description/Privacy) | Edit instant broadcast details; first focus | `renderer/components/go-live-dialog.tsx:299` | [ ] | [ ] | [ ] |
-| P816 | Destinations summary badge | Ready/warn summary | `renderer/components/go-live-dialog.tsx:331` | [ ] | [ ] | [ ] |
-| P817 | Scheduled-event alert | Scheduled event starts now | `renderer/components/go-live-dialog.tsx:339` | [ ] | [ ] | [ ] |
-| P818 | Destination row ("Ready"/"Needs attention", scheduled, privacy line) | Per-destination readiness | `renderer/components/go-live-dialog.tsx:780` | [ ] | [ ] | [ ] |
-| P819 | Chat "Read"/"Send" status badges | Chat capability per destination | `renderer/components/go-live-dialog.tsx:930` | [ ] | [ ] | [ ] |
-| P820 | "Sign in to Videorc" | Signs in for chat relay | `renderer/components/go-live-dialog.tsx:937` | [ ] | [ ] | [ ] |
-| P821 | "Connect/Reconnect {platform}…" then "Check again" | Re-auth then re-run preflight | `renderer/components/go-live-dialog.tsx:811` | [ ] | [ ] | [ ] |
-| P822 | "Use stream key" (row) | Saves switch to manual key | `renderer/components/go-live-dialog.tsx:827` | [ ] | [ ] | [ ] |
-| P823 | "Go live without {label}" | Excludes destination for this livestream only | `renderer/components/go-live-dialog.tsx:835` | [ ] | [ ] | [ ] |
-| P824 | Excluded row "Left out" + "Add back" | Re-includes excluded destination | `renderer/components/go-live-dialog.tsx:875,879` | [ ] | [ ] | [ ] |
-| P825 | "No destination is on…" empty line | No destinations enabled | `renderer/components/go-live-dialog.tsx:377` | [ ] | [ ] | [ ] |
-| P826 | Captions status ("Captions can't start"/"No captions this time"/Ready row) | Caption readiness | `renderer/components/go-live-dialog.tsx:669` | [ ] | [ ] | [ ] |
-| P827 | "Go live without captions" | Skips captions for this livestream | `renderer/components/go-live-dialog.tsx:673` | [ ] | [ ] | [ ] |
-| P828 | Entitlement LockAlert | Plan lock blocking Go Live | `renderer/components/go-live-dialog.tsx:392` | [ ] | [ ] | [ ] |
-| P829 | "Fix before going live" alert | General blockers list | `renderer/components/go-live-dialog.tsx:399` | [ ] | [ ] | [ ] |
-| P830 | "Chat limits" alert | Chat warnings | `renderer/components/go-live-dialog.tsx:412` | [ ] | [ ] | [ ] |
-| P831 | "Streaming both orientations" alert | Simulcast bandwidth advice | `renderer/components/go-live-dialog.tsx:1000` | [ ] | [ ] | [ ] |
-| P832 | "Publish in Live Producer" alert | Facebook/Instagram manual publish step | `renderer/components/go-live-dialog.tsx:1041` | [ ] | [ ] | [ ] |
-| P833 | Output advice alerts ("This computer may not keep up", "… may stutter while live", "Streaming at …", "Recording will match the stream") | Performance step-down advice | `renderer/components/go-live-dialog.tsx:597` | [ ] | [ ] | [ ] |
-| P834 | "Overlays this time" alert | Overlays/banners this session can't honour | `renderer/components/go-live-dialog.tsx:436` | [ ] | [ ] | [ ] |
-| P835 | "Some destinations couldn't be set up" alert + "Use stream key" + Studio link | Partial setup failures | `renderer/components/go-live-dialog.tsx:458` | [ ] | [ ] | [ ] |
-| P836 | "Cancel" | Closes dialog | `renderer/components/go-live-dialog.tsx:500` | [ ] | [ ] | [ ] |
-| P837 | Primary "Go live" / "Go live on N destinations" / "Go live on {ready}" + key chip | Starts livestream; pending label names phase | `renderer/components/go-live-dialog.tsx:510,534` | [ ] | [ ] | [ ] |
-| P838 | Disabled reason "Fix the items above, then go live." | Hover/focus reason when blocked | `renderer/components/go-live-dialog.tsx:533` | [ ] | [ ] | [ ] |
-| P839 | ⌘↵ / Ctrl+↵ | Triggers primary anywhere in dialog | `renderer/components/go-live-dialog.tsx:243` | [ ] | [ ] | [ ] |
-| P840 | Privacy confirm "Go live unlisted?" ("Go live unlisted"/"Change privacy"/"Go back") | Confirms non-public YouTube | `renderer/components/go-live-dialog.tsx:561` | [ ] | [ ] | [ ] |
+| P814 | Dialog "Go live" | Pre-flight check before starting | `renderer/components/go-live-dialog.tsx:285` | [x] | [ ] | [ ] |
+| P815 | "Stream details" (Title/Description/Privacy) | Edit instant broadcast details; first focus | `renderer/components/go-live-dialog.tsx:299` | [x] | [ ] | [ ] |
+| P816 | Destinations summary badge | Ready/warn summary | `renderer/components/go-live-dialog.tsx:331` | [x] | [ ] | [ ] |
+| P817 | Scheduled-event alert | Scheduled event starts now | `renderer/components/go-live-dialog.tsx:339` | [x] | [ ] | [ ] |
+| P818 | Destination row ("Ready"/"Needs attention", scheduled, privacy line) | Per-destination readiness | `renderer/components/go-live-dialog.tsx:780` | [x] | [ ] | [ ] |
+| P819 | Chat "Read"/"Send" status badges | Chat capability per destination | `renderer/components/go-live-dialog.tsx:930` | [x] | [ ] | [ ] |
+| P820 | "Sign in to Videorc" | Signs in for chat relay | `renderer/components/go-live-dialog.tsx:937` | [x] | [ ] | [ ] |
+| P821 | "Connect/Reconnect {platform}…" then "Check again" | Re-auth then re-run preflight | `renderer/components/go-live-dialog.tsx:811` | [x] | [ ] | [ ] |
+| P822 | "Use stream key" (row) | Saves switch to manual key | `renderer/components/go-live-dialog.tsx:827` | [x] | [ ] | [ ] |
+| P823 | "Go live without {label}" | Excludes destination for this livestream only | `renderer/components/go-live-dialog.tsx:835` | [x] | [ ] | [ ] |
+| P824 | Excluded row "Left out" + "Add back" | Re-includes excluded destination | `renderer/components/go-live-dialog.tsx:875,879` | [x] | [ ] | [ ] |
+| P825 | "No destination is on…" empty line | No destinations enabled | `renderer/components/go-live-dialog.tsx:377` | [x] | [ ] | [ ] |
+| P826 | Captions status ("Captions can't start"/"No captions this time"/Ready row) | Caption readiness | `renderer/components/go-live-dialog.tsx:669` | [x] | [ ] | [ ] |
+| P827 | "Go live without captions" | Skips captions for this livestream | `renderer/components/go-live-dialog.tsx:673` | [x] | [ ] | [ ] |
+| P828 | Entitlement LockAlert | Plan lock blocking Go Live | `renderer/components/go-live-dialog.tsx:392` | [x] | [ ] | [ ] |
+| P829 | "Fix before going live" alert | General blockers list | `renderer/components/go-live-dialog.tsx:399` | [x] | [ ] | [ ] |
+| P830 | "Chat limits" alert | Chat warnings | `renderer/components/go-live-dialog.tsx:412` | [x] | [ ] | [ ] |
+| P831 | "Streaming both orientations" alert | Simulcast bandwidth advice | `renderer/components/go-live-dialog.tsx:1000` | [x] | [ ] | [ ] |
+| P832 | "Publish in Live Producer" alert | Facebook/Instagram manual publish step | `renderer/components/go-live-dialog.tsx:1041` | [x] | [ ] | [ ] |
+| P833 | Output advice alerts ("This computer may not keep up", "… may stutter while live", "Streaming at …", "Recording will match the stream") | Performance step-down advice | `renderer/components/go-live-dialog.tsx:597` | [x] | [ ] | [ ] |
+| P834 | "Overlays this time" alert | Overlays/banners this session can't honour | `renderer/components/go-live-dialog.tsx:436` | [x] | [ ] | [ ] |
+| P835 | "Some destinations couldn't be set up" alert + "Use stream key" + Studio link | Partial setup failures | `renderer/components/go-live-dialog.tsx:458` | [x] | [ ] | [ ] |
+| P836 | "Cancel" | Closes dialog | `renderer/components/go-live-dialog.tsx:500` | [x] | [ ] | [ ] |
+| P837 | Primary "Go live" / "Go live on N destinations" / "Go live on {ready}" + key chip | Starts livestream; pending label names phase | `renderer/components/go-live-dialog.tsx:510,534` | [x] | [ ] | [ ] |
+| P838 | Disabled reason "Fix the items above, then go live." | Hover/focus reason when blocked | `renderer/components/go-live-dialog.tsx:533` | [x] | [ ] | [ ] |
+| P839 | ⌘↵ / Ctrl+↵ | Triggers primary anywhere in dialog | `renderer/components/go-live-dialog.tsx:243` | [x] | [ ] | [ ] |
+| P840 | Privacy confirm "Go live unlisted?" ("Go live unlisted"/"Change privacy"/"Go back") | Confirms non-public YouTube | `renderer/components/go-live-dialog.tsx:561` | [x] | [ ] | [ ] |
 
 ### Upcoming view (scheduled-streams.tsx)
 
@@ -1331,85 +1331,85 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P896 | Offline / LockAlert ("View Premium") / session lock | Why the room is unavailable | `renderer/components/guests/guests-tab.tsx:145` | [ ] | [ ] | [ ] |
-| P897 | Room row (status dot, phase label, "Backstage time counts after 30 min") | Room phase | `renderer/components/guests/guests-tab.tsx:157` | [ ] | [ ] | [ ] |
-| P898 | Count badges ("N want to join", "N on stage", "N backstage") | Room counts | `renderer/components/guests/guests-tab.tsx:171` | [ ] | [ ] | [ ] |
-| P899 | "Open the room" / "Opening…" | Opens cloud room with title/platforms | `renderer/components/guests/guests-tab.tsx:188` | [ ] | [ ] | [ ] |
-| P900 | "Sends" profile chips / output-plan description | What the room sends (hover sentence) | `renderer/components/guests/guests-tab.tsx:209` | [ ] | [ ] | [ ] |
-| P901 | Room message warning alert | Backend room message | `renderer/components/guests/guests-tab.tsx:240` | [ ] | [ ] | [ ] |
+| P896 | Offline / LockAlert ("View Premium") / session lock | Why the room is unavailable | `renderer/components/guests/guests-tab.tsx:145` | [x] | [ ] | [ ] |
+| P897 | Room row (status dot, phase label, "Backstage time counts after 30 min") | Room phase | `renderer/components/guests/guests-tab.tsx:157` | [x] | [ ] | [ ] |
+| P898 | Count badges ("N want to join", "N on stage", "N backstage") | Room counts | `renderer/components/guests/guests-tab.tsx:171` | [x] | [ ] | [ ] |
+| P899 | "Open the room" / "Opening…" | Opens cloud room with title/platforms | `renderer/components/guests/guests-tab.tsx:188` | [x] | [ ] | [ ] |
+| P900 | "Sends" profile chips / output-plan description | What the room sends (hover sentence) | `renderer/components/guests/guests-tab.tsx:209` | [x] | [ ] | [ ] |
+| P901 | Room message warning alert | Backend room message | `renderer/components/guests/guests-tab.tsx:240` | [x] | [ ] | [ ] |
 
 ### Guests — On the program (guests-tab.tsx RoomProgramOptIns)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P902 | "Avatar" switch ("Avatar on the program") | Avatar on managed-show program | `renderer/components/guests/guests-tab.tsx:290` | [ ] | [ ] | [ ] |
-| P903 | "Show the avatar to guests" switch | Guests see avatar | `renderer/components/guests/guests-tab.tsx:305` | [ ] | [ ] | [ ] |
-| P904 | "Graphics" switch ("Graphics on the program") | Graphics on program | `renderer/components/guests/guests-tab.tsx:318` | [ ] | [ ] | [ ] |
-| P905 | "Open the room first." reason | Disabled reason before open | `renderer/components/guests/guests-tab.tsx:236` | [ ] | [ ] | [ ] |
+| P902 | "Avatar" switch ("Avatar on the program") | Avatar on managed-show program | `renderer/components/guests/guests-tab.tsx:290` | [x] | [ ] | [ ] |
+| P903 | "Show the avatar to guests" switch | Guests see avatar | `renderer/components/guests/guests-tab.tsx:305` | [x] | [ ] | [ ] |
+| P904 | "Graphics" switch ("Graphics on the program") | Graphics on program | `renderer/components/guests/guests-tab.tsx:318` | [x] | [ ] | [ ] |
+| P905 | "Open the room first." reason | Disabled reason before open | `renderer/components/guests/guests-tab.tsx:236` | [x] | [ ] | [ ] |
 
 ### Guests — Invite link (guests-tab.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P906 | Read-only "Invite link" field | Shows link; selects on focus | `renderer/components/guests/guests-tab.tsx:393` | [ ] | [ ] | [ ] |
-| P907 | "Copy" / "Copied" | Copies invite link | `renderer/components/guests/guests-tab.tsx:405` | [ ] | [ ] | [ ] |
-| P908 | "New link" / "Making…" | Rotates invite (may ask first) | `renderer/components/guests/guests-tab.tsx:421` | [ ] | [ ] | [ ] |
-| P909 | "Let anyone with the link in backstage" switch | Door open/closed | `renderer/components/guests/guests-tab.tsx:442` | [ ] | [ ] | [ ] |
-| P910 | Consent line "Guests read this before they ask to join…" | Shows guest consent text | `renderer/components/guests/guests-tab.tsx:456` | [ ] | [ ] | [ ] |
-| P911 | Dialog "Make a new link?" | Confirms rotation | `renderer/components/guests/guests-tab.tsx:459` | [ ] | [ ] | [ ] |
-| P912 | Limits description | Room limits line | `renderer/components/guests/guests-tab.tsx:387` | [ ] | [ ] | [ ] |
+| P906 | Read-only "Invite link" field | Shows link; selects on focus | `renderer/components/guests/guests-tab.tsx:393` | [x] | [ ] | [ ] |
+| P907 | "Copy" / "Copied" | Copies invite link | `renderer/components/guests/guests-tab.tsx:405` | [x] | [ ] | [ ] |
+| P908 | "New link" / "Making…" | Rotates invite (may ask first) | `renderer/components/guests/guests-tab.tsx:421` | [x] | [ ] | [ ] |
+| P909 | "Let anyone with the link in backstage" switch | Door open/closed | `renderer/components/guests/guests-tab.tsx:442` | [x] | [ ] | [ ] |
+| P910 | Consent line "Guests read this before they ask to join…" | Shows guest consent text | `renderer/components/guests/guests-tab.tsx:456` | [x] | [ ] | [ ] |
+| P911 | Dialog "Make a new link?" | Confirms rotation | `renderer/components/guests/guests-tab.tsx:459` | [x] | [ ] | [ ] |
+| P912 | Limits description | Room limits line | `renderer/components/guests/guests-tab.tsx:387` | [x] | [ ] | [ ] |
 
 ### Guests — Who's here (guests-tab.tsx, room-person.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P913 | "The room is full…" alert | Room capacity reached | `renderer/components/guests/guests-tab.tsx:251` | [ ] | [ ] | [ ] |
-| P914 | "Nobody has joined yet. Share the link." | Empty state (+ declined line) | `renderer/components/guests/guests-tab.tsx:493` | [ ] | [ ] | [ ] |
-| P915 | Groups "Wants to join" / "On stage" / "Backstage" with counts | People lists | `renderer/components/guests/guests-tab.tsx:521` | [ ] | [ ] | [ ] |
-| P916 | Request row (initial, device icon) + "Let in" / "Decline" | Admit or decline guest | `renderer/components/guests/room-person.tsx:255,293,301` | [ ] | [ ] | [ ] |
-| P917 | Person thumb (live camera, green rim when talking, camera-off letter) | Person picture | `renderer/components/guests/room-person.tsx:65` | [ ] | [ ] | [ ] |
-| P918 | Connection dot (tooltip) | Weak connection indicator | `renderer/components/guests/room-person.tsx:115` | [ ] | [ ] | [ ] |
-| P919 | "Away" badge / mic-held or mic-off badge | State words beside icons | `renderer/components/guests/room-person.tsx:145,154` | [ ] | [ ] | [ ] |
-| P920 | Mic toggle ("Mute {name}"/"Let {name} unmute"; host self-mute) | Host mic hold / own mute | `renderer/components/guests/room-person.tsx:170,393` | [ ] | [ ] | [ ] |
-| P921 | Screen-share toggle | Allow/disallow/stop guest screen share | `renderer/components/guests/room-person.tsx:219` | [ ] | [ ] | [ ] |
-| P922 | ⋯ "More for {name}" menu | Moderation items | `renderer/components/guests/room-person.tsx:414` | [ ] | [ ] | [ ] |
+| P913 | "The room is full…" alert | Room capacity reached | `renderer/components/guests/guests-tab.tsx:251` | [x] | [ ] | [ ] |
+| P914 | "Nobody has joined yet. Share the link." | Empty state (+ declined line) | `renderer/components/guests/guests-tab.tsx:493` | [x] | [ ] | [ ] |
+| P915 | Groups "Wants to join" / "On stage" / "Backstage" with counts | People lists | `renderer/components/guests/guests-tab.tsx:521` | [x] | [ ] | [ ] |
+| P916 | Request row (initial, device icon) + "Let in" / "Decline" | Admit or decline guest | `renderer/components/guests/room-person.tsx:255,293,301` | [x] | [ ] | [ ] |
+| P917 | Person thumb (live camera, green rim when talking, camera-off letter) | Person picture | `renderer/components/guests/room-person.tsx:65` | [x] | [ ] | [ ] |
+| P918 | Connection dot (tooltip) | Weak connection indicator | `renderer/components/guests/room-person.tsx:115` | [x] | [ ] | [ ] |
+| P919 | "Away" badge / mic-held or mic-off badge | State words beside icons | `renderer/components/guests/room-person.tsx:145,154` | [x] | [ ] | [ ] |
+| P920 | Mic toggle ("Mute {name}"/"Let {name} unmute"; host self-mute) | Host mic hold / own mute | `renderer/components/guests/room-person.tsx:170,393` | [x] | [ ] | [ ] |
+| P921 | Screen-share toggle | Allow/disallow/stop guest screen share | `renderer/components/guests/room-person.tsx:219` | [x] | [ ] | [ ] |
+| P922 | ⋯ "More for {name}" menu | Moderation items | `renderer/components/guests/room-person.tsx:414` | [x] | [ ] | [ ] |
 
 ### Guests — Moderation (guest-moderation.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P923 | ⋯ "Rename…" | Opens Rename guest dialog | `renderer/components/guests/guest-moderation.tsx:93` | [ ] | [ ] | [ ] |
-| P924 | ⋯ "Remove…" | Asks to remove guest | `renderer/components/guests/guest-moderation.tsx:99` | [ ] | [ ] | [ ] |
-| P925 | ⋯ "Ban…" | Asks to ban guest (rotates link) | `renderer/components/guests/guest-moderation.tsx:105` | [ ] | [ ] | [ ] |
-| P926 | Dialog "Rename guest" ("Name", "Cancel", "Save") | Renames guest tile | `renderer/components/guests/guest-moderation.tsx:191` | [ ] | [ ] | [ ] |
-| P927 | Dialog "Remove {name}?" | Confirms remove | `renderer/components/guests/guest-moderation.tsx:139` | [ ] | [ ] | [ ] |
-| P928 | Dialog "Ban {name}?" + toast "New link. Share it again…" | Confirms ban; announces new link | `renderer/components/guests/guest-moderation.tsx:152` | [ ] | [ ] | [ ] |
-| P929 | Unmute toast "{name} can talk again once they unmute." | Explains unmute lets go only | `renderer/components/guests/guest-moderation.tsx:74` | [ ] | [ ] | [ ] |
+| P923 | ⋯ "Rename…" | Opens Rename guest dialog | `renderer/components/guests/guest-moderation.tsx:93` | [x] | [ ] | [ ] |
+| P924 | ⋯ "Remove…" | Asks to remove guest | `renderer/components/guests/guest-moderation.tsx:99` | [x] | [ ] | [ ] |
+| P925 | ⋯ "Ban…" | Asks to ban guest (rotates link) | `renderer/components/guests/guest-moderation.tsx:105` | [x] | [ ] | [ ] |
+| P926 | Dialog "Rename guest" ("Name", "Cancel", "Save") | Renames guest tile | `renderer/components/guests/guest-moderation.tsx:191` | [x] | [ ] | [ ] |
+| P927 | Dialog "Remove {name}?" | Confirms remove | `renderer/components/guests/guest-moderation.tsx:139` | [x] | [ ] | [ ] |
+| P928 | Dialog "Ban {name}?" + toast "New link. Share it again…" | Confirms ban; announces new link | `renderer/components/guests/guest-moderation.tsx:152` | [x] | [ ] | [ ] |
+| P929 | Unmute toast "{name} can talk again once they unmute." | Explains unmute lets go only | `renderer/components/guests/guest-moderation.tsx:74` | [x] | [ ] | [ ] |
 
 ### Guests — Close room (close-room-button.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P930 | "Close the room" / "Closing…" | Closes room (asks if anyone in/live) | `renderer/components/guests/close-room-button.tsx:45` | [ ] | [ ] | [ ] |
-| P931 | Dialog "Close the room?" | "Your guests leave and the recording finalizes." | `renderer/components/guests/close-room-button.tsx:65` | [ ] | [ ] | [ ] |
+| P930 | "Close the room" / "Closing…" | Closes room (asks if anyone in/live) | `renderer/components/guests/close-room-button.tsx:45` | [x] | [ ] | [ ] |
+| P931 | Dialog "Close the room?" | "Your guests leave and the recording finalizes." | `renderer/components/guests/close-room-button.tsx:65` | [x] | [ ] | [ ] |
 
 ### Guests — Separate files / cloud ISO (cloud-iso-section.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P932 | "Record separate files" switch | Opens consent to enable; off disables | `renderer/components/guests/cloud-iso-section.tsx:183` | [ ] | [ ] | [ ] |
-| P933 | "Guests" consent list | Per-guest agreement status dots | `renderer/components/guests/cloud-iso-section.tsx:203` | [ ] | [ ] | [ ] |
-| P934 | "Files" list | Per-person/source file status this take | `renderer/components/guests/cloud-iso-section.tsx:217` | [ ] | [ ] | [ ] |
-| P935 | Notes / "A take's separate files couldn't be read." | Warnings | `renderer/components/guests/cloud-iso-section.tsx:235` | [ ] | [ ] | [ ] |
-| P936 | Dialog "Record separate files?" + cost line + "I agree…" checkbox + "Turn on separate files" | Consent and enable ISO | `renderer/components/guests/cloud-iso-section.tsx:246` | [ ] | [ ] | [ ] |
+| P932 | "Record separate files" switch | Opens consent to enable; off disables | `renderer/components/guests/cloud-iso-section.tsx:183` | [x] | [ ] | [ ] |
+| P933 | "Guests" consent list | Per-guest agreement status dots | `renderer/components/guests/cloud-iso-section.tsx:203` | [x] | [ ] | [ ] |
+| P934 | "Files" list | Per-person/source file status this take | `renderer/components/guests/cloud-iso-section.tsx:217` | [x] | [ ] | [ ] |
+| P935 | Notes / "A take's separate files couldn't be read." | Warnings | `renderer/components/guests/cloud-iso-section.tsx:235` | [x] | [ ] | [ ] |
+| P936 | Dialog "Record separate files?" + cost line + "I agree…" checkbox + "Turn on separate files" | Consent and enable ISO | `renderer/components/guests/cloud-iso-section.tsx:246` | [x] | [ ] | [ ] |
 
 ### Guests — Allowance gating (lib/guests-view.ts, lib/livestream-tabs.ts)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P937 | Guests page visibility | Shown with talk-show allowance or open room | `renderer/lib/livestream-tabs.ts:23` | [ ] | [ ] | [ ] |
-| P938 | Lock reasons ("Talk shows with guests come with Videorc Premium.", "Videorc Cloud isn't on…", "Talk shows aren't on…", "Videorc can't check…") | Explains lock; upsell only for no plan | `renderer/lib/guests-view.ts:51` | [ ] | [ ] | [ ] |
-| P939 | "The room opens once your recording or livestream ends." | Session holds camera | `renderer/lib/guests-view.ts:100` | [ ] | [ ] | [ ] |
+| P937 | Guests page visibility | Shown with talk-show allowance or open room | `renderer/lib/livestream-tabs.ts:23` | [x] | [ ] | [ ] |
+| P938 | Lock reasons ("Talk shows with guests come with Videorc Premium.", "Videorc Cloud isn't on…", "Talk shows aren't on…", "Videorc can't check…") | Explains lock; upsell only for no plan | `renderer/lib/guests-view.ts:51` | [x] | [ ] | [ ] |
+| P939 | "The room opens once your recording or livestream ends." | Session holds camera | `renderer/lib/guests-view.ts:100` | [x] | [ ] | [ ] |
 
 ### Stream Manager — window and tiers
 
@@ -1582,39 +1582,39 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1049 | Page key ⌘8 ("Avatar") | Opens the Avatar page. Key assigned by the sidebar digit order | `shared/sidebar-pages.ts:144` | [ ] | [ ] | [ ] |
-| P1050 | Tab strip "Profile" / "Greetings" | Switches the Avatar sections. The shell remembers the last tab | `renderer/components/tabs/avatar-tab.tsx:60 (labels renderer/lib/avatar-tabs.ts:23)` | [ ] | [ ] | [ ] |
-| P1051 | Avatar emblem + name + placement line | Shows the avatar's picture, its name and where it appears | `renderer/components/tabs/avatar-tab.tsx:105` | [ ] | [ ] | [ ] |
-| P1052 | "Place on Scene" button + shortcut chip | Opens the Scene page | `renderer/components/tabs/avatar-tab.tsx:125` | [ ] | [ ] | [ ] |
-| P1053 | Quiet alert "{name} isn't on stream yet…" | Explains how to turn the avatar on in Stream Manager | `renderer/components/tabs/avatar-tab.tsx:142` | [ ] | [ ] | [ ] |
-| P1054 | Alive creator overlay | Hides Profile and shows the pet creator while it is open | `renderer/components/tabs/avatar-tab.tsx:69` | [ ] | [ ] | [ ] |
+| P1049 | Page key ⌘8 ("Avatar") | Opens the Avatar page. Key assigned by the sidebar digit order | `shared/sidebar-pages.ts:144` | [x] | [ ] | [ ] |
+| P1050 | Tab strip "Profile" / "Greetings" | Switches the Avatar sections. The shell remembers the last tab | `renderer/components/tabs/avatar-tab.tsx:60 (labels renderer/lib/avatar-tabs.ts:23)` | [x] | [ ] | [ ] |
+| P1051 | Avatar emblem + name + placement line | Shows the avatar's picture, its name and where it appears | `renderer/components/tabs/avatar-tab.tsx:105` | [x] | [ ] | [ ] |
+| P1052 | "Place on Scene" button + shortcut chip | Opens the Scene page | `renderer/components/tabs/avatar-tab.tsx:125` | [x] | [ ] | [ ] |
+| P1053 | Quiet alert "{name} isn't on stream yet…" | Explains how to turn the avatar on in Stream Manager | `renderer/components/tabs/avatar-tab.tsx:142` | [x] | [ ] | [ ] |
+| P1054 | Alive creator overlay | Hides Profile and shows the pet creator while it is open | `renderer/components/tabs/avatar-tab.tsx:69` | [x] | [ ] | [ ] |
 
 ### Avatar → Profile: My avatars (buddy-library-section.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1055 | Section "My avatars" + Syncing spinner | Avatar library. A spinner shows while it syncs | `renderer/components/buddy-library-section.tsx:179` | [ ] | [ ] | [ ] |
-| P1056 | "New avatar…" button | Opens the 4-step avatar onboarding dialog | `renderer/components/buddy-library-section.tsx:189` | [ ] | [ ] | [ ] |
-| P1057 | Invitation alert "Make this avatar your own, or pick another." + "Start" | Opens the onboarding at step 1 | `renderer/components/buddy-library-section.tsx:205` | [ ] | [ ] | [ ] |
-| P1058 | Invitation "Dismiss" (X, tooltip) | Hides the invitation for good | `renderer/components/buddy-library-section.tsx:225` | [ ] | [ ] | [ ] |
-| P1059 | Alert (avatar is local only) + "Save to my library" | Uploads an avatar that only exists on this computer to the library | `renderer/components/buddy-library-section.tsx:248` | [ ] | [ ] | [ ] |
-| P1060 | Busy status line | Says what the library is working on | `renderer/components/buddy-library-section.tsx:267` | [ ] | [ ] | [ ] |
-| P1061 | Alert (avatar picked on another device) + "Use" | Switches to the avatar chosen on another device | `renderer/components/buddy-library-section.tsx:279` | [ ] | [ ] | [ ] |
-| P1062 | Group "Official" gallery cards | Built-in avatars, each with a "Use" button | `renderer/components/buddy-library-section.tsx:300` | [ ] | [ ] | [ ] |
-| P1063 | Group "Made by you" gallery | The user's avatars | `renderer/components/buddy-library-section.tsx:316` | [ ] | [ ] | [ ] |
-| P1064 | Signed-out empty state + "Sign in" | Asks the user to sign in to see web-made avatars | `renderer/components/buddy-library-section.tsx:317` | [ ] | [ ] | [ ] |
-| P1065 | Empty "Avatars you create show up here…" / unavailable line | Shown when there are no avatars or the library can't load | `renderer/components/buddy-library-section.tsx:338` | [ ] | [ ] | [ ] |
-| P1066 | Card "Use" button | Makes this avatar the active one | `renderer/components/buddy-library-section.tsx:469` | [ ] | [ ] | [ ] |
-| P1067 | Card "Alive" tag / Active state | Marks cards that move, and the card in use | `renderer/components/buddy-library-section.tsx:452` | [ ] | [ ] | [ ] |
-| P1068 | Card "More for {name}" menu | Opens the card's actions menu | `renderer/components/buddy-library-section.tsx:482` | [ ] | [ ] | [ ] |
-| P1069 | Menu "Rename" | Opens a rename dialog (made-by-you avatars only) | `renderer/components/buddy-library-section.tsx:500` | [ ] | [ ] | [ ] |
-| P1070 | Menu "Edit personality" | Opens the personality and About-you editor | `renderer/components/buddy-library-section.tsx:507` | [ ] | [ ] | [ ] |
-| P1071 | Menu "Make it Alive" | Uses this avatar, then opens the Alive creator | `renderer/components/buddy-library-section.tsx:517` | [ ] | [ ] | [ ] |
-| P1072 | Menu "Delete" (destructive) | Asks before deleting the avatar | `renderer/components/buddy-library-section.tsx:525` | [ ] | [ ] | [ ] |
-| P1073 | Delete confirm "Delete {name}?" ("Cancel" / "Delete" / "Deleting…") | Removes the avatar's pictures from the account | `renderer/components/buddy-library-section.tsx:580` | [ ] | [ ] | [ ] |
-| P1074 | Rename dialog: "Name" input (1–24 characters) + "Cancel" / "Save" | Renames a library avatar | `renderer/components/buddy-library-section.tsx:686` | [ ] | [ ] | [ ] |
-| P1075 | Edit-personality dialog: "Personality" and "About you (optional)" textareas with counters | Edits the library avatar's personality and context | `renderer/components/buddy-library-section.tsx:706` | [ ] | [ ] | [ ] |
-| P1076 | Error alert (destructive) | Shows a failed library sync or action | `renderer/components/buddy-library-section.tsx:364` | [ ] | [ ] | [ ] |
+| P1055 | Section "My avatars" + Syncing spinner | Avatar library. A spinner shows while it syncs | `renderer/components/buddy-library-section.tsx:179` | [x] | [ ] | [ ] |
+| P1056 | "New avatar…" button | Opens the 4-step avatar onboarding dialog | `renderer/components/buddy-library-section.tsx:189` | [x] | [ ] | [ ] |
+| P1057 | Invitation alert "Make this avatar your own, or pick another." + "Start" | Opens the onboarding at step 1 | `renderer/components/buddy-library-section.tsx:205` | [x] | [ ] | [ ] |
+| P1058 | Invitation "Dismiss" (X, tooltip) | Hides the invitation for good | `renderer/components/buddy-library-section.tsx:225` | [x] | [ ] | [ ] |
+| P1059 | Alert (avatar is local only) + "Save to my library" | Uploads an avatar that only exists on this computer to the library | `renderer/components/buddy-library-section.tsx:248` | [x] | [ ] | [ ] |
+| P1060 | Busy status line | Says what the library is working on | `renderer/components/buddy-library-section.tsx:267` | [x] | [ ] | [ ] |
+| P1061 | Alert (avatar picked on another device) + "Use" | Switches to the avatar chosen on another device | `renderer/components/buddy-library-section.tsx:279` | [x] | [ ] | [ ] |
+| P1062 | Group "Official" gallery cards | Built-in avatars, each with a "Use" button | `renderer/components/buddy-library-section.tsx:300` | [x] | [ ] | [ ] |
+| P1063 | Group "Made by you" gallery | The user's avatars | `renderer/components/buddy-library-section.tsx:316` | [x] | [ ] | [ ] |
+| P1064 | Signed-out empty state + "Sign in" | Asks the user to sign in to see web-made avatars | `renderer/components/buddy-library-section.tsx:317` | [x] | [ ] | [ ] |
+| P1065 | Empty "Avatars you create show up here…" / unavailable line | Shown when there are no avatars or the library can't load | `renderer/components/buddy-library-section.tsx:338` | [x] | [ ] | [ ] |
+| P1066 | Card "Use" button | Makes this avatar the active one | `renderer/components/buddy-library-section.tsx:469` | [x] | [ ] | [ ] |
+| P1067 | Card "Alive" tag / Active state | Marks cards that move, and the card in use | `renderer/components/buddy-library-section.tsx:452` | [x] | [ ] | [ ] |
+| P1068 | Card "More for {name}" menu | Opens the card's actions menu | `renderer/components/buddy-library-section.tsx:482` | [x] | [ ] | [ ] |
+| P1069 | Menu "Rename" | Opens a rename dialog (made-by-you avatars only) | `renderer/components/buddy-library-section.tsx:500` | [x] | [ ] | [ ] |
+| P1070 | Menu "Edit personality" | Opens the personality and About-you editor | `renderer/components/buddy-library-section.tsx:507` | [x] | [ ] | [ ] |
+| P1071 | Menu "Make it Alive" | Uses this avatar, then opens the Alive creator | `renderer/components/buddy-library-section.tsx:517` | [x] | [ ] | [ ] |
+| P1072 | Menu "Delete" (destructive) | Asks before deleting the avatar | `renderer/components/buddy-library-section.tsx:525` | [x] | [ ] | [ ] |
+| P1073 | Delete confirm "Delete {name}?" ("Cancel" / "Delete" / "Deleting…") | Removes the avatar's pictures from the account | `renderer/components/buddy-library-section.tsx:580` | [x] | [ ] | [ ] |
+| P1074 | Rename dialog: "Name" input (1–24 characters) + "Cancel" / "Save" | Renames a library avatar | `renderer/components/buddy-library-section.tsx:686` | [x] | [ ] | [ ] |
+| P1075 | Edit-personality dialog: "Personality" and "About you (optional)" textareas with counters | Edits the library avatar's personality and context | `renderer/components/buddy-library-section.tsx:706` | [x] | [ ] | [ ] |
+| P1076 | Error alert (destructive) | Shows a failed library sync or action | `renderer/components/buddy-library-section.tsx:364` | [x] | [ ] | [ ] |
 
 ### Avatar onboarding dialog (buddy-onboarding.tsx, copy in lib/buddy-onboarding-copy.ts)
 
@@ -1642,55 +1642,55 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1094 | Section "Name and personality" | Edits the persona | `renderer/components/buddy-persona-section.tsx:103` | [ ] | [ ] | [ ] |
-| P1095 | "Name" input (Enter blurs and saves) | Renames the avatar | `renderer/components/buddy-persona-section.tsx:273` | [ ] | [ ] | [ ] |
-| P1096 | "Start over" + confirm "Start over with a new avatar?" ("Keep {name}" / "Start over") | Deletes the local persona and starts again | `renderer/components/buddy-persona-section.tsx:109` | [ ] | [ ] | [ ] |
-| P1097 | "Bubble" style picker (Speech / Thought / Shout) | Sets the speech-bubble style | `renderer/components/buddy-persona-section.tsx:132` | [ ] | [ ] | [ ] |
-| P1098 | "Zoom in on the bubble" button + "Bubble" dialog | Shows a larger bubble preview and picker | `renderer/components/buddy-persona-section.tsx:146` | [ ] | [ ] | [ ] |
-| P1099 | "Personality" textarea + example chips | Sets the personality text | `renderer/components/buddy-persona-section.tsx:319` | [ ] | [ ] | [ ] |
-| P1100 | "About you" textarea | Facts Sidekick uses to answer viewers | `renderer/components/buddy-persona-section.tsx:382` | [ ] | [ ] | [ ] |
-| P1101 | Save error alert | Shows a failed save | `renderer/components/buddy-persona-section.tsx:122` | [ ] | [ ] | [ ] |
+| P1094 | Section "Name and personality" | Edits the persona | `renderer/components/buddy-persona-section.tsx:103` | [x] | [ ] | [ ] |
+| P1095 | "Name" input (Enter blurs and saves) | Renames the avatar | `renderer/components/buddy-persona-section.tsx:273` | [x] | [ ] | [ ] |
+| P1096 | "Start over" + confirm "Start over with a new avatar?" ("Keep {name}" / "Start over") | Deletes the local persona and starts again | `renderer/components/buddy-persona-section.tsx:109` | [x] | [ ] | [ ] |
+| P1097 | "Bubble" style picker (Speech / Thought / Shout) | Sets the speech-bubble style | `renderer/components/buddy-persona-section.tsx:132` | [x] | [ ] | [ ] |
+| P1098 | "Zoom in on the bubble" button + "Bubble" dialog | Shows a larger bubble preview and picker | `renderer/components/buddy-persona-section.tsx:146` | [x] | [ ] | [ ] |
+| P1099 | "Personality" textarea + example chips | Sets the personality text | `renderer/components/buddy-persona-section.tsx:319` | [x] | [ ] | [ ] |
+| P1100 | "About you" textarea | Facts Sidekick uses to answer viewers | `renderer/components/buddy-persona-section.tsx:382` | [x] | [ ] | [ ] |
+| P1101 | Save error alert | Shows a failed save | `renderer/components/buddy-persona-section.tsx:122` | [x] | [ ] | [ ] |
 
 ### Avatar → Profile: Look, Still/Alive and living preview (buddy-pet-settings.tsx, buddy-avatar-section.tsx, buddy-look-section.tsx, buddy-look-tiles.tsx, buddy-pet-preview.tsx, buddy-test-dialog.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1102 | Section "Look" + segmented "Still" / "Alive" (manual activation) | Chooses a still picture set or the animated pack | `renderer/components/buddy-avatar-section.tsx:221` | [ ] | [ ] | [ ] |
-| P1103 | Alert "A new look … under Still" + "Switch to Still" | Points to a pending look draft | `renderer/components/buddy-avatar-section.tsx:242` | [ ] | [ ] | [ ] |
-| P1104 | Living preview (click to react, Esc re-centers) | Animated avatar that reacts when clicked | `renderer/components/buddy-pet-preview.tsx:461` | [ ] | [ ] | [ ] |
-| P1105 | Preview error tooltip | Shows why the preview failed | `renderer/components/buddy-pet-preview.tsx:484` | [ ] | [ ] | [ ] |
-| P1106 | "Play/Pause {name}" button | Pauses the moving preview | `renderer/components/buddy-avatar-section.tsx:289` | [ ] | [ ] | [ ] |
-| P1107 | "Test" button (key T) | Opens the Test dialog | `renderer/components/buddy-avatar-section.tsx:301` | [ ] | [ ] | [ ] |
-| P1108 | Key "I" in the Alive view | Imports moves | `renderer/components/buddy-avatar-section.tsx:212` | [ ] | [ ] | [ ] |
-| P1109 | Test dialog "Test {name}" | Previews each state without going live | `renderer/components/buddy-test-dialog.tsx:144` | [ ] | [ ] | [ ] |
-| P1110 | Test "State" segmented control (Idle 1 / Talking 2 / Laughing 3 / Thinking 4) | Switches the preview state, by click or digit key | `renderer/components/buddy-test-dialog.tsx:218` | [ ] | [ ] | [ ] |
-| P1111 | Test reaction buttons | Plays each of the pack's reactions | `renderer/components/buddy-test-dialog.tsx:252` | [ ] | [ ] | [ ] |
-| P1112 | "Show the bubble while Talking" switch | Toggles the bubble in the test | `renderer/components/buddy-test-dialog.tsx:273` | [ ] | [ ] | [ ] |
-| P1113 | Still: "Current look" pose tiles (Default / Uses idle badges) | Shows the four pose pictures | `renderer/components/buddy-look-section.tsx:109` | [ ] | [ ] | [ ] |
-| P1114 | Still: "Making the new look…" + elapsed time + "Cancel" | Progress of drawing a new look, with cancel | `renderer/components/buddy-look-tiles.tsx:201` | [ ] | [ ] | [ ] |
-| P1115 | Draft pose tile "Redo" (key R) | Redraws one pose from the idle picture | `renderer/components/buddy-look-tiles.tsx:288` | [ ] | [ ] | [ ] |
-| P1116 | Draft "Use as my avatar" (⌘/Ctrl+Enter) | Wears the drafted look | `renderer/components/buddy-look-section.tsx:183` | [ ] | [ ] | [ ] |
-| P1117 | Draft "Delete…" + confirm "Delete the new look?" ("Keep it" / "Delete look") | Throws the draft away | `renderer/components/buddy-look-section.tsx:196` | [ ] | [ ] | [ ] |
-| P1118 | Still: "Make it Alive" | Opens the Alive creator from the idle picture | `renderer/components/buddy-look-section.tsx:227` | [ ] | [ ] | [ ] |
-| P1119 | Alive: create gate alert / "Allow cloud AI" | Explains the creation lock or asks for cloud-AI consent | `renderer/components/buddy-avatar-section.tsx:467` | [ ] | [ ] | [ ] |
-| P1120 | Alive: "Moves" radiogroup rows ("Wearing" marker, arrow keys) | Wears a move pack | `renderer/components/buddy-avatar-section.tsx:495` | [ ] | [ ] | [ ] |
-| P1121 | Alive empty state "No moves yet…" | Shown when no packs exist | `renderer/components/buddy-avatar-section.tsx:484` | [ ] | [ ] | [ ] |
-| P1122 | "Create" | Opens the Alive creator | `renderer/components/buddy-avatar-section.tsx:441` | [ ] | [ ] | [ ] |
-| P1123 | "Import moves…" | Imports a page-pet folder | `renderer/components/buddy-avatar-section.tsx:453` | [ ] | [ ] | [ ] |
-| P1124 | "Remove" + confirm "Remove {pack}?" ("Keep it" / "Remove") | Deletes the worn move pack | `renderer/components/buddy-avatar-section.tsx:524` | [ ] | [ ] | [ ] |
-| P1125 | Errors "Couldn't list your moves" / "Couldn't import those moves" | Failure alerts | `renderer/components/buddy-avatar-section.tsx:475` | [ ] | [ ] | [ ] |
-| P1126 | Cloud AI consent dialog | Grants cloud AI before creating | `renderer/components/buddy-avatar-section.tsx:361` | [ ] | [ ] | [ ] |
+| P1102 | Section "Look" + segmented "Still" / "Alive" (manual activation) | Chooses a still picture set or the animated pack | `renderer/components/buddy-avatar-section.tsx:221` | [x] | [ ] | [ ] |
+| P1103 | Alert "A new look … under Still" + "Switch to Still" | Points to a pending look draft | `renderer/components/buddy-avatar-section.tsx:242` | [x] | [ ] | [ ] |
+| P1104 | Living preview (click to react, Esc re-centers) | Animated avatar that reacts when clicked | `renderer/components/buddy-pet-preview.tsx:461` | [x] | [ ] | [ ] |
+| P1105 | Preview error tooltip | Shows why the preview failed | `renderer/components/buddy-pet-preview.tsx:484` | [x] | [ ] | [ ] |
+| P1106 | "Play/Pause {name}" button | Pauses the moving preview | `renderer/components/buddy-avatar-section.tsx:289` | [x] | [ ] | [ ] |
+| P1107 | "Test" button (key T) | Opens the Test dialog | `renderer/components/buddy-avatar-section.tsx:301` | [x] | [ ] | [ ] |
+| P1108 | Key "I" in the Alive view | Imports moves | `renderer/components/buddy-avatar-section.tsx:212` | [x] | [ ] | [ ] |
+| P1109 | Test dialog "Test {name}" | Previews each state without going live | `renderer/components/buddy-test-dialog.tsx:144` | [x] | [ ] | [ ] |
+| P1110 | Test "State" segmented control (Idle 1 / Talking 2 / Laughing 3 / Thinking 4) | Switches the preview state, by click or digit key | `renderer/components/buddy-test-dialog.tsx:218` | [x] | [ ] | [ ] |
+| P1111 | Test reaction buttons | Plays each of the pack's reactions | `renderer/components/buddy-test-dialog.tsx:252` | [x] | [ ] | [ ] |
+| P1112 | "Show the bubble while Talking" switch | Toggles the bubble in the test | `renderer/components/buddy-test-dialog.tsx:273` | [x] | [ ] | [ ] |
+| P1113 | Still: "Current look" pose tiles (Default / Uses idle badges) | Shows the four pose pictures | `renderer/components/buddy-look-section.tsx:109` | [x] | [ ] | [ ] |
+| P1114 | Still: "Making the new look…" + elapsed time + "Cancel" | Progress of drawing a new look, with cancel | `renderer/components/buddy-look-tiles.tsx:201` | [x] | [ ] | [ ] |
+| P1115 | Draft pose tile "Redo" (key R) | Redraws one pose from the idle picture | `renderer/components/buddy-look-tiles.tsx:288` | [x] | [ ] | [ ] |
+| P1116 | Draft "Use as my avatar" (⌘/Ctrl+Enter) | Wears the drafted look | `renderer/components/buddy-look-section.tsx:183` | [x] | [ ] | [ ] |
+| P1117 | Draft "Delete…" + confirm "Delete the new look?" ("Keep it" / "Delete look") | Throws the draft away | `renderer/components/buddy-look-section.tsx:196` | [x] | [ ] | [ ] |
+| P1118 | Still: "Make it Alive" | Opens the Alive creator from the idle picture | `renderer/components/buddy-look-section.tsx:227` | [x] | [ ] | [ ] |
+| P1119 | Alive: create gate alert / "Allow cloud AI" | Explains the creation lock or asks for cloud-AI consent | `renderer/components/buddy-avatar-section.tsx:467` | [x] | [ ] | [ ] |
+| P1120 | Alive: "Moves" radiogroup rows ("Wearing" marker, arrow keys) | Wears a move pack | `renderer/components/buddy-avatar-section.tsx:495` | [x] | [ ] | [ ] |
+| P1121 | Alive empty state "No moves yet…" | Shown when no packs exist | `renderer/components/buddy-avatar-section.tsx:484` | [x] | [ ] | [ ] |
+| P1122 | "Create" | Opens the Alive creator | `renderer/components/buddy-avatar-section.tsx:441` | [x] | [ ] | [ ] |
+| P1123 | "Import moves…" | Imports a page-pet folder | `renderer/components/buddy-avatar-section.tsx:453` | [x] | [ ] | [ ] |
+| P1124 | "Remove" + confirm "Remove {pack}?" ("Keep it" / "Remove") | Deletes the worn move pack | `renderer/components/buddy-avatar-section.tsx:524` | [x] | [ ] | [ ] |
+| P1125 | Errors "Couldn't list your moves" / "Couldn't import those moves" | Failure alerts | `renderer/components/buddy-avatar-section.tsx:475` | [x] | [ ] | [ ] |
+| P1126 | Cloud AI consent dialog | Grants cloud AI before creating | `renderer/components/buddy-avatar-section.tsx:361` | [x] | [ ] | [ ] |
 
 ### Avatar → Profile: Reactions and Motion (buddy-reactions-section.tsx, buddy-motion-section.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1127 | Section "Reactions" grouped as Viewers / Regulars / Your stream | Maps stream events to avatar reactions | `renderer/components/buddy-reactions-section.tsx:66` | [ ] | [ ] | [ ] |
-| P1128 | Per-trigger reaction select (Follow, Sub, Gifted subs, Raid…) | Picks the reaction for each event | `renderer/components/buddy-reactions-section.tsx:114` | [ ] | [ ] | [ ] |
-| P1129 | "Try the … reaction" button | Plays the reaction in the preview | `renderer/components/buddy-reactions-section.tsx:131` | [ ] | [ ] | [ ] |
-| P1130 | Section "Motion": slider + tick buttons "Off" / "Calm" / "Lively" | Sets how much the avatar moves | `renderer/components/buddy-motion-section.tsx:57` | [ ] | [ ] | [ ] |
-| P1131 | "Sleep after" select | Idle time before the avatar sleeps | `renderer/components/buddy-motion-section.tsx:109` | [ ] | [ ] | [ ] |
-| P1132 | "Breathing" switch | Slow breathing between events | `renderer/components/buddy-motion-section.tsx:146` | [ ] | [ ] | [ ] |
+| P1127 | Section "Reactions" grouped as Viewers / Regulars / Your stream | Maps stream events to avatar reactions | `renderer/components/buddy-reactions-section.tsx:66` | [x] | [ ] | [ ] |
+| P1128 | Per-trigger reaction select (Follow, Sub, Gifted subs, Raid…) | Picks the reaction for each event | `renderer/components/buddy-reactions-section.tsx:114` | [x] | [ ] | [ ] |
+| P1129 | "Try the … reaction" button | Plays the reaction in the preview | `renderer/components/buddy-reactions-section.tsx:131` | [x] | [ ] | [ ] |
+| P1130 | Section "Motion": slider + tick buttons "Off" / "Calm" / "Lively" | Sets how much the avatar moves | `renderer/components/buddy-motion-section.tsx:57` | [x] | [ ] | [ ] |
+| P1131 | "Sleep after" select | Idle time before the avatar sleeps | `renderer/components/buddy-motion-section.tsx:109` | [x] | [ ] | [ ] |
+| P1132 | "Breathing" switch | Slow breathing between events | `renderer/components/buddy-motion-section.tsx:146` | [x] | [ ] | [ ] |
 
 ### Alive creator (buddy-pet-creator.tsx)
 
@@ -1718,18 +1718,18 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1150 | Section "Greetings" + "Greetings" switch | Turns greetings for new chatters and events on or off | `renderer/components/buddy-greetings-section.tsx:137` | [ ] | [ ] | [ ] |
-| P1151 | "Write greetings with AI" row + "Sidekick → Chat" link | Points to the AI switch on the Sidekick page | `renderer/components/buddy-greetings-section.tsx:165` | [ ] | [ ] | [ ] |
-| P1152 | "Welcomes" list rows + "{title} welcome on" switch | Welcome lines, each with an enable switch | `renderer/components/buddy-greetings-section.tsx:185` | [ ] | [ ] | [ ] |
-| P1153 | "Activity" list rows (per kind, Default rows) + "{title} greeting on" switch | Lines for follow, sub, raid and the rest | `renderer/components/buddy-greetings-section.tsx:201` | [ ] | [ ] | [ ] |
-| P1154 | "Add a greeting…" select | Adds a greeting kind | `renderer/components/buddy-greetings-section.tsx:262` | [ ] | [ ] | [ ] |
-| P1155 | Editor textarea (counter, Esc closes) | Edits the greeting text | `renderer/components/buddy-greetings-section.tsx:586` | [ ] | [ ] | [ ] |
-| P1156 | "Avatar state" segmented control | Sets the pose used while it speaks | `renderer/components/buddy-greetings-section.tsx:600` | [ ] | [ ] | [ ] |
-| P1157 | "Platform" select (Any + platforms) | Limits a line to one chat platform | `renderer/components/buddy-greetings-section.tsx:616` | [ ] | [ ] | [ ] |
-| P1158 | "Fields" popover | Inserts template fields such as the name | `renderer/components/buddy-greetings-section.tsx:630` | [ ] | [ ] | [ ] |
-| P1159 | "Add variant" (⌘/Ctrl+N) | Adds an alternate line | `renderer/components/buddy-greetings-section.tsx:655` | [ ] | [ ] | [ ] |
-| P1160 | "Remove greeting" (X) | Deletes the line | `renderer/components/buddy-greetings-section.tsx:669` | [ ] | [ ] | [ ] |
-| P1161 | Warning notes | Show length and platform-limit warnings | `renderer/components/buddy-greetings-section.tsx:684` | [ ] | [ ] | [ ] |
+| P1150 | Section "Greetings" + "Greetings" switch | Turns greetings for new chatters and events on or off | `renderer/components/buddy-greetings-section.tsx:137` | [x] | [ ] | [ ] |
+| P1151 | "Write greetings with AI" row + "Sidekick → Chat" link | Points to the AI switch on the Sidekick page | `renderer/components/buddy-greetings-section.tsx:165` | [x] | [ ] | [ ] |
+| P1152 | "Welcomes" list rows + "{title} welcome on" switch | Welcome lines, each with an enable switch | `renderer/components/buddy-greetings-section.tsx:185` | [x] | [ ] | [ ] |
+| P1153 | "Activity" list rows (per kind, Default rows) + "{title} greeting on" switch | Lines for follow, sub, raid and the rest | `renderer/components/buddy-greetings-section.tsx:201` | [x] | [ ] | [ ] |
+| P1154 | "Add a greeting…" select | Adds a greeting kind | `renderer/components/buddy-greetings-section.tsx:262` | [x] | [ ] | [ ] |
+| P1155 | Editor textarea (counter, Esc closes) | Edits the greeting text | `renderer/components/buddy-greetings-section.tsx:586` | [x] | [ ] | [ ] |
+| P1156 | "Avatar state" segmented control | Sets the pose used while it speaks | `renderer/components/buddy-greetings-section.tsx:600` | [x] | [ ] | [ ] |
+| P1157 | "Platform" select (Any + platforms) | Limits a line to one chat platform | `renderer/components/buddy-greetings-section.tsx:616` | [x] | [ ] | [ ] |
+| P1158 | "Fields" popover | Inserts template fields such as the name | `renderer/components/buddy-greetings-section.tsx:630` | [x] | [ ] | [ ] |
+| P1159 | "Add variant" (⌘/Ctrl+N) | Adds an alternate line | `renderer/components/buddy-greetings-section.tsx:655` | [x] | [ ] | [ ] |
+| P1160 | "Remove greeting" (X) | Deletes the line | `renderer/components/buddy-greetings-section.tsx:669` | [x] | [ ] | [ ] |
+| P1161 | Warning notes | Show length and platform-limit warnings | `renderer/components/buddy-greetings-section.tsx:684` | [x] | [ ] | [ ] |
 
 ### Sidekick page (⌘9): shell and Overview (tabs/buddy-tab.tsx)
 
