@@ -71,6 +71,12 @@ pub struct TargetDraft {
     pub kick_category_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x_announce: Option<bool>,
+    /// X live category (plan 260 L2): the permanent id Go Live sends, and the
+    /// name the picker shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_category_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_category_name: Option<String>,
     #[serde(default)]
     pub updated_at: String,
 }
@@ -320,14 +326,21 @@ pub fn override_summary(default_privacy: Privacy, draft: &TargetDraft) -> String
                 parts.push(category.to_string());
             }
         }
-        "x" => parts.push(
-            if draft.x_announce == Some(false) {
-                copy::NO_ANNOUNCEMENT
-            } else {
-                copy::ANNOUNCES
+        "x" => {
+            if let Some(category) = draft.x_category_name.as_deref().map(str::trim)
+                && !category.is_empty()
+            {
+                parts.push(category.to_string());
             }
-            .to_string(),
-        ),
+            parts.push(
+                if draft.x_announce == Some(false) {
+                    copy::NO_ANNOUNCEMENT
+                } else {
+                    copy::ANNOUNCES
+                }
+                .to_string(),
+            );
+        }
         _ => {}
     }
     parts.join(" · ")
@@ -484,6 +497,14 @@ mod tests {
         assert_eq!(
             override_summary(Privacy::Private, &twitch),
             "Own title · Software and Game Development · de"
+        );
+        let x_with_category = TargetDraft {
+            x_category_name: Some("Gaming".into()),
+            ..draft("x")
+        };
+        assert_eq!(
+            override_summary(Privacy::Public, &x_with_category),
+            "Shared title · Gaming · Announces"
         );
         let x = TargetDraft {
             x_announce: Some(false),

@@ -73,6 +73,7 @@ pub mod time_zones;
 pub mod watchdog;
 pub mod watchdog_notify;
 pub mod watchdog_section;
+pub mod x_categories;
 
 use accounts::{
     AccountValidation, PlatformAccount, ProviderCredentials, XCapability, YouTubeChannel,
@@ -95,6 +96,8 @@ pub mod methods {
     pub const YOUTUBE_CHANNELS: &str = "platformAccounts.youtube.channels";
     pub const YOUTUBE_SELECT_CHANNEL: &str = "platformAccounts.youtube.selectChannel";
     pub const X_CAPABILITY: &str = "streamTargets.x.capability";
+    /// X's live categories for the Stream details picker (plan 260 L2).
+    pub const X_LIVE_CATEGORIES: &str = "streamTargets.x.liveCategories";
     pub const X_START_LIVE_AUTHORIZATION: &str = "streamTargets.x.startLiveAuthorization";
     pub const MANUAL_KEY_STORE: &str = "streamTargets.manualKey.store";
     pub const MANUAL_KEY_RESTORE: &str = "streamTargets.manualKey.restorePrevious";
@@ -134,6 +137,9 @@ pub struct PlatformsState {
     pub youtube_channels_loading: bool,
     pub x_capability: Option<XCapability>,
     pub x_capability_loading: bool,
+    /// X's live categories once X Live can go live (`loadXLiveCategories`).
+    pub x_live_categories: Vec<x_categories::XLiveCategory>,
+    pub x_live_categories_status: x_categories::XLiveCategoriesStatus,
     /// The list has been read on this connection.
     pub loaded: bool,
     /// The saved keys whose hint was asked for on this connection

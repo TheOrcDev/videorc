@@ -16,6 +16,7 @@ mod stream_report;
 mod thumbnail;
 mod upcoming;
 mod watchdog;
+mod x_details;
 mod youtube_consent;
 
 use std::sync::Arc;
