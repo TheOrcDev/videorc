@@ -19,7 +19,7 @@ use videorc_app_core::studio::HealthTelemetry;
 use videorc_app_core::studio::camera_background_view::{
     CHOOSE_IMAGE_DESCRIPTION, CHOOSE_IMAGE_EMPTY, CHOOSE_IMAGE_TITLE, ChoiceId, ChoicesInput,
     DONE_LABEL, LABEL as BACKGROUND_LABEL, OPEN_IMAGES_LABEL, POPOVER_IMAGES, background_for,
-    background_for_choice, choices, images_picked_first,
+    background_for_choice, bundled_images, choices, images_picked_first,
 };
 use videorc_app_core::studio::session::session_is_live;
 use videorc_app_core::studio::source_selection::{PICKER_NONE_VALUE, PickerView, SourceKind};
@@ -99,7 +99,7 @@ fn section_view(
         &SourcesExtras {
             chat_on_air,
             chat_new_count,
-            images: &[],
+            images: &bundled_images(&videorc_app_core::bundled::current().backgrounds),
             platform: Some(runtime_platform()),
         },
     )
@@ -373,7 +373,12 @@ impl QuickSettingsSection {
             .sources
             .camera_id
             .is_some();
-        let shown = images_picked_first(&[], None);
+        let images = bundled_images(&videorc_app_core::bundled::current().backgrounds);
+        let picked = match selected {
+            Some(ChoiceId::Image(id)) => Some(id.as_str()),
+            _ => None,
+        };
+        let shown = images_picked_first(&images, picked);
         let tiles = choices(&ChoicesInput {
             images: &shown,
             camera_selected,
@@ -431,7 +436,7 @@ impl QuickSettingsSection {
             .camera_id
             .is_some();
         let image_choices = choices(&ChoicesInput {
-            images: &[],
+            images: &bundled_images(&videorc_app_core::bundled::current().backgrounds),
             camera_selected,
             room_open: false,
             platform: Some(runtime_platform()),
