@@ -273,8 +273,13 @@ impl ScenePage {
             .entry(id.clone())
             .or_insert_with(|| cx.focus_handle())
             .clone();
+        // A named list item, so the tree (and the UI driver's
+        // `scene-row-<id>`) carries the row: focus and Alt+↑/↓ reorder go
+        // through it.
         let mut host = div()
             .id(SharedString::from(format!("scene-row-{id}")))
+            .role(gpui::Role::ListItem)
+            .aria_label(row.name.clone())
             .relative()
             .group(KEBAB_HOST)
             .track_focus(&focus)
