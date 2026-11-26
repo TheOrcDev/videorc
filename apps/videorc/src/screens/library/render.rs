@@ -121,6 +121,7 @@ impl LibraryScreen {
                 let implemented = matches!(
                     item.id,
                     MenuId::Play
+                        | MenuId::BuddyReport
                         | MenuId::Markers
                         | MenuId::Reveal
                         | MenuId::ExportMp4

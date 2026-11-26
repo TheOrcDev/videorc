@@ -40,6 +40,7 @@ impl LibraryScreen {
             }
             MenuId::Delete => self.ask_delete(vec![id], window, cx),
             MenuId::Play => self.external_recording(id, cx),
+            MenuId::BuddyReport => cx.emit(OpenSidekickReport(id)),
             MenuId::Markers => {
                 if let Some(session) = self
                     .core
