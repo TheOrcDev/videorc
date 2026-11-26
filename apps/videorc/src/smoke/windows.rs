@@ -329,6 +329,14 @@ fn place(handle: AnyWindowHandle, params: &Map<String, Value>, cx: &mut App) -> 
     handle
         .update(cx, |_, window, _| {
             let frame = requested_frame(params, frame_of(window));
+            // AppKit's setFrame inside GPUI's own update never reaches GPUI's
+            // resize callback, so the window laid out at its old size (the
+            // Stream Manager at 1120x720 in a 1100x700 frame, its status bar
+            // below the edge). Resize through GPUI too, as resize-window does.
+            window.resize(gpui::size(
+                gpui::px(frame.width as f32),
+                gpui::px(frame.height as f32),
+            ));
             platform::current().set_window_frame(window, frame)
         })
         .map_err(|_| "The window closed.".to_string())?
