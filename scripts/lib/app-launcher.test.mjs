@@ -779,6 +779,34 @@ test(
   }
 )
 
+test('GPUI backend readiness enables its smoke server and preserves explicit settings', async () => {
+  for (const [kind, setting, expected] of [
+    ['gpui', undefined, '1'],
+    ['gpui', '0', '0'],
+    ['electron', undefined, undefined]
+  ]) {
+    const launched = await launchDevApp({
+      env: { VIDEORC_APP: kind, VIDEORC_SMOKE_COMMAND_SERVER: setting },
+      timeoutMs: 2_000,
+      requiredMarkers: ['backend-ready'],
+      spawnSpec: {
+        command: process.execPath,
+        args: [
+          '-e',
+          `
+          const assert = require('node:assert/strict')
+          assert.equal(process.env.VIDEORC_SMOKE_COMMAND_SERVER, ${JSON.stringify(expected)})
+          console.log('[smoke] backend-ready ' + JSON.stringify({ host: '127.0.0.1', port: 43210, token: 'fixture' }))
+          setInterval(() => {}, 1_000)
+        `
+        ],
+        cwd: process.cwd()
+      }
+    })
+    await launched.stop()
+  }
+})
+
 test('launchDevApp rejects a smoke command marker without a capability', async () => {
   const fixtureScript = `
       console.log('[smoke] preview-motion-ready ' + JSON.stringify({ host: '127.0.0.1', port: 43210 }))
