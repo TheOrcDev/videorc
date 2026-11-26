@@ -24,10 +24,24 @@ pub fn motion(cx: &App) -> bool {
     !cx.try_global::<ReduceMotion>().is_some_and(|it| it.0)
 }
 
-/// The appearance `window` shows now.
+/// The app's own light/dark choice (the Settings theme, a screenshot's
+/// forced look), or `None` to follow the window. macOS also takes it as the
+/// window's appearance; Linux (and any platform where a window's appearance
+/// can't be set) has only this, so the app sets it on every platform.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AppearanceOverride(pub Option<WindowAppearance>);
+
+impl Global for AppearanceOverride {}
+
+/// The appearance `window` shows now: the app's own choice when it made one,
+/// else the window's.
 pub fn current(window: &Window, cx: &App) -> Appearance {
     let increase_contrast = cx.try_global::<IncreaseContrast>().is_some_and(|it| it.0);
-    Appearance::of(window.appearance(), increase_contrast)
+    let appearance = cx
+        .try_global::<AppearanceOverride>()
+        .and_then(|forced| forced.0)
+        .unwrap_or_else(|| window.appearance());
+    Appearance::of(appearance, increase_contrast)
 }
 
 /// The theme a component draws with: the one it was given (the gallery

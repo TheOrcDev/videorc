@@ -8,8 +8,10 @@
 //! Accessibility grant is involved, nothing reaches the OS's assistive
 //! technology, and from then on GPUI keeps the tree each frame.
 //!
-//! Linux's adapter listens for the AT-SPI bus's screen-reader switch
-//! instead; turning it on is S2.6c's (L5), so the driver says so by name.
+//! Linux's adapter listens for the AT-SPI bus's screen-reader switch, which
+//! belongs to the desktop, not to a smoke run: there the driver switches the
+//! tree on in-process instead (`Window::activate_a11y_in_process`, patched
+//! into gpui-pre), and reads and acts on it exactly as on macOS.
 
 use gpui::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -85,8 +87,8 @@ pub fn activate(native: NativeWindow) -> Result<(), String> {
             Ok(())
         }
         NativeWindow::Other => Err(
-            "The UI driver cannot turn accessibility on for this window here: on Linux the \
-             AT-SPI screen-reader switch is plan 260 S2.6c's."
+            "The UI driver cannot turn accessibility on for this window's platform yet \
+             (Linux switches it on in-process instead)."
                 .into(),
         ),
     }

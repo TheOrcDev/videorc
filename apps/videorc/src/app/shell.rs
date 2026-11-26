@@ -963,10 +963,8 @@ impl Shell {
         }
         // The theme toggle (P022) and the account row (P024), under the
         // update chip (P021).
-        let dark = matches!(
-            window.appearance(),
-            gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
-        );
+        // The look the app draws now (its own choice first, as Linux needs).
+        let dark = videorc_kit::theme::is_dark(t);
         let update_chip = super::update_chip::chip(cx.entity().downgrade(), t, cx);
         let footer = div()
             .flex()

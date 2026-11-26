@@ -7547,6 +7547,18 @@ impl Window {
         self.a11y.is_active()
     }
 
+    /// Videorc plan 260 (patch): builds this window's accessibility tree as
+    /// if assistive technology had asked for it, for an in-process UI driver
+    /// on a platform whose switch belongs to the desktop (Linux's AT-SPI
+    /// screen-reader flag). The platform adapter is not told; it stays as the
+    /// desktop has it. Does nothing in an app made without accessibility.
+    pub fn activate_a11y_in_process(&mut self) {
+        if self.a11y.is_enabled() {
+            self.a11y.force_active();
+            self.refresh();
+        }
+    }
+
     /// Debug representation of the last frame's accessibility information.
     pub fn debug_a11y_tree_json(&self) -> Option<String> {
         self.a11y.debug_tree_json()
