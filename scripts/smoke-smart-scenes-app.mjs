@@ -2091,8 +2091,21 @@ function createRendererDriver(smoke) {
       ? response.result
       : response
   }
-  const command = (name, params = {}, waitMs = timeoutMs) =>
-    requestSmokeCommand(smoke, name, params, { timeoutMs: waitMs })
+  // The GPUI Studio refuses a change while a layout switch is still in
+  // flight ("The scene is changing.", `source_switch_reason_of`); a person
+  // tries again a moment later, and so does the smoke (up to 20 s).
+  const command = async (name, params = {}, waitMs = timeoutMs) => {
+    const until = Date.now() + 20_000
+    while (true) {
+      try {
+        return await requestSmokeCommand(smoke, name, params, { timeoutMs: waitMs })
+      } catch (error) {
+        if (!gpuiApp || !/The scene is changing/.test(error?.message ?? '') || Date.now() > until)
+          throw error
+        await sleep(250)
+      }
+    }
+  }
   /** The renderer's scene-preset state, from the GPUI Studio smoke handler. */
   const gpuiState = async () => {
     const [scenes, studio] = await Promise.all([
