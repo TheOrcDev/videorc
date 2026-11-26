@@ -25,7 +25,8 @@ use videorc_kit::{
     status_bar::{ACTION_ICON, StatusBar, StatusBarHint},
     status_bar_action::StatusBarAction,
     status_dot::{StatusDot, StatusTone},
-    theme::{Theme, hsla},
+    theme::hsla,
+    tokens::Theme,
 };
 
 use super::layout::{Tier, full_labels, wide_labels};
