@@ -72,38 +72,13 @@ pub const FONT: &str = ".SystemUIFont";
 /// family GPUI can load. GPUI loads families by name and finds neither the
 /// CSS keyword nor SF Mono (hidden on macOS), so `font::MONO[0]` draws the
 /// system sans; this takes each platform's own mono, as gpui-base does.
-///
-/// On macOS it is the system's SF Mono, the face Electron's `ui-monospace`
-/// draws: CoreText hides it from family lookup, so [`load_system_mono`] adds
-/// the font file the system ships (never bundled) and the family is its own
-/// name, `.SF NS Mono`. The file ships with every macOS Videorc runs on;
-/// without it the face falls back to the system's sans.
 pub const FONT_MONO: &str = if cfg!(target_os = "macos") {
-    ".SF NS Mono"
+    "Menlo"
 } else if cfg!(target_os = "windows") {
     "Consolas"
 } else {
     "DejaVu Sans Mono"
 };
-
-/// The system's SF Mono on macOS, from the file it ships, so [`FONT_MONO`]
-/// resolves; elsewhere nothing. A file that can't be read is reported on
-/// stderr, and the mono text then draws in the system's sans.
-pub fn load_system_mono(cx: &mut gpui::App) {
-    #[cfg(target_os = "macos")]
-    {
-        const SF_MONO: &str = "/System/Library/Fonts/SFNSMono.ttf";
-        let loaded = std::fs::read(SF_MONO).ok().map(|bytes| {
-            cx.text_system()
-                .add_fonts(vec![std::borrow::Cow::Owned(bytes)])
-        });
-        if !matches!(loaded, Some(Ok(()))) {
-            eprintln!("videorc-kit: SF Mono ({SF_MONO}) did not load; mono text falls back");
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = cx;
-}
 
 /// One appearance: light or dark, with or without Increase Contrast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
