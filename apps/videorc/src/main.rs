@@ -113,6 +113,11 @@ fn main() -> Result<()> {
     if let Some(code) = app::update_feed::run_helper_if_asked() {
         std::process::exit(code);
     }
+    // Dates read the way this computer writes them (Electron's `Intl` with
+    // the system locale), before any page formats one.
+    if let Some(style) = platform::system_date_style() {
+        videorc_app_core::format::set_date_style(style);
+    }
     let args = args::parse()?;
     // A package's resources (Electron's `process.resourcesPath`), when the
     // app runs from one: the bundled pictures, pet packs and starter sounds
