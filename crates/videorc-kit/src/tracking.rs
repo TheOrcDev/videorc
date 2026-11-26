@@ -33,8 +33,8 @@ impl TrackedText {
     /// A soft halo in the text's own ink round each glyph, the Retro LCD's
     /// `drop-shadow(0 0 3px var(--lcd-display-glow))`: the glow is the lit
     /// ink at 60% on the dark screen and 22% on the light one. GPUI has no
-    /// text shadow or blur, so four copies 1 px off each side, at half that
-    /// strength, sit under the glyph.
+    /// text shadow or blur, so eight faint copies 1 px off each side and
+    /// corner sit under the glyph.
     pub fn glow(mut self, glow: bool) -> Self {
         self.glow = glow;
         self
@@ -53,9 +53,11 @@ impl RenderOnce for TrackedText {
         // CSS puts the spacing after every letter, the last one too.
         let glow = self.glow.then(|| {
             let t = crate::theme::resolve(None, window, cx);
-            // Dark: a wider, brighter bloom; light: enough to give the
-            // strokes Electron's weight (its mono face draws heavier).
-            if crate::theme::is_dark(t) { 0.35 } else { 0.25 }
+            // Faint enough that the letter-spaced labels keep Electron's
+            // weight: stronger copies read as a bold face (L7's 2x crops on
+            // 0127cb4cc). Electron's light glow barely shows on the pale
+            // screen, so light stays at half of dark's.
+            if crate::theme::is_dark(t) { 0.28 } else { 0.12 }
         });
         let glyphs = self.text.chars().map(|glyph| {
             // A lone space would shape to nothing: draw it unbreakable.
