@@ -149,13 +149,13 @@ impl Hub {
         ) && !session_is_replay_only(status);
         self.store.set_live(active);
         if snapshot.session.microphone_notice != self.microphone {
-            if let Some(notice) = &snapshot.session.microphone_notice {
-                if notice.phase != n::MicrophonePhase::Ended {
-                    if let Some(input) = sources::devices::microphone_loss(notice) {
-                        self.store.publish(input, now());
-                    }
-                }
+            if let Some(notice) = &snapshot.session.microphone_notice
+                && notice.phase != n::MicrophonePhase::Ended
+                && let Some(input) = sources::devices::microphone_loss(notice)
+            {
+                self.store.publish(input, now());
             }
+
             // Only the typed health recovery clears a loss. A start attempt
             // also clears the legacy snapshot; that is not a recovered mic.
             self.microphone = snapshot.session.microphone_notice.clone();

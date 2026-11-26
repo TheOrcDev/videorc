@@ -195,12 +195,14 @@ impl TalkShowRoomHost {
                 }
                 let media = room_media::presentation_media(&payload);
                 let alive = this.update(cx, |host, cx| {
-                    if let Some((_, media)) = media {
-                        if host.room_open() && host.room_media.as_ref() != Some(&media) {
-                            host.room_media = Some(media);
-                            cx.notify();
-                        }
+                    if let Some((_, media)) = media
+                        && host.room_open()
+                        && host.room_media.as_ref() != Some(&media)
+                    {
+                        host.room_media = Some(media);
+                        cx.notify();
                     }
+
                     // The backend holds the room now: anything it refused
                     // before its join goes again.
                     if host.refused.iter().any(|refused| *refused) {
@@ -350,6 +352,10 @@ impl TalkShowRoomHost {
     }
 
     /// Copy for a scene command while scenes are off in this room.
+    #[allow(
+        dead_code,
+        reason = "Room parity API retained for remaining Show stage controls"
+    )]
     pub fn room_scenes_off_copy() -> (&'static str, &'static str) {
         (ROOM_SCENES_OFF, USE_SCENES)
     }
@@ -364,6 +370,10 @@ impl TalkShowRoomHost {
     }
 
     /// Toast while scenes are off: Use scenes turns them on and retries.
+    #[allow(
+        dead_code,
+        reason = "Room parity API retained for remaining Show stage controls"
+    )]
     fn toast_scenes_off(&self, cx: &mut Context<Self>) {
         let host = cx.entity().downgrade();
         let mut toast =
@@ -391,6 +401,10 @@ impl TalkShowRoomHost {
 
     /// Explicit scene apply into the room (Electron `applySceneInRoom`): when
     /// scenes are off, toast with Use scenes; otherwise send.
+    #[allow(
+        dead_code,
+        reason = "Room parity API retained for remaining Show stage controls"
+    )]
     pub fn apply_studio_scene_to_room(
         &mut self,
         cx: &mut Context<Self>,
@@ -557,7 +571,7 @@ impl TalkShowRoomHost {
     /// Takes the host's screen share down (the Show stage takes it off
     /// stage).
     pub fn stop_screen_share(&self) {
-        let _ = self.request(SCREEN_SET, room_media::stop_screen_params());
+        drop(self.request(SCREEN_SET, room_media::stop_screen_params()));
     }
 
     /// The whole stage in one frame (`cloud.stage.set`), as Electron's
@@ -618,11 +632,12 @@ impl TalkShowRoomHost {
             return;
         }
         self.monitor = enabled;
-        let _ = self.request(
+        // request() spawns on Tokio; dropping its JoinHandle detaches the RPC.
+        drop(self.request(
             MONITOR_SET,
             room_media::monitor_params(enabled, self.listening),
-        );
-        let _ = self.request(RETURN_SET, room_media::return_params(enabled));
+        ));
+        drop(self.request(RETURN_SET, room_media::return_params(enabled)));
         cx.notify();
     }
 
@@ -630,7 +645,7 @@ impl TalkShowRoomHost {
     pub fn set_monitor_listening(&mut self, listening: bool, cx: &mut Context<Self>) {
         self.listening = listening;
         if self.monitor {
-            let _ = self.request(MONITOR_SET, room_media::monitor_params(true, listening));
+            drop(self.request(MONITOR_SET, room_media::monitor_params(true, listening)));
         }
         cx.notify();
     }
@@ -762,6 +777,10 @@ impl TalkShowRoomHost {
     /// The Guests page's room switches: the static graphics and the avatar
     /// on the room's program (`cloud.room.presentation.set`), sent while the
     /// room is open and again after a refusal.
+    #[allow(
+        dead_code,
+        reason = "Room parity API retained for remaining Show stage controls"
+    )]
     pub fn set_room_presentation(
         &mut self,
         graphics: Option<bool>,
@@ -779,6 +798,10 @@ impl TalkShowRoomHost {
     }
 
     /// The host's opt-in to show the avatar to guest pages.
+    #[allow(
+        dead_code,
+        reason = "Room parity API retained for remaining Show stage controls"
+    )]
     pub fn set_avatar_guests(&mut self, guests: bool, cx: &mut Context<Self>) {
         self.avatar_guests = guests;
         self.sync_room(cx);
@@ -817,6 +840,10 @@ impl TalkShowRoomHost {
     }
 
     /// The last cloud recording stop this host saw (Library).
+    #[allow(
+        dead_code,
+        reason = "Room parity API retained for remaining Show stage controls"
+    )]
     pub fn last_recording_stop(&self) -> Option<CloudRecordingStop> {
         self.recording_watch.last_stop()
     }
@@ -869,10 +896,9 @@ impl TalkShowRoomHost {
                             {
                                 if let Some((sid, scene)) =
                                     room_scene::presentation_scene(&payload)
+                                    && sid == show_id
                                 {
-                                    if sid == show_id {
-                                        settle.note(scene);
-                                    }
+                                    settle.note(scene);
                                 }
                             }
                             Err(RecvError::Closed) => break request.await,
@@ -891,9 +917,7 @@ impl TalkShowRoomHost {
                 });
                 return None;
             }
-            let Some(generation) = answer.generation else {
-                return None;
-            };
+            let generation = answer.generation?;
             settle.begin(generation, answer.status);
             while settle.needs_wait() {
                 let left = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -909,10 +933,9 @@ impl TalkShowRoomHost {
                             {
                                 if let Some((sid, scene)) =
                                     room_scene::presentation_scene(&payload)
+                                    && sid == show_id && settle.note(scene)
                                 {
-                                    if sid == show_id && settle.note(scene) {
-                                        break;
-                                    }
+                                    break;
                                 }
                             }
                             Err(RecvError::Closed) => break,
@@ -1196,13 +1219,13 @@ impl TalkShowRoomHost {
             let commit = task.await;
             let _ = this.update(cx, |host, cx| {
                 let mut parts: Vec<String> = Vec::new();
-                if let Some(commit) = commit.as_ref() {
-                    if let Some(message) =
+                if let Some(commit) = commit.as_ref()
+                    && let Some(message) =
                         room_scene_message(commit.state, commit.reason.as_deref())
-                    {
-                        parts.push(message);
-                    }
+                {
+                    parts.push(message);
                 }
+
                 if let Some(note) = background_note {
                     parts.push(note);
                 }

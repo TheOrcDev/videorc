@@ -85,6 +85,8 @@ pub fn hosted(mode: Mode, window: &mut Window, cx: &mut gpui::App) -> Option<Ent
     }))
 }
 
+type DeleteFlush = std::rc::Rc<dyn Fn(&mut gpui::App)>;
+
 pub struct Player {
     mode: Mode,
     /// Removed spans to jump over while playing, normalized.
@@ -119,7 +121,7 @@ pub struct Player {
     need_open: bool,
     marker_epoch: u64,
     deleting: std::collections::BTreeMap<String, std::rc::Rc<std::cell::Cell<bool>>>,
-    delete_flushes: std::collections::BTreeMap<String, std::rc::Rc<dyn Fn(&mut gpui::App)>>,
+    delete_flushes: std::collections::BTreeMap<String, DeleteFlush>,
     native: Option<native::Native>,
     /// The slot the layer was last placed in (the player's own points), for
     /// the smokes' geometry read.
@@ -173,11 +175,12 @@ impl Player {
         })
         .detach();
         cx.subscribe_in(&input, window, |this, _, event: &InputEvent, _, cx| {
-            if let Some(markers) = this.markers.as_mut() {
-                if matches!(event, InputEvent::Change) {
-                    markers.draft = this.input.read(cx).value().to_string();
-                }
+            if let Some(markers) = this.markers.as_mut()
+                && matches!(event, InputEvent::Change)
+            {
+                markers.draft = this.input.read(cx).value().to_string();
             }
+
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.rename_marker(cx);
             }
@@ -281,12 +284,13 @@ impl Player {
         self.need_open = playable;
         self.resume = resume;
         if playable {
-            if self.native.is_none() {
-                if let Err(error) = self.start_native(window, cx) {
-                    self.error = Some(error);
-                    self.need_open = false;
-                }
+            if self.native.is_none()
+                && let Err(error) = self.start_native(window, cx)
+            {
+                self.error = Some(error);
+                self.need_open = false;
             }
+
             self.open_native();
         }
         if self.mode == Mode::Dialog {
@@ -347,15 +351,6 @@ impl Player {
     pub fn seek_by(&self, delta_ms: f64) {
         self.seek(self.status.position_ms as f64 + delta_ms);
     }
-    pub fn position_ms(&self) -> u64 {
-        self.status.position_ms
-    }
-    pub fn duration_ms(&self) -> u64 {
-        self.status.duration_ms
-    }
-    pub fn is_playing(&self) -> bool {
-        self.status.state == PlaybackState::Playing
-    }
     /// Stops playback (the host stopped showing the player).
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.stop_playback(cx);
@@ -400,13 +395,14 @@ impl Player {
         self.resume = None;
         self.resume_in_flight = None;
         self.scrub = None;
-        if let Some(native) = &mut self.native {
-            if let Some(element) = &mut native.element {
-                element.set_visible(false);
-                element.pause();
-                element.close();
-            }
+        if let Some(native) = &mut self.native
+            && let Some(element) = &mut native.element
+        {
+            element.set_visible(false);
+            element.pause();
+            element.close();
         }
+
         cx.notify();
     }
     pub fn stop(&mut self, cx: &mut Context<Self>) {
@@ -460,21 +456,18 @@ impl Player {
         }
         self.resume = self.session.as_mut().map(p::PlayerSession::retry);
         self.need_open = self.playable;
-        if self.playable && self.native.is_none() {
-            if self.start_native(window, cx).is_err() {
-                self.error = Some("Playback isn't available in this window.".into());
-                return;
-            }
+        if self.playable && self.native.is_none() && self.start_native(window, cx).is_err() {
+            self.error = Some("Playback isn't available in this window.".into());
+            return;
         }
+
         self.error = None;
         self.open_native();
         cx.notify();
     }
     fn external(&mut self, reveal: bool, cx: &mut Context<Self>) {
-        if !reveal {
-            if let Some(element) = self.native.as_ref().and_then(|n| n.element.as_ref()) {
-                element.pause();
-            }
+        if !reveal && let Some(element) = self.native.as_ref().and_then(|n| n.element.as_ref()) {
+            element.pause();
         }
 
         let Some(session) = &self.session else {

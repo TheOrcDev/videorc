@@ -182,7 +182,7 @@ impl BufStore {
         }
     }
 
-    fn take_dirty(mut self) -> Vec<(String, String)> {
+    fn take_dirty(self) -> Vec<(String, String)> {
         self.dirty
     }
 }
@@ -286,7 +286,7 @@ impl FirstRunScreen {
         })
         .detach();
 
-        let gain = studio.snapshot().settings.capture.audio.microphone_gain_db as f32;
+        let gain = studio.snapshot().settings.capture.audio.microphone_gain_db;
         let mic_gain = cx.new(|_| {
             SliderState::new()
                 .min(MICROPHONE_GAIN_RANGE.0)
@@ -338,6 +338,8 @@ impl FirstRunScreen {
         screen
     }
 
+    // Used by macOS preview restoration and the Linux overlay cover probe.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn is_open(&self) -> bool {
         self.open
     }

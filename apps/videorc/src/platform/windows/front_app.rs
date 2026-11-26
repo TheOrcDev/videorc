@@ -16,9 +16,7 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HWND};
 use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
-use windows_sys::Win32::UI::Accessibility::{
-    HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent, WINEVENTPROC,
-};
+use windows_sys::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EVENT_SYSTEM_FOREGROUND, GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
     WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
@@ -168,10 +166,10 @@ pub fn start(sender: UnboundedSender<FrontApp>) -> bool {
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
         )
     };
-    if !hook.is_null() {
-        if let Ok(mut slot) = HOOK.lock() {
-            *slot = Some(hook as usize);
-        }
+    if !hook.is_null()
+        && let Ok(mut slot) = HOOK.lock()
+    {
+        *slot = Some(hook as usize);
     }
     if let Some(app) = frontmost() {
         publish(app);
@@ -191,11 +189,11 @@ pub fn poll() {
 /// Drops the WinEvent hook (tests / shutdown). Safe if never started.
 #[allow(dead_code)]
 pub fn stop() {
-    if let Ok(mut slot) = HOOK.lock() {
-        if let Some(hook) = slot.take() {
-            // SAFETY: hook from SetWinEventHook on this process.
-            unsafe { UnhookWinEvent(hook as HWINEVENTHOOK) };
-        }
+    if let Ok(mut slot) = HOOK.lock()
+        && let Some(hook) = slot.take()
+    {
+        // SAFETY: hook from SetWinEventHook on this process.
+        unsafe { UnhookWinEvent(hook as HWINEVENTHOOK) };
     }
     SENDER.with_borrow_mut(|slot| *slot = None);
     LAST.with_borrow_mut(|last| *last = None);

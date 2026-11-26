@@ -134,8 +134,6 @@ enum RoleItem {
     Action(Box<dyn Action>),
     Os(Box<dyn Action>, OsAction),
     Services,
-    /// No GPUI form yet.
-    Skip,
 }
 
 fn role_item(role: MenuRole) -> RoleItem {
@@ -161,7 +159,6 @@ fn role_item(role: MenuRole) -> RoleItem {
         MenuRole::Front => RoleItem::Action(Box::new(BringAllToFront)),
         MenuRole::StartSpeaking => RoleItem::Action(Box::new(StartSpeaking)),
         MenuRole::StopSpeaking => RoleItem::Action(Box::new(StopSpeaking)),
-        _ => RoleItem::Skip,
     }
 }
 
@@ -224,7 +221,6 @@ fn items(cx: &App, entries: &[MenuEntry], bindings: &mut Vec<KeyBinding>) -> Vec
                 RoleItem::Services => {
                     out.push(MenuItem::os_submenu(title, SystemMenuType::Services))
                 }
-                RoleItem::Skip => {}
             },
             MenuEntry::Item { command, .. } => {
                 let action = match command {

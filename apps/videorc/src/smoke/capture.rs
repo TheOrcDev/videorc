@@ -236,7 +236,7 @@ fn decode_png(bytes: &[u8]) -> Result<Bitmap, String> {
         .to_rgba8();
     let (width, height) = (image.width() as usize, image.height() as usize);
     let mut bgra = image.into_raw();
-    for pixel in bgra.chunks_exact_mut(4) {
+    for pixel in bgra.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     Ok(Bitmap {

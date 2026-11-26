@@ -24,6 +24,7 @@ pub fn linux_setup_alert(issue: &LinuxSetupIssue) -> AnyElement {
 /// Map the OS probe's status into the Health page's keyring shape. The probe
 /// reports `secret_service`; Health's label helper still expects
 /// `gnome_libsecret` for the good row.
+#[cfg(target_os = "linux")]
 pub fn studio_keyring_from_probe(
     backend: &str,
     available: bool,

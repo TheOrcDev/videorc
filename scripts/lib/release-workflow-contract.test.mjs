@@ -40,3 +40,33 @@ test('Windows releases retain every JS gate when the optional CI input is omitte
   assert.equal(gates.jobs.js.if, '${{ inputs.js }}')
   assert.equal(gates.jobs['js-vitest'].if, '${{ inputs.js }}')
 })
+
+test('Windows Plan 260 gates run in sentinel dispatches without billing each PR', async () => {
+  const [gpui, gates] = await Promise.all(
+    ['gpui-compile', 'release-windows-gates'].map(async (name) =>
+      load(await readFile(new URL(`../../.github/workflows/${name}.yml`, import.meta.url), 'utf8'))
+    )
+  )
+  const windows = gpui.jobs['compile-windows']
+  assert.ok(Object.hasOwn(gpui.on, 'workflow_dispatch'))
+  assert.equal(windows.if, "github.event_name == 'workflow_dispatch'")
+  assert.equal(windows['runs-on'], 'windows-latest')
+  assert.equal(windows['timeout-minutes'], 120)
+  assert.ok(windows.steps.some((step) => step.with?.components === 'clippy'))
+
+  const stepName = 'Plan 260 crates (clippy + test)'
+  const planSteps = windows.steps.filter((step) => step.name === stepName)
+  assert.equal(planSteps.length, 1)
+  assert.equal(planSteps[0].shell, 'pwsh')
+  // Preserve the workspace targets, warnings-as-errors and both failure exits.
+  const targets =
+    '--workspace --exclude videorc-backend --exclude videorc-native-preview-addon --exclude videorc-wer-helper'
+  assert.deepEqual(planSteps[0].run.trim().split('\n'), [
+    `cargo clippy ${targets} --all-targets -- -D warnings`,
+    'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }',
+    `cargo test ${targets}`,
+    'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }'
+  ])
+  assert.ok(!gates.jobs.rust.steps.some((step) => step.name === stepName))
+  assert.equal(gates.jobs.rust['timeout-minutes'], 80)
+})

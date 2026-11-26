@@ -383,6 +383,10 @@ impl HealthScreen {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Explicit screen assembly inputs keep independent view state and callbacks visible"
+)]
 fn page_view(
     studio: &Studio<BackendClient>,
     log: &RecordingLog,

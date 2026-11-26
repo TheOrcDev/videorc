@@ -317,7 +317,7 @@ impl Render for VerticalStreamSection {
                     .child(description),
             );
         if let Some(layout) = &view.layout {
-            section = section.child(self.layout_body(layout, &t, cx));
+            section = section.child(self.layout_body(layout, t, cx));
         }
         section.into_any_element()
     }

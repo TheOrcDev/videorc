@@ -76,7 +76,6 @@ fn open_x11() -> Result<X11State, String> {
 }
 
 fn read_front(state: &X11State) -> Option<FrontApp> {
-    use x11rb::connection::Connection;
     use x11rb::properties::WmClass;
     use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, Window};
 
@@ -147,7 +146,7 @@ fn read_front(state: &X11State) -> Option<FrontApp> {
         .and_then(|cookie| cookie.reply().ok())
         .and_then(|reply| String::from_utf8(reply.value).ok())
         .filter(|s| !s.is_empty())
-        .or_else(|| {
+        .or({
             if !instance.is_empty() {
                 Some(instance)
             } else if !class_name.is_empty() {

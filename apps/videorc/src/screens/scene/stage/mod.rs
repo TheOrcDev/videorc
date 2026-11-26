@@ -873,7 +873,7 @@ impl ScenePage {
                 }
             }
             Target::Overlay(item) => {
-                self.select_on_stage(InspectorSelection::Overlay(*item), cx);
+                self.select_on_stage(InspectorSelection::Overlay(item), cx);
                 if !view.overlays_editable {
                     return;
                 }

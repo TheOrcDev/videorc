@@ -849,12 +849,12 @@ impl CommandPalette {
                 if command == Command::Record {
                     cx.spawn(async move |_, cx| {
                         let outcome = studio.start_recording().await;
-                        if let videorc_app_core::StartOutcome::Refused { message } = outcome {
-                            if let Some(dialogs) = dialogs {
-                                let _ = dialogs.update(cx, |dialogs, cx| {
-                                    dialogs.queue_start_blocked(message, cx);
-                                });
-                            }
+                        if let videorc_app_core::StartOutcome::Refused { message } = outcome
+                            && let Some(dialogs) = dialogs
+                        {
+                            dialogs.update(cx, |dialogs, cx| {
+                                dialogs.queue_start_blocked(message, cx);
+                            });
                         }
                     })
                     .detach();

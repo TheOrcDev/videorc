@@ -906,9 +906,9 @@ impl SourcesPanel {
 
     fn push_model(&mut self, cx: &mut Context<Self>) {
         self.rebuild(
-            &*self.studio.watch().borrow(),
+            &self.studio.watch().borrow(),
             &self.studio.telemetry_now(),
-            &*self.studio.mic_levels().borrow(),
+            &self.studio.mic_levels().borrow(),
             &self.permissions.snapshot(),
             cx,
         );

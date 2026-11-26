@@ -8,6 +8,8 @@ name: CI
 # the release job and in local `pnpm smoke:local-gates`.
 
 on:
+  # Verify an exact branch head while its PR stays draft.
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -71,9 +73,12 @@ jobs:
     # itself at opt-level 0 with line tables only (dependencies keep opt 2),
     # which is a correctness gate, not a perf gate. Busy runners still hit the
     # Compile tests *step* at 45 (PRs #1756, #1771, #1839) with no test
-    # failures — only a cold or contended compile. 75 min is the job ceiling;
-    # the compile step below is raised in step with that.
-    timeout-minutes: 75
+    # failures — only a cold or contended compile. Run 45832014444 compiled
+    # successfully in 51 min, then hit the old 75 min job ceiling during
+    # passing tests after Plan 260 and both clippy passes took another 19 min.
+    # Allow those gates plus the existing 55 min compile, 15 min test and
+    # 15 min camera-extension step budgets; keep each step limit unchanged.
+    timeout-minutes: 110
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -146,6 +151,17 @@ jobs:
       - name: Format check
         run: cargo fmt --check --all
 
+      - name: Plan 260 crates (clippy + test)
+        # Check the new crates before the slower backend gates so a lint
+        # failure does not wait for two backend clippy builds.
+        # Plan 260 S1.0: every crate plan 260 adds (the workspace minus the
+        # backend, the addon and the WER helper, which have their own steps).
+        # A lane that fills one of them is linted and tested here with no
+        # workflow edit.
+        run: |
+          cargo clippy --workspace --exclude videorc-backend --exclude videorc-native-preview-addon --exclude videorc-wer-helper --all-targets -- -D warnings
+          cargo test --workspace --exclude videorc-backend --exclude videorc-native-preview-addon --exclude videorc-wer-helper
+
       - name: Clippy
         # --all-targets lints the test code too (#1070).
         run: cargo clippy -p videorc-backend --all-targets -- -D warnings
@@ -155,15 +171,6 @@ jobs:
         # only they reach goes dead or unused there; the dev clippy above
         # cannot see it (#1070).
         run: cargo clippy --release -p videorc-backend -- -D warnings
-
-      - name: Plan 260 crates (clippy + test)
-        # Plan 260 S1.0: every crate plan 260 adds (the workspace minus the
-        # backend, the addon and the WER helper, which have their own steps).
-        # A lane that fills one of them is linted and tested here with no
-        # workflow edit.
-        run: |
-          cargo clippy --workspace --exclude videorc-backend --exclude videorc-native-preview-addon --exclude videorc-wer-helper --all-targets -- -D warnings
-          cargo test --workspace --exclude videorc-backend --exclude videorc-native-preview-addon --exclude videorc-wer-helper
 
       - name: Compile tests
         # Split from the run so a slow compile and a hung test are told apart.

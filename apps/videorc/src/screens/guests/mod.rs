@@ -427,7 +427,7 @@ impl GuestsPanel {
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(2))
                 .await;
-            let _ = entity.update(cx, |this, cx| {
+            entity.update(cx, |this, cx| {
                 this.copied = false;
                 cx.notify();
             });
@@ -470,11 +470,10 @@ impl GuestsPanel {
                 .unwrap_or(false);
             let _ = this.update(cx, |this, cx| {
                 this.busy = false;
-                if ok {
-                    if let Some((id, title)) = after {
-                        this.toast_info(id, title);
-                    }
+                if ok && let Some((id, title)) = after {
+                    this.toast_info(id, title);
                 }
+
                 this.rebuild(cx);
                 cx.notify();
             });

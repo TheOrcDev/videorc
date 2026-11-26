@@ -168,21 +168,12 @@ pub struct PersonRow {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
-pub struct PersonSupport {
-    pub bits: u64,
-    pub kicks: u64,
-    pub gifted_subs: u64,
-    pub sub_months: u64,
-    pub tips: std::collections::BTreeMap<String, u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(rename_all = "camelCase", default)]
 pub struct PersonAccount {
     pub account_key: String,
     pub platform: String,
     #[serde(default)]
-    pub author_id: String,
+    #[serde(rename = "authorId")]
+    pub _author_id: String,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -225,7 +216,8 @@ pub struct PersonDetail {
     #[serde(default)]
     pub first_seen_at: Option<String>,
     #[serde(default)]
-    pub last_seen_at: Option<String>,
+    #[serde(rename = "lastSeenAt")]
+    pub _last_seen_at: Option<String>,
     #[serde(default)]
     pub support: Option<community::CommunitySupport>,
     #[serde(default)]

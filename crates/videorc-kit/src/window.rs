@@ -6,14 +6,20 @@
 
 use gpui::{
     Bounds, Pixels, SharedString, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
-    WindowOptions, point, px,
+    WindowOptions,
 };
 
+#[cfg(target_os = "macos")]
+use gpui::{point, px};
+
+#[cfg(target_os = "macos")]
 use crate::tokens::size;
 
 /// The traffic lights' left inset.
+#[cfg(target_os = "macos")]
 const TRAFFIC_LIGHTS_X: f32 = 14.0;
 /// The traffic lights' height, to centre them on the toolbar band.
+#[cfg(target_os = "macos")]
 const TRAFFIC_LIGHTS_HEIGHT: f32 = 14.0;
 
 /// A kit window. On macOS the title bar is hidden and the traffic lights sit

@@ -1,6 +1,6 @@
 //! Schedule / Edit dialog (`ScheduleStreamDialog`, P860–P876).
 
-use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*};
 use serde_json::json;
 use videorc_app_core::livestream::scheduled::{self, Event};
 use videorc_app_core::livestream::scheduled_copy as copy;
@@ -78,7 +78,7 @@ impl DestinationsPanel {
         start.update(cx, |input, cx| {
             input.set_value(start_value, window, cx);
         });
-        let mut dialog = DialogHandle::new(false);
+        let dialog = DialogHandle::new(false);
         dialog.open(window, cx);
         self.schedule = Some(ScheduleEditor {
             provider,

@@ -1,6 +1,6 @@
 //! Go Live dialog (plan 260 Phase 3, L4): `videorc_app_core::livestream::golive`
 //! + `studio::go_live`, drawn with `videorc-kit`. Words from
-//! `livestream::go_live_copy` and Electron's Cancel / Ready.
+//!   `livestream::go_live_copy` and Electron's Cancel / Ready.
 
 use std::sync::Arc;
 

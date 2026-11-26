@@ -27,7 +27,9 @@ pub(crate) mod macos;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod scene;
 
-use gpui::{AnyElement, App, AppContext, Context, Entity, FontWeight, Window, div, prelude::*, px};
+#[cfg(not(target_os = "linux"))]
+use gpui::AppContext;
+use gpui::{AnyElement, App, Context, Entity, FontWeight, Window, div, prelude::*, px};
 use videorc_kit::theme::hsla;
 // The video ground and its words are the same in every appearance.
 use tokio::sync::watch;

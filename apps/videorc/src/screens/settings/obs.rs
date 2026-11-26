@@ -114,20 +114,20 @@ impl SettingsScreen {
             .map_err(|_| c::PROFILE_UNREADABLE.to_string())?;
             let mut setup: Option<o::ObsSetup> =
                 serde_json::from_value(value).map_err(|_| c::PROFILE_UNREADABLE.to_string())?;
-            if let Some(setup) = &mut setup {
-                if let Some(path) = setup.recording_path.take() {
-                    let path = PathBuf::from(path);
-                    if let Ok(selection) =
-                        videorc_app_core::resources::authorize_output_directory(&bootstrap, &path)
-                            .await
-                    {
-                        setup.recording_directory = Some(o::RecordingDirectory {
-                            path,
-                            display_name: selection.display_name,
-                        });
-                    }
+            if let Some(setup) = &mut setup
+                && let Some(path) = setup.recording_path.take()
+            {
+                let path = PathBuf::from(path);
+                if let Ok(selection) =
+                    videorc_app_core::resources::authorize_output_directory(&bootstrap, &path).await
+                {
+                    setup.recording_directory = Some(o::RecordingDirectory {
+                        path,
+                        display_name: selection.display_name,
+                    });
                 }
             }
+
             Ok(setup)
         });
         cx.spawn(async move |entity, cx| {

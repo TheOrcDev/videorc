@@ -100,7 +100,7 @@ mod imp {
         NoServer(Instant),
         /// Connected, and the server has no MIT-SCREEN-SAVER: never asks.
         NoExtension,
-        Ready(RustConnection, u32),
+        Ready(Box<RustConnection>, u32),
     }
 
     static X11: Mutex<Slot> = Mutex::new(Slot::Unknown);
@@ -119,7 +119,7 @@ mod imp {
             return Slot::NoServer(Instant::now());
         };
         match conn.extension_information(X11_EXTENSION_NAME) {
-            Ok(Some(_)) => Slot::Ready(conn, root),
+            Ok(Some(_)) => Slot::Ready(Box::new(conn), root),
             Ok(None) => Slot::NoExtension,
             Err(_) => Slot::NoServer(Instant::now()),
         }

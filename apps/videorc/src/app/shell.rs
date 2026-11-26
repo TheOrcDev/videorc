@@ -244,6 +244,10 @@ pub struct Shell {
 }
 
 impl Shell {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit screen assembly inputs keep independent view state and callbacks visible"
+    )]
     pub fn new(
         backend: Entity<Mirror<StatusLine>>,
         connection: Entity<Mirror<String>>,
@@ -572,14 +576,6 @@ impl Shell {
         window.activate_window();
     }
 
-    pub fn dialogs(&self) -> Entity<DialogsHost> {
-        self.dialogs.clone()
-    }
-
-    pub fn errors(&self) -> Entity<ErrorPanels> {
-        self.errors.clone()
-    }
-
     pub fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings
             .update(cx, |settings, cx| settings.disarm_shortcut(cx));
@@ -611,10 +607,6 @@ impl Shell {
         });
         self.open_page(PageId::Settings, window, cx);
         window.activate_window();
-    }
-
-    pub fn page(&self) -> PageId {
-        self.page
     }
 
     /// The smokes' `open-tab` ([`crate::smoke::OpenTab`], the screen
@@ -920,7 +912,7 @@ impl Shell {
             .on_click(cx.listener(|this, _, window, cx| this.open_page(PageId::Studio, window, cx)))
     }
 
-    fn sidebar(&self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sidebar(&self, t: &Theme, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The top row shares the window's 40 px header band with the
         // traffic lights: Search sits at its end (`sidebar.tsx`).
         let top = div()

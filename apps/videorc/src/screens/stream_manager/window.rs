@@ -6,7 +6,6 @@
 //! search chat, ⌘L write in chat, in the `StreamManager` key context). The
 //! header, stats bar, panes and status bar are the kit's (`videorc-kit`).
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{

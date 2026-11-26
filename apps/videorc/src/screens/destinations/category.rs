@@ -42,9 +42,9 @@ impl DestinationsPanel {
                 return;
             }
             let query = state.read(cx).value().to_string();
-            this.category_picker
-                .as_mut()
-                .map(|p| p.query = query.clone());
+            if let Some(picker) = this.category_picker.as_mut() {
+                picker.query = query.clone();
+            }
             let platform = platform_owned.clone();
             let studio = this.studio.clone();
             this.runtime.spawn(async move {
@@ -61,6 +61,10 @@ impl DestinationsPanel {
         });
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit screen assembly inputs keep independent view state and callbacks visible"
+    )]
     pub(super) fn category_row(
         &mut self,
         platform: &str,
@@ -118,7 +122,7 @@ impl DestinationsPanel {
             .content({
                 let entity = entity.clone();
                 let platform = platform_owned.clone();
-                move |window, cx| {
+                move |window, _cx| {
                     let mut body = div().flex().flex_col().gap(px(6.)).child(
                         Input::new(format!("category-search-{platform}"), &search)
                             .accessibility_label(page_copy::SEARCH_CATEGORIES),

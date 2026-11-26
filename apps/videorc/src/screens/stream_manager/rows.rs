@@ -42,6 +42,10 @@ pub type OnHighlight = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 pub type OnRemove = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
 /// One chat row: body + ⋯ menu, wrapped in the person right-click menu.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Explicit screen assembly inputs keep independent view state and callbacks visible"
+)]
 pub fn chat_row(
     message: &Arc<LiveChatMessage>,
     highlight: RowHighlight,

@@ -318,7 +318,7 @@ impl HealthScreen {
     /// Plan 249 S26 / P070: Cloud room program-health while a room is open.
     fn cloud_room_section(&self) -> Option<PanelSection> {
         let rows = self.cloud_room.as_ref()?;
-        let mut section = PanelSection::new("cloud-program-health")
+        let section = PanelSection::new("cloud-program-health")
             .title(cloud_health::CLOUD_ROOM_TITLE)
             .description(cloud_health::PROGRAM_PREVIEW_NOTE);
         let mut body = div().flex().flex_col().gap(px(12.));

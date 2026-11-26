@@ -180,7 +180,7 @@ pub fn sign_in(cx: &mut App) {
         .spawn(async move { accounts.begin_sign_in(&authorize, development).await });
     cx.spawn(async move |cx| match job.await {
         Ok(Ok(page)) => {
-            let _ = cx.update(|cx| cx.open_url(&page));
+            cx.update(|cx| cx.open_url(&page));
         }
         Ok(Err(error)) => toast_failure(&shared.studio, &error.message(), "sign in"),
         Err(_) => {}
@@ -239,7 +239,7 @@ pub fn connect_provider(
     });
     cx.spawn(async move |cx| {
         let page = job.await.ok().flatten();
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
             if let Some(page) = &page {
                 cx.open_url(page);
                 if !shows_browser_step {

@@ -631,5 +631,5 @@ pub fn handle_key_up(
 }
 
 pub fn release_held(section: &Entity<SoundboardSection>, cx: &mut gpui::App) {
-    let _ = section.update(cx, |section, cx| section.release_held(cx));
+    section.update(cx, |section, cx| section.release_held(cx));
 }

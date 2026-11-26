@@ -129,15 +129,37 @@ impl LibraryScreen {
         )
         .detach();
         let mut events = studio.backend().subscribe();
-        cx.spawn(async move |entity,cx| {
+        cx.spawn(async move |entity, cx| {
             loop {
                 let event = match events.recv().await {
                     Ok(event) => event,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => videorc_app_core::BackendEvent::ClientLagged { skipped },
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        videorc_app_core::BackendEvent::ClientLagged { skipped }
+                    }
                     Err(_) => break,
                 };
-                if matches!(&event, videorc_app_core::BackendEvent::Untyped{event,..} if event=="account.changed") || matches!(&event, videorc_app_core::BackendEvent::Ready(_) | videorc_app_core::BackendEvent::ConnectionClosed{..} | videorc_app_core::BackendEvent::ClientLagged{..} | videorc_app_core::BackendEvent::EventsLagged(_)) {
-                    if entity.update(cx,|this,cx| {this.cloud_epoch+=1;this.cloud=Default::default();this.cloud_signed_in=None;if this.active&&this.cloud_shown{this.refresh_cloud(cx);}cx.notify();}).is_err(){break;}
+                let refresh = matches!(
+                    &event,
+                    videorc_app_core::BackendEvent::Untyped { event, .. } if event == "account.changed"
+                ) || matches!(
+                    &event,
+                    videorc_app_core::BackendEvent::Ready(_)
+                        | videorc_app_core::BackendEvent::ConnectionClosed { .. }
+                        | videorc_app_core::BackendEvent::ClientLagged { .. }
+                        | videorc_app_core::BackendEvent::EventsLagged(_)
+                );
+                if refresh
+                    && entity.update(cx, |this, cx| {
+                        this.cloud_epoch += 1;
+                        this.cloud = Default::default();
+                        this.cloud_signed_in = None;
+                        if this.active && this.cloud_shown {
+                            this.refresh_cloud(cx);
+                        }
+                        cx.notify();
+                    }).is_err()
+                {
+                    break;
                 }
             }
         }).detach();
