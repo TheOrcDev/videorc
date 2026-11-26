@@ -78,7 +78,7 @@ pub struct EncodedRoomPicture {
 
 /// Decode, fit, and encode under [`BACKGROUND_ASSET_MAX_BYTES`].
 pub fn encode_room_picture(bytes: &[u8]) -> Result<EncodedRoomPicture, String> {
-    let picture = decode(bytes).ok_or_else(|| "The background picture couldn't be decoded.")?;
+    let picture = decode(bytes).ok_or("The background picture couldn't be decoded.")?;
     let (src_w, src_h) = (picture.width(), picture.height());
     if src_w == 0 || src_h == 0 {
         return Err("The background picture couldn't be decoded.".into());

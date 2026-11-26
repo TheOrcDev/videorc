@@ -1,6 +1,6 @@
 //! Discord announcements tab (P877–P894).
 
-use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px};
 use gpui_base::input::InputEvent;
 use serde_json::json;
 use videorc_app_core::livestream::copy as page_copy;
@@ -45,7 +45,7 @@ impl DestinationsPanel {
     ) -> AnyElement {
         let t = theme::current(window, cx).theme();
         let entity = cx.entity();
-        let mut column = div()
+        let column = div()
             .flex()
             .flex_col()
             .gap(px(8.))
@@ -79,58 +79,58 @@ impl DestinationsPanel {
 
         let mut section = PanelSection::new("discord-settings").last(true);
 
-        if view.paste_shown {
-            if let Some(paste) = &self.discord_paste {
-                let mut paste_row = div().flex().flex_col().gap(px(4.)).child(
-                    SettingsRow::new("discord-webhook", view.paste_label.clone()).child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                Input::new("discord-webhook-input", paste)
-                                    .accessibility_label(page_copy::WEBHOOK_URL)
-                                    .disabled(self.discord_memory.paste_pending)
-                                    .invalid(view.paste_error.is_some()),
-                            )
-                            .child(
-                                Button::new("discord-webhook-connect")
-                                    .label(if self.discord_memory.paste_pending {
-                                        page_copy::CONNECTING
-                                    } else {
-                                        page_copy::CONNECT
-                                    })
-                                    .variant(ButtonVariant::Outline)
-                                    .disabled(
-                                        self.discord_memory.paste_pending
-                                            || self.discord_memory.paste.trim().is_empty()
-                                            || view.paste_error.is_some(),
-                                    )
-                                    .on_click({
-                                        let entity = entity.clone();
-                                        move |_, _, cx| {
-                                            entity.update(cx, |this, cx| this.connect_webhook(cx))
-                                        }
-                                    }),
-                            ),
-                    ),
-                );
+        if view.paste_shown
+            && let Some(paste) = &self.discord_paste
+        {
+            let mut paste_row = div().flex().flex_col().gap(px(4.)).child(
+                SettingsRow::new("discord-webhook", view.paste_label.clone()).child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            Input::new("discord-webhook-input", paste)
+                                .accessibility_label(page_copy::WEBHOOK_URL)
+                                .disabled(self.discord_memory.paste_pending)
+                                .invalid(view.paste_error.is_some()),
+                        )
+                        .child(
+                            Button::new("discord-webhook-connect")
+                                .label(if self.discord_memory.paste_pending {
+                                    page_copy::CONNECTING
+                                } else {
+                                    page_copy::CONNECT
+                                })
+                                .variant(ButtonVariant::Outline)
+                                .disabled(
+                                    self.discord_memory.paste_pending
+                                        || self.discord_memory.paste.trim().is_empty()
+                                        || view.paste_error.is_some(),
+                                )
+                                .on_click({
+                                    let entity = entity.clone();
+                                    move |_, _, cx| {
+                                        entity.update(cx, |this, cx| this.connect_webhook(cx))
+                                    }
+                                }),
+                        ),
+                ),
+            );
+            paste_row = paste_row.child(
+                div()
+                    .type_scale(text::META)
+                    .text_color(hsla(t.muted_foreground))
+                    .child(page_copy::WEBHOOK_HOWTO),
+            );
+            if let Some(error) = &view.paste_error {
                 paste_row = paste_row.child(
                     div()
                         .type_scale(text::META)
-                        .text_color(hsla(t.muted_foreground))
-                        .child(page_copy::WEBHOOK_HOWTO),
+                        .text_color(hsla(t.destructive))
+                        .child(error.clone()),
                 );
-                if let Some(error) = &view.paste_error {
-                    paste_row = paste_row.child(
-                        div()
-                            .type_scale(text::META)
-                            .text_color(hsla(t.destructive))
-                            .child(error.clone()),
-                    );
-                }
-                section = section.child(paste_row);
             }
+            section = section.child(paste_row);
         }
 
         if !view.webhooks.is_empty() {

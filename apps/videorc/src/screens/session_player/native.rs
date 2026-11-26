@@ -193,27 +193,27 @@ impl Player {
                 view.status.state,
                 PlaybackState::Paused | PlaybackState::Playing | PlaybackState::Ended
             );
-        if let Some(native) = self.native.as_mut() {
-            if let Some(element) = native.element.as_mut() {
-                element.set_visible(ready && reached_frames(&view) > native.before_frame);
-            }
+        if let Some(native) = self.native.as_mut()
+            && let Some(element) = native.element.as_mut()
+        {
+            element.set_visible(ready && reached_frames(&view) > native.before_frame);
         }
+
         let resuming = ready && self.resume.is_some();
-        if ready {
-            if let Some(mut resume) = self.resume.take() {
-                resume.at_ms = resume.at_ms.min(view.status.duration_ms);
-                self.resume_in_flight = Some(resume);
-                if let Some(element) = self.native.as_ref().and_then(|n| n.element.as_ref()) {
-                    element.set_muted(self.desired_muted);
-                    if resume.at_ms > 0 {
-                        element.seek(resume.at_ms.min(view.status.duration_ms));
-                    }
-                    if resume.playing {
-                        element.play();
-                    }
+        if ready && let Some(mut resume) = self.resume.take() {
+            resume.at_ms = resume.at_ms.min(view.status.duration_ms);
+            self.resume_in_flight = Some(resume);
+            if let Some(element) = self.native.as_ref().and_then(|n| n.element.as_ref()) {
+                element.set_muted(self.desired_muted);
+                if resume.at_ms > 0 {
+                    element.seek(resume.at_ms.min(view.status.duration_ms));
+                }
+                if resume.playing {
+                    element.play();
                 }
             }
         }
+
         if let Some(resume) = self.resume_in_flight {
             let positioned = if resume.playing {
                 view.status.position_ms >= resume.at_ms.saturating_sub(100)
@@ -226,21 +226,21 @@ impl Player {
                 self.resume_in_flight = None;
             }
         }
-        if !resuming
+        if (!resuming
             && (self.resume_in_flight.is_none() || view.status.state == PlaybackState::Failed)
             && new_status
             && (fresh
                 || (view.status.state == PlaybackState::Failed
-                    && (belongs || view.status.session_id.is_none())))
+                    && (belongs || view.status.session_id.is_none()))))
+            && let Some(resume) = self.session.as_mut().and_then(|p| p.note(&view.status))
         {
-            if let Some(resume) = self.session.as_mut().and_then(|p| p.note(&view.status)) {
-                self.resume = Some(resume);
-                self.need_open = true;
-                self.open_native();
-                cx.notify();
-                return;
-            }
+            self.resume = Some(resume);
+            self.need_open = true;
+            self.open_native();
+            cx.notify();
+            return;
         }
+
         let changed = self.status.state != view.status.state
             || self.status.position_ms / 100 != view.status.position_ms / 100
             || self.status.duration_ms != view.status.duration_ms
@@ -275,36 +275,37 @@ impl Player {
             .w_full()
             .h(gpui::px(self.slot_height))
             .overflow_hidden();
-        if self.active {
-            if let Some(native) = self.native.as_ref() {
-                let weak = cx.entity().downgrade();
-                slot = slot.child(native.host.native.clone()).child(
-                    gpui::canvas(
-                        move |bounds, _, cx| {
-                            let _ = weak.update(cx, |this, _| {
-                                this.smoke_slot = Some(bounds);
-                                if let Some(native) = this.native.as_mut() {
-                                    if let Some(element) = native.element.as_mut() {
-                                        element.place(videorc_preview::LayerRect {
-                                            x: 0.,
-                                            y: 0.,
-                                            width: f64::from(bounds.size.width),
-                                            height: f64::from(bounds.size.height),
-                                        });
-                                        tune_video_layer(&native.host.view, 0.);
-                                    }
-                                }
-                            });
-                        },
-                        |_, _, _, _| {},
-                    )
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full(),
-                );
-            }
+        if self.active
+            && let Some(native) = self.native.as_ref()
+        {
+            let weak = cx.entity().downgrade();
+            slot = slot.child(native.host.native.clone()).child(
+                gpui::canvas(
+                    move |bounds, _, cx| {
+                        let _ = weak.update(cx, |this, _| {
+                            this.smoke_slot = Some(bounds);
+                            if let Some(native) = this.native.as_mut()
+                                && let Some(element) = native.element.as_mut()
+                            {
+                                element.place(videorc_preview::LayerRect {
+                                    x: 0.,
+                                    y: 0.,
+                                    width: f64::from(bounds.size.width),
+                                    height: f64::from(bounds.size.height),
+                                });
+                                tune_video_layer(&native.host.view, 0.);
+                            }
+                        });
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            );
         }
+
         slot.into_any_element()
     }
 

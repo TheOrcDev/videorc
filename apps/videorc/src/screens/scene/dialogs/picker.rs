@@ -511,6 +511,10 @@ impl SceneDialogs {
         cx.notify();
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit screen assembly inputs keep independent view state and callbacks visible"
+    )]
     fn card(
         &self,
         id: SharedString,

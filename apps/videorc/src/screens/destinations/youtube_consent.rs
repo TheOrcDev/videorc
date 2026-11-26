@@ -181,10 +181,10 @@ impl DestinationsPanel {
             entity.update(cx, |this, cx| {
                 match page {
                     Some(url) => {
-                        if let Some(wait) = this.memory.sign_in.get_mut(&platform_owned) {
-                            if wait.from == from {
-                                wait.url = Some(url);
-                            }
+                        if let Some(wait) = this.memory.sign_in.get_mut(&platform_owned)
+                            && wait.from == from
+                        {
+                            wait.url = Some(url);
                         }
                     }
                     None => {

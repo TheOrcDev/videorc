@@ -287,7 +287,7 @@ impl DestinationsPanel {
                                 .accessibility_label(REPLY_LABEL)
                                 .disabled(pending)
                                 .invalid(chat_commands::reply_over(
-                                    &editor.reply.read(cx).value().to_string(),
+                                    editor.reply.read(cx).value().as_ref(),
                                 )),
                         ),
                 ),

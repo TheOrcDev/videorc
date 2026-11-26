@@ -83,6 +83,10 @@ fn background_tile(
 }
 
 /// Grouped tiles for the popover or the Choose-image dialog.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Explicit screen assembly inputs keep independent view state and callbacks visible"
+)]
 pub fn tiles_grid(
     choices: &[Choice],
     selected: Option<&ChoiceId>,
@@ -173,6 +177,10 @@ pub fn image_tiles(
 }
 
 /// P257–P262: the popover body (viewer, grouped tiles, blur caveat, lock).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Explicit screen assembly inputs keep independent view state and callbacks visible"
+)]
 pub fn picker_body(
     background: &serde_json::Value,
     choices: &[Choice],

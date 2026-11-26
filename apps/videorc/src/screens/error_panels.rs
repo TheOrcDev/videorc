@@ -29,20 +29,30 @@ const COPY_FAILED: &str = "Couldn't copy";
 enum CopyState {
     Idle,
     Copied,
+    #[allow(
+        dead_code,
+        reason = "Crash panel state retained for the pending error boundary"
+    )]
     Failed,
 }
 
 /// Which panel is up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Kind {
+    #[allow(
+        dead_code,
+        reason = "Crash panel state retained for the pending error boundary"
+    )]
     Root {
         details: String,
         /// Health export is still reachable (main shell alive).
         support_bundle: bool,
     },
-    Page {
-        details: String,
-    },
+    #[allow(
+        dead_code,
+        reason = "Crash panel state retained for the pending error boundary"
+    )]
+    Page { details: String },
 }
 
 /// Shell-hosted root / page error panels.
@@ -60,6 +70,10 @@ impl ErrorPanels {
     }
 
     /// Full-window crash panel (sidebar and pages gone).
+    #[allow(
+        dead_code,
+        reason = "Crash panel entry point awaits GPUI panic boundary integration"
+    )]
     pub fn show_root(
         &mut self,
         details: impl Into<String>,
@@ -75,6 +89,10 @@ impl ErrorPanels {
     }
 
     /// Per-page crash panel (sidebar and other pages stay).
+    #[allow(
+        dead_code,
+        reason = "Crash panel entry point awaits GPUI panic boundary integration"
+    )]
     pub fn show_page(&mut self, details: impl Into<String>, cx: &mut Context<Self>) {
         self.kind = Some(Kind::Page {
             details: details.into(),

@@ -42,7 +42,6 @@ use videorc_kit::page_tabs::PageTabs;
 use videorc_kit::theme::{FONT, TypeScale, hsla};
 use videorc_kit::toast::{ToastData, ToastKind};
 use videorc_kit::tokens::{Theme, size, text};
-use videorc_protocol::cohost::CohostAutoChat;
 use videorc_protocol::{CleanCutJob, CleanCutMode};
 
 use chat::{ChatWidgets, render_chat};
@@ -470,12 +469,11 @@ impl SidekickScreen {
         if self.community.is_none() {
             self.community = Some(CommunityState::new(window, cx));
         }
-        if self.tab == Tab::Community {
-            if let Some(community) = self.community.as_ref() {
-                if !community.loaded {
-                    self.refresh_community(cx);
-                }
-            }
+        if self.tab == Tab::Community
+            && let Some(community) = self.community.as_ref()
+            && !community.loaded
+        {
+            self.refresh_community(cx);
         }
     }
 
@@ -504,15 +502,13 @@ impl SidekickScreen {
                                         | "account.changed"
                                         | ENTITLEMENTS_UPDATED
                                 );
-                                if event == "cohost.state" {
-                                    if let Ok(state) =
-                                        serde_json::from_value::<CohostState>(payload.clone())
-                                    {
-                                        let _ = this.update(cx, |screen, cx| {
-                                            screen.state = state;
-                                            cx.notify();
-                                        });
-                                    }
+                                if event == "cohost.state"
+                                    && let Ok(state) = serde_json::from_value::<CohostState>(payload.clone())
+                                {
+                                    let _ = this.update(cx, |screen, cx| {
+                                        screen.state = state;
+                                        cx.notify();
+                                    });
                                 }
                                 if event == "cleanCut.status" {
                                     let job = serde_json::from_value::<CleanCutJob>(payload.clone()).ok();
@@ -1317,7 +1313,7 @@ impl SidekickScreen {
             .settings
             .as_ref()
             .and_then(|s| s.auto_chat.clone())
-            .unwrap_or_else(CohostAutoChat::default);
+            .unwrap_or_default();
         match which {
             "answers" => {
                 if let Some(on) = enabled {

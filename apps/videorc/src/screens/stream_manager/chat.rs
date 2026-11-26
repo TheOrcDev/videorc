@@ -188,6 +188,10 @@ pub struct ChatPane {
 }
 
 impl ChatPane {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Explicit screen assembly inputs keep independent view state and callbacks visible"
+    )]
     pub fn new(
         studio: SharedStudio,
         runtime: tokio::runtime::Handle,
@@ -707,7 +711,7 @@ impl ChatPane {
             let toaster = toaster.clone();
             let entity = entity.clone();
             move |window, cx| {
-                let _ = entity.update(cx, |pane, cx| {
+                entity.update(cx, |pane, cx| {
                     pane.requesting.retain(|id| id != &message_id);
                     cx.notify();
                 });
@@ -718,7 +722,7 @@ impl ChatPane {
             let message_id = message_id.clone();
             let entity = entity.clone();
             move |_: &mut Window, cx: &mut App| {
-                let _ = entity.update(cx, |pane, cx| {
+                entity.update(cx, |pane, cx| {
                     pane.flush_removal(&message_id, cx);
                 });
             }

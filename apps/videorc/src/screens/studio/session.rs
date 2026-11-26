@@ -580,7 +580,7 @@ impl Render for SessionSection {
         // agents line (P166).
         let mut rows = self.view.rows.clone();
         rows.extend(self.guests.clone().map(guests_fact));
-        let agents = self.agents_row(&theme, cx);
+        let agents = self.agents_row(theme, cx);
         let facts: AnyElement = if self.retro {
             let mut screen = div().flex().flex_col();
             let mut saw_live_block = false;
@@ -588,13 +588,13 @@ impl Render for SessionSection {
                 let live_block =
                     fact.nested || matches!(fact.id, "destinations" | "stream" | "sidekick");
                 if live_block && !saw_live_block {
-                    screen = screen.child(lcd::separator(&theme));
+                    screen = screen.child(lcd::separator(theme));
                     saw_live_block = true;
                 }
-                screen = screen.child(self.lcd_row(fact, &theme, cx));
+                screen = screen.child(self.lcd_row(fact, theme, cx));
             }
             screen = screen.children(agents);
-            lcd::panel("studio-lcd-session", &theme, "Session", screen).into_any_element()
+            lcd::panel("studio-lcd-session", theme, "Session", screen).into_any_element()
         } else {
             let mut list = GroupedList::new();
             for (index, fact) in rows.iter().enumerate() {

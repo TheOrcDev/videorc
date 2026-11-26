@@ -586,11 +586,12 @@ impl ImagesPanel {
             let result = job.await;
             let _ = this.update(cx, |panel, cx| {
                 panel.background_importing = false;
-                if let Ok(Ok(imported)) = result {
-                    if !panel.backgrounds.iter().any(|row| row.id == imported.id) {
-                        panel.backgrounds.push(imported);
-                    }
+                if let Ok(Ok(imported)) = result
+                    && !panel.backgrounds.iter().any(|row| row.id == imported.id)
+                {
+                    panel.backgrounds.push(imported);
                 }
+
                 cx.notify();
             });
         })

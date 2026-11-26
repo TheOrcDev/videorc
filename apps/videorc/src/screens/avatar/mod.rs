@@ -362,7 +362,7 @@ impl AvatarScreen {
                             let _ =
                                 this.update(cx, |screen, cx| screen.look_event(&name, payload, cx));
                         }
-                        SETTINGS_CHANGED_EVENT | "account.changed" | ENTITLEMENTS_UPDATED => {
+                        SETTINGS_CHANGED_EVENT | ENTITLEMENTS_UPDATED => {
                             let _ = this.update(cx, |screen, cx| screen.refresh(cx));
                         }
                         other => {

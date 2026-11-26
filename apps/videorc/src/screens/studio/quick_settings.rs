@@ -315,7 +315,7 @@ impl QuickSettingsSection {
         column.into_any_element()
     }
 
-    fn background_line(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn background_line(&self, _t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let Some(line) = self.view.camera.background.clone() else {
             return div().into_any_element();
         };
@@ -343,7 +343,7 @@ impl QuickSettingsSection {
                     BACKGROUND_LABEL,
                     trigger_value.clone(),
                 )
-                .leading(thumbnail(&theme))
+                .leading(thumbnail(theme))
                 .on_navigate(|_, _, _| {})
             })
             .content(move |window, cx| {
@@ -396,7 +396,7 @@ impl QuickSettingsSection {
             &tiles,
             selected,
             value,
-            &t,
+            t,
             move |choice, _, cx| {
                 let _ = choose_entity.update(cx, |section, cx| {
                     section.choose_background(choice);
@@ -462,7 +462,7 @@ impl QuickSettingsSection {
             image_tiles(
                 &image_choices,
                 selected.as_ref(),
-                &t,
+                t,
                 move |choice, window, cx| {
                     let _ = entity.update(cx, |section, cx| {
                         section.choose_background(choice);
@@ -695,14 +695,14 @@ impl Render for QuickSettingsSection {
         // readers only; GroupedList's visible label stays off.
         let _ = self.view.group_label;
         if self.retro {
-            return self.render_retro(&t, window, cx);
+            return self.render_retro(t, window, cx);
         }
         let sources = PanelSection::new("quick-settings-sources")
-            .child(GroupedList::new().item(self.camera_block(&t, cx)));
+            .child(GroupedList::new().item(self.camera_block(t, cx)));
         let doors = PanelSection::new("quick-settings-doors").child(
             GroupedList::new()
-                .row(self.captions_row(&t, cx))
-                .row(self.chat_row(&t, cx)),
+                .row(self.captions_row(t, cx))
+                .row(self.chat_row(t, cx)),
         );
         div()
             .id("quick-settings")

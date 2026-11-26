@@ -99,26 +99,27 @@ pub struct GoLiveFace {
 
 impl RecordFace {
     pub fn of(view: &TransportView, talk_show: Option<&TalkShowOutputs>) -> Self {
-        if let Some(outputs) = talk_show {
-            if outputs.recording {
-                // Room open + cloud recording: "Stop recording", lit, and
-                // "Stopping…" while its request is out (Electron keeps it
-                // clickable; the core ignores a second click).
-                return Self {
-                    label: if outputs.stopping {
-                        STOPPING_LABEL
-                    } else {
-                        STOP_CLOUD_RECORDING_LABEL
-                    },
-                    shortcut: false,
-                    lit: true,
-                    disabled: false,
-                    stops: false,
-                    stops_cloud: true,
-                    reason: None,
-                };
-            }
+        if let Some(outputs) = talk_show
+            && outputs.recording
+        {
+            // Room open + cloud recording: "Stop recording", lit, and
+            // "Stopping…" while its request is out (Electron keeps it
+            // clickable; the core ignores a second click).
+            return Self {
+                label: if outputs.stopping {
+                    STOPPING_LABEL
+                } else {
+                    STOP_CLOUD_RECORDING_LABEL
+                },
+                shortcut: false,
+                lit: true,
+                disabled: false,
+                stops: false,
+                stops_cloud: true,
+                reason: None,
+            };
         }
+
         let starting = matches!(
             view.record_state,
             RecordButtonState::Idle | RecordButtonState::Starting
@@ -423,18 +424,15 @@ impl Transport {
             .border_b_1()
             .border_color(hsla(theme.border))
             .child(buttons)
-            .when_some(
-                view.stop_note.clone().filter(|_| local_active),
-                |section, note| {
-                    section.child(
-                        div()
-                            .id("session-stop-note")
-                            .type_scale(text::META)
-                            .text_color(muted)
-                            .child(note),
-                    )
-                },
-            )
+            .when_some(view.stop_note.filter(|_| local_active), |section, note| {
+                section.child(
+                    div()
+                        .id("session-stop-note")
+                        .type_scale(text::META)
+                        .text_color(muted)
+                        .child(note),
+                )
+            })
             .when_some(
                 view.blocked_reason.clone().filter(|_| !local_active),
                 |section, reason| {
@@ -567,7 +565,7 @@ impl Transport {
         };
 
         let mut screen = div().flex().flex_col().child(keys);
-        if let Some(note) = view.stop_note.clone().filter(|_| local_active) {
+        if let Some(note) = view.stop_note.filter(|_| local_active) {
             screen = screen.child(lcd::message(theme, note));
         }
         if let Some(reason) = view.blocked_reason.clone().filter(|_| !local_active) {
@@ -623,9 +621,9 @@ impl Render for Transport {
         let view = &controls.transport;
         let outputs = self.talk_show.read(cx).value().transport_outputs();
         if controls.retro {
-            self.render_retro(&theme, view, outputs.as_ref(), cx)
+            self.render_retro(theme, view, outputs.as_ref(), cx)
         } else {
-            self.render_default(&theme, view, outputs.as_ref(), cx)
+            self.render_default(theme, view, outputs.as_ref(), cx)
         }
     }
 }

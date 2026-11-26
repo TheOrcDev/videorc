@@ -183,7 +183,7 @@ impl ScenePage {
         // (`leading` and `icon` in `SceneRow`), both at half strength while
         // the scene can't be chosen.
         let mut line = ListRow::new(SharedString::from(format!("scene-{id}")), row.name.clone())
-            .leading(self.row_thumb(&row.thumb, row.disabled, &t))
+            .leading(self.row_thumb(&row.thumb, row.disabled, t))
             .icon(
                 div()
                     .flex()

@@ -59,19 +59,19 @@ jobs:
         # configure flags and encoder table prove LGPL-only VAAPI + OpenH264.
         run: node scripts/fetch-ffmpeg-linux.mjs
 
-      - name: Install PipeWire/SPA compile dependencies
-        # The Linux-only `pipewire` crate (libspa-sys) finds libpipewire-0.3
-        # via pkg-config and generates bindings with clang/bindgen. Plan 260:
-        # videorc-preview's Linux presenter links libwayland-client
-        # (`wayland-sys`, found through pkg-config).
+      - name: Install backend and GPUI platform headers
+        # The Plan 260 workspace gate compiles GPUI as well as the backend.
+        # Keep the GPUI headers in sync with gpui-compile.yml, plus the
+        # PipeWire/SPA headers used by the Linux backend.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            clang \
-            libpipewire-0.3-dev \
-            libspa-0.2-dev \
-            libwayland-dev
+            build-essential clang cmake pkg-config libssl-dev \
+            libasound2-dev libfontconfig1-dev libfreetype6-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb1-dev libx11-dev libx11-xcb-dev libxi-dev \
+            libxrandr-dev libxinerama-dev libxcursor-dev libegl1-mesa-dev \
+            libvulkan-dev libpipewire-0.3-dev libspa-0.2-dev
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

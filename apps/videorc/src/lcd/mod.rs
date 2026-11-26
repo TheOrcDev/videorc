@@ -435,6 +435,10 @@ pub fn cog(
 }
 
 /// A transport key on the screen (Record, Go Live, Stop).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Explicit screen assembly inputs keep independent view state and callbacks visible"
+)]
 pub fn key(
     id: impl Into<ElementId>,
     theme: &Theme,

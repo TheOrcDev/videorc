@@ -456,69 +456,68 @@ impl SettingsScreen {
             let answer = job.await;
             let _ = entity.update(cx, |this, cx| {
                 this.reading = false;
-                if revision == this.revision {
-                    if let Ok((chat, usage, remote, phone, agents, activity, account)) = answer {
-                        // Which remote read came back short, and why, before
-                        // the answers are taken (the notice alone doesn't say).
-                        log_short_reads(&remote, &phone, &agents, &activity);
-                        if event_revisions[5] == this.event_revisions[5] {
-                            this.account =
-                                account.ok().and_then(|v| serde_json::from_value(v).ok());
-                        }
-                        if event_revisions[0] == this.event_revisions[0] {
-                            this.chat.value =
-                                chat.ok().and_then(|v| serde_json::from_value(v).ok());
-                            this.chat.error = this
-                                .chat
-                                .value
-                                .is_none()
-                                .then_some(view::copy::CHAT_READ_FAILED);
-                        }
-                        this.usage.value = usage.ok().and_then(|v| serde_json::from_value(v).ok());
-                        this.usage.error = this
-                            .usage
+                if revision == this.revision
+                    && let Ok((chat, usage, remote, phone, agents, activity, account)) = answer
+                {
+                    // Which remote read came back short, and why, before
+                    // the answers are taken (the notice alone doesn't say).
+                    log_short_reads(&remote, &phone, &agents, &activity);
+                    if event_revisions[5] == this.event_revisions[5] {
+                        this.account = account.ok().and_then(|v| serde_json::from_value(v).ok());
+                    }
+                    if event_revisions[0] == this.event_revisions[0] {
+                        this.chat.value = chat.ok().and_then(|v| serde_json::from_value(v).ok());
+                        this.chat.error = this
+                            .chat
                             .value
                             .is_none()
-                            .then_some(view::copy::USAGE_READ_FAILED);
-                        if event_revisions[1] == this.event_revisions[1] {
-                            this.remote = remote.ok().and_then(|v| serde_json::from_value(v).ok());
-                        }
-                        if event_revisions[2] == this.event_revisions[2] {
-                            this.phone = phone.ok().and_then(|v| serde_json::from_value(v).ok());
-                        }
-                        if event_revisions[3] == this.event_revisions[3] {
-                            this.agents = agents.ok().and_then(|v| serde_json::from_value(v).ok());
-                        }
-                        let loaded: Option<Vec<ActivityEntry>> = activity
-                            .ok()
-                            .and_then(|value| value.get("entries").cloned())
-                            .and_then(|value| serde_json::from_value(value).ok());
-                        if event_revisions[4] == this.event_revisions[4] {
-                            this.activity = loaded;
-                        } else if let Some(loaded) = loaded {
-                            let rows = this.activity.get_or_insert_with(Vec::new);
-                            for row in loaded {
-                                if !rows.iter().any(|recent| recent.id == row.id) {
-                                    rows.push(row);
-                                }
+                            .then_some(view::copy::CHAT_READ_FAILED);
+                    }
+                    this.usage.value = usage.ok().and_then(|v| serde_json::from_value(v).ok());
+                    this.usage.error = this
+                        .usage
+                        .value
+                        .is_none()
+                        .then_some(view::copy::USAGE_READ_FAILED);
+                    if event_revisions[1] == this.event_revisions[1] {
+                        this.remote = remote.ok().and_then(|v| serde_json::from_value(v).ok());
+                    }
+                    if event_revisions[2] == this.event_revisions[2] {
+                        this.phone = phone.ok().and_then(|v| serde_json::from_value(v).ok());
+                    }
+                    if event_revisions[3] == this.event_revisions[3] {
+                        this.agents = agents.ok().and_then(|v| serde_json::from_value(v).ok());
+                    }
+                    let loaded: Option<Vec<ActivityEntry>> = activity
+                        .ok()
+                        .and_then(|value| value.get("entries").cloned())
+                        .and_then(|value| serde_json::from_value(value).ok());
+                    if event_revisions[4] == this.event_revisions[4] {
+                        this.activity = loaded;
+                    } else if let Some(loaded) = loaded {
+                        let rows = this.activity.get_or_insert_with(Vec::new);
+                        for row in loaded {
+                            if !rows.iter().any(|recent| recent.id == row.id) {
+                                rows.push(row);
                             }
-                            rows.truncate(ACTIVITY_ROWS);
                         }
-                        // The remote settings' one notice: set while a read
-                        // came back short, cleared by the next whole read
-                        // (opening Settings reads again), so a failure at
-                        // startup doesn't stay for the session.
-                        let short = this.remote.is_none()
-                            || this.phone.is_none()
-                            || this.agents.is_none()
-                            || this.activity.is_none();
-                        if short {
-                            this.error = Some(REMOTE_READ_FAILED.into());
-                        } else if this.error.as_deref() == Some(REMOTE_READ_FAILED) {
-                            this.error = None;
-                        }
+                        rows.truncate(ACTIVITY_ROWS);
+                    }
+                    // The remote settings' one notice: set while a read
+                    // came back short, cleared by the next whole read
+                    // (opening Settings reads again), so a failure at
+                    // startup doesn't stay for the session.
+                    let short = this.remote.is_none()
+                        || this.phone.is_none()
+                        || this.agents.is_none()
+                        || this.activity.is_none();
+                    if short {
+                        this.error = Some(REMOTE_READ_FAILED.into());
+                    } else if this.error.as_deref() == Some(REMOTE_READ_FAILED) {
+                        this.error = None;
                     }
                 }
+
                 if this.read_again {
                     this.refresh(cx);
                 }

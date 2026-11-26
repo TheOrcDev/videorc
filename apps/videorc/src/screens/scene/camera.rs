@@ -690,7 +690,7 @@ impl ScenePage {
                 .into_any_element()
         } else {
             let page = cx.entity().downgrade();
-            image_tiles(&images, selected.as_ref(), &t, move |choice, window, cx| {
+            image_tiles(&images, selected.as_ref(), t, move |choice, window, cx| {
                 let _ = page.update(cx, |page, cx| {
                     page.choose_background(&choice, cx);
                     page.controls.choose_image.close(window, cx);

@@ -228,7 +228,7 @@ fn tips_value(board: &LiveDashboard) -> String {
         Some(SessionChatTotals::Available { tips, .. }) if !tips.is_empty() => {
             let micros: u64 = tips.iter().map(|t| t.amount_micros).sum();
             let amount = micros as f64 / 1_000_000.0;
-            if micros % 1_000_000 == 0 {
+            if micros.is_multiple_of(1_000_000) {
                 format!("${}", group_thousands(amount as i64))
             } else {
                 format!("${amount:.2}")

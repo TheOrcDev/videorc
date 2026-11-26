@@ -122,14 +122,15 @@ fn chat_platform(platform: &str) -> ChatPlatform {
 
 /// `setSettings({...current, studioChat: on})`.
 fn write_studio_chat(studio: Arc<AppStudio>, runtime: &tokio::runtime::Handle, on: bool) {
-    let _ = runtime.spawn(async move {
+    // Detach the Tokio task; the settings write continues on the runtime.
+    drop(runtime.spawn(async move {
         if let Err(error) = studio
             .update_studio_settings(|settings| settings.set("studioChat", json!(on)))
             .await
         {
             eprintln!("[videorc-app] Chat in Studio: {}", error.message);
         }
-    });
+    }));
 }
 
 pub struct ChatSection {

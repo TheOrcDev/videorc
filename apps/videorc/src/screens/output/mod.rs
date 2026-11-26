@@ -389,7 +389,7 @@ impl OutputPanel {
         hotkeys: Hotkeys,
         cx: &mut Context<Self>,
     ) -> Self {
-        let model = OutputModel::of(&*studio.watch().borrow(), None);
+        let model = OutputModel::of(&studio.watch().borrow(), None);
         let studio_watch = studio.clone();
         cx.spawn(async move |this, cx| {
             let mut studio_rx = studio_watch.watch();
@@ -870,14 +870,13 @@ impl OutputPanel {
             let state = cx.new(|cx| InputState::new(window, cx).placeholder(label));
             cx.subscribe(&state, move |this, _, event: &InputEvent, cx| match event {
                 InputEvent::PressEnter { .. } | InputEvent::Blur => this.commit_field(field, cx),
-                InputEvent::Change => {
+                InputEvent::Change
                     if this
                         .field_refusal
-                        .is_some_and(|(refused, ..)| refused == field)
-                    {
-                        this.field_refusal = None;
-                        cx.notify();
-                    }
+                        .is_some_and(|(refused, ..)| refused == field) =>
+                {
+                    this.field_refusal = None;
+                    cx.notify();
                 }
                 _ => {}
             })
@@ -903,7 +902,7 @@ impl OutputPanel {
         for (field, state) in fields {
             let value = field.of(&self.model.video).to_string();
             let focused = state.read(cx).focus_handle(cx).is_focused(window);
-            if !focused && state.read(cx).value().to_string() != value {
+            if !focused && state.read(cx).value().as_ref() != value {
                 state.update(cx, |state, cx| state.set_value(value, window, cx));
             }
         }
@@ -1009,7 +1008,7 @@ impl OutputPanel {
     }
 
     fn push_model(&mut self, cx: &mut Context<Self>) {
-        self.rebuild(&*self.studio.watch().borrow(), cx);
+        self.rebuild(&self.studio.watch().borrow(), cx);
     }
 
     fn run_studio<F>(&self, work: F)

@@ -31,6 +31,9 @@ use videorc_kit::{
 
 use super::layout::{Tier, full_labels, wide_labels};
 
+type WindowAction = Rc<dyn Fn(&mut Window, &mut App)>;
+type BannerAction = Rc<dyn Fn(String, bool, &mut Window, &mut App)>;
+
 const CLEAR: &str = "Clear";
 const CLEAR_VIEW: &str = "Clear view";
 const BANNERS: &str = "Banners";
@@ -79,6 +82,10 @@ fn action_icon(t: &Theme, name: IconName, on: bool) -> gpui::Svg {
 /// (`stream-manager-status-bar.tsx`): icons, with the words Hide screen and
 /// Commands at Wide only (`WIDE_LABEL`) and Clip's scissors from 800 px
 /// (`COMPACT_ICON`).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Explicit screen assembly inputs keep independent view state and callbacks visible"
+)]
 pub fn status_bar(
     t: &Theme,
     notices: gpui::Entity<crate::screens::notifications::Centre>,
@@ -402,8 +409,8 @@ pub fn status_bar(
 
 fn banners_menu(
     banners: Option<&Vec<BannerRow>>,
-    on_banner: Rc<dyn Fn(String, bool, &mut Window, &mut App)>,
-    hide_all: Rc<dyn Fn(&mut Window, &mut App)>,
+    on_banner: BannerAction,
+    hide_all: WindowAction,
 ) -> Menu {
     let mut menu = Menu::new();
     match banners {
@@ -436,7 +443,7 @@ fn banners_menu(
 fn sounds_menu(
     sounds: Option<&Vec<SoundRow>>,
     on_sound: Rc<dyn Fn(String, &mut Window, &mut App)>,
-    stop_all: Rc<dyn Fn(&mut Window, &mut App)>,
+    stop_all: WindowAction,
 ) -> Menu {
     let mut menu = Menu::new();
     match sounds {

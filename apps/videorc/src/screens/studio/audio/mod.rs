@@ -17,11 +17,12 @@ use gpui::{
     SharedString, Window, actions, div, prelude::*, px,
 };
 use tokio::sync::watch;
+use videorc_app_core::StudioSnapshot;
 use videorc_app_core::settings_page::SettingsTab;
 use videorc_app_core::studio::StudioBackend;
 use videorc_app_core::studio::audio_levels::MicLevels;
 use videorc_app_core::studio::audio_mixer::{
-    self, MICROPHONE_GAIN_DEFAULT, MICROPHONE_GAIN_RANGE, SYSTEM_AUDIO_GAIN_DEFAULT,
+    MICROPHONE_GAIN_DEFAULT, MICROPHONE_GAIN_RANGE, SYSTEM_AUDIO_GAIN_DEFAULT,
     SYSTEM_AUDIO_GAIN_RANGE, copy as words,
 };
 use videorc_app_core::studio::audio_section::{
@@ -31,7 +32,6 @@ use videorc_app_core::studio::audio_section::{
 use videorc_app_core::studio::cloud::CloudState;
 use videorc_app_core::studio::screen_views::talk_show_room;
 use videorc_app_core::studio::source_selection::{PICKER_NONE_VALUE, PickerView, SourceKind};
-use videorc_app_core::{Studio, StudioSnapshot};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
@@ -393,9 +393,7 @@ impl AudioSection {
         let sys_here = self.sys_focus.contains_focused(window, cx);
         let index = if sys_here {
             1
-        } else if mic_here {
-            0
-        } else if direction > 0 {
+        } else if mic_here || direction > 0 {
             0
         } else if has_system {
             1
@@ -1002,15 +1000,15 @@ impl Render for AudioSection {
         self.sync_gains_on_window(window, cx);
         let theme = theme::resolve(None, window, cx);
         let mic = if self.retro {
-            self.microphone_retro(&theme, cx)
+            self.microphone_retro(theme, cx)
         } else {
-            self.microphone_standard(&theme, cx)
+            self.microphone_standard(theme, cx)
         };
         let system = self.view.system_audio.clone().map(|row| {
             if self.retro {
-                self.system_retro(&row, &theme, cx)
+                self.system_retro(&row, theme, cx)
             } else {
-                self.system_standard(&row, &theme, cx)
+                self.system_standard(&row, theme, cx)
             }
         });
         // No "Audio" heading (plan 235 D3); the Mixer keeps the name for
@@ -1028,7 +1026,7 @@ impl Render for AudioSection {
                 .id("studio-channel-strip-system-audio")
                 .track_focus(&self.sys_focus)
                 .tab_index(0)
-                .when(self.retro, |strip| strip.child(lcd::separator(&theme)))
+                .when(self.retro, |strip| strip.child(lcd::separator(theme)))
                 .child(row)
         });
         let channels = div()
@@ -1042,7 +1040,7 @@ impl Render for AudioSection {
         let body = if self.retro {
             lcd::panel(
                 "studio-lcd-audio",
-                &theme,
+                theme,
                 words::AUDIO,
                 channels.child(mic_strip).children(sys_strip),
             )

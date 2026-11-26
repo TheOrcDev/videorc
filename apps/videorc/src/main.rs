@@ -471,9 +471,10 @@ fn main() -> Result<()> {
         app_executable: std::env::current_exe().ok(),
     };
     let refresh_bridge = agent_bridge.clone();
-    let _ = runtime.spawn_blocking(move || {
+    // Tokio keeps the blocking refresh running after its handle is dropped.
+    drop(runtime.spawn_blocking(move || {
         videorc_app_core::desktop::agent_bridge::refresh_copy(&refresh_bridge)
-    });
+    }));
     links::receive(&deep_links, &args.links, LinkSource::CommandLine);
 
     let backend_state = supervisor.state();

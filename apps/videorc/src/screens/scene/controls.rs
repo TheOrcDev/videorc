@@ -376,7 +376,7 @@ impl ScenePage {
             }
             let target = rounded(self.controls.knob(*knob).read(cx).value().end()).to_string();
             state.update(cx, |state, cx| {
-                if state.value().to_string() != target {
+                if state.value().as_ref() != target {
                     state.set_value(target, window, cx);
                 }
             });
@@ -389,7 +389,7 @@ impl ScenePage {
                 continue;
             };
             state.update(cx, |state, cx| {
-                if state.value().to_string() != target {
+                if state.value().as_ref() != target {
                     state.set_value(target, window, cx);
                 }
             });

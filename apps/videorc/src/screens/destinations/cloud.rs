@@ -1,6 +1,6 @@
 //! Videorc Cloud on Destinations Setup (`CloudSection`, P777–P782).
 
-use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*};
 use serde_json::json;
 use videorc_app_core::livestream::cloud_view::{
     self, CLOUD_PREMIUM_REASON, HOLD_IMAGE_DESCRIPTION, HOLD_IMAGE_LABEL, HOLD_MAX_DESCRIPTION,

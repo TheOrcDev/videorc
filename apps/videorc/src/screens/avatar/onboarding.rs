@@ -1580,7 +1580,7 @@ fn create_step(
 /// pictures with Redo on talk, laugh and think, or four empty slots.
 fn pose_tiles(
     screen: &AvatarScreen,
-    onboarding: &Onboarding,
+    _onboarding: &Onboarding,
     view_kind: View,
     t: &Theme,
     cx: &mut Context<AvatarScreen>,

@@ -6,6 +6,10 @@
 //! and the confirm recipe are.
 
 mod confirm;
+#[allow(
+    dead_code,
+    reason = "Confirmation copy recipes retained for pending screen parity wiring"
+)]
 pub mod copy;
 mod end_livestream;
 mod start_blocked;
@@ -29,6 +33,10 @@ impl EventEmitter<OpenPage> for DialogsHost {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmVariant {
     Destructive,
+    #[allow(
+        dead_code,
+        reason = "Consequential confirmation style retained beside destructive dialogs"
+    )]
     Default,
 }
 

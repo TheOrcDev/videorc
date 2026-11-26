@@ -34,7 +34,7 @@ impl DestinationsPanel {
         PanelSection::new("destinations-output-quality")
             .title(page_copy::OUTPUT_QUALITY)
             .child(quality_field(
-                &t,
+                t,
                 control.small(false),
                 quality.description.clone(),
                 !enabled,

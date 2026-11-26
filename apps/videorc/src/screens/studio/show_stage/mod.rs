@@ -194,6 +194,8 @@ fn stage_for_layout(
     }
 }
 
+type WindowAction = Rc<dyn Fn(&mut Window, &mut App)>;
+
 /// The Show stage that replaces the Preview while the room is open.
 pub struct ShowStage {
     studio: Arc<AppStudio>,
@@ -815,14 +817,14 @@ impl ShowStage {
             .id("show-stage-requests-list")
             .accessibility_label(WANTS_TO_JOIN);
         for request in room.requests.iter().take(REQUESTS_SHOWN) {
-            let let_in: Rc<dyn Fn(&mut Window, &mut App)> = {
+            let let_in: WindowAction = {
                 let entity = entity.clone();
                 let id = request.request_id.clone();
                 Rc::new(move |_, cx| {
                     entity.update(cx, |stage, _| stage.decide(id.clone(), "let-in"))
                 })
             };
-            let decline: Rc<dyn Fn(&mut Window, &mut App)> = {
+            let decline: WindowAction = {
                 let entity = entity.clone();
                 let id = request.request_id.clone();
                 Rc::new(move |_, cx| {
@@ -1278,7 +1280,7 @@ impl ShowStage {
             }
         });
 
-        let on_mic: Rc<dyn Fn(&mut Window, &mut App)> = {
+        let on_mic: WindowAction = {
             let entity = entity.clone();
             let moderation = self.moderation.clone();
             let person = person.clone();
@@ -1290,7 +1292,7 @@ impl ShowStage {
                 }
             })
         };
-        let on_share: Rc<dyn Fn(&mut Window, &mut App)> = {
+        let on_share: WindowAction = {
             let moderation = self.moderation.clone();
             let person = person.clone();
             Rc::new(move |_, cx| {
@@ -1638,7 +1640,7 @@ impl Render for ShowStage {
                     .child(PREVIEW_REPLACED_BY_SHOW_STAGE),
             )
             .action(close_btn)
-            .child(self.well(&t, cx));
+            .child(self.well(t, cx));
 
         if let Some(problem) = talk.message.filter(|m| !m.is_empty()) {
             section = section.child(
@@ -1647,7 +1649,7 @@ impl Render for ShowStage {
                     .title(problem),
             );
         }
-        if let Some(requests) = self.join_requests(&t, cx) {
+        if let Some(requests) = self.join_requests(t, cx) {
             section = section.child(requests);
         }
 
@@ -1665,9 +1667,9 @@ impl Render for ShowStage {
             .gap(px(16.))
             .min_w_0()
             .flex_1()
-            .child(self.layouts(columns, &t, cx))
-            .child(self.screens_section(&people, columns, &t, cx))
-            .child(self.people_section(&people, &t, cx));
+            .child(self.layouts(columns, t, cx))
+            .child(self.screens_section(&people, columns, t, cx))
+            .child(self.people_section(&people, t, cx));
 
         let row = div()
             .flex()
@@ -1677,7 +1679,7 @@ impl Render for ShowStage {
             .min_w_0()
             .w_full()
             .child(controls)
-            .child(self.program_monitor(&t, cx));
+            .child(self.program_monitor(t, cx));
 
         section = section.child(row);
 

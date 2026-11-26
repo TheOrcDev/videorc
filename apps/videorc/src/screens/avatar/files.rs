@@ -408,7 +408,9 @@ struct ManifestFrame {
 }
 
 /// The manifest's frames, and the atlas size they span.
-fn parse_manifest(text: &str) -> Option<(String, Vec<(String, Rect)>, f32, f32)> {
+type ParsedManifest = (String, Vec<(String, Rect)>, f32, f32);
+
+fn parse_manifest(text: &str) -> Option<ParsedManifest> {
     let manifest: Manifest = serde_json::from_str(text).ok()?;
     let frames: Vec<(String, Rect)> = manifest
         .frames

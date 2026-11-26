@@ -134,79 +134,78 @@ impl SettingsScreen {
                 .child(words)
         };
         let mut controls = GroupedList::new();
-        if let Some(status) = &self.remote {
-            if status.enabled {
-                let token = status.token.clone();
-                controls = controls
-                    .item(
-                        div()
-                            .child(
-                                ListRow::new("pairing-token", r::PAIRING_TOKEN).child(
-                                    div()
-                                        .flex()
-                                        .gap(px(8.))
-                                        .items_center()
-                                        .child(r::token_preview(token.as_deref()))
-                                        .child(
-                                            Button::new("copy-remote-token")
-                                                .label(r::COPY)
-                                                .variant(ButtonVariant::Outline)
-                                                .disabled(token.is_none() || self.disabled())
-                                                .on_click(move |_, _, cx| {
-                                                    if let Some(token) = &token {
-                                                        cx.write_to_clipboard(
-                                                            ClipboardItem::new_string(
-                                                                token.clone(),
-                                                            ),
-                                                        );
-                                                    }
-                                                }),
-                                        ),
-                                ),
-                            )
-                            .child(
+        if let Some(status) = &self.remote
+            && status.enabled
+        {
+            let token = status.token.clone();
+            controls = controls
+                .item(
+                    div()
+                        .child(
+                            ListRow::new("pairing-token", r::PAIRING_TOKEN).child(
                                 div()
-                                    .px(px(12.))
-                                    .pb(px(8.))
-                                    .type_scale(text::META)
-                                    .text_color(hsla(t.muted_foreground))
-                                    .child(r::connected_clients_line(status.connected_clients)),
+                                    .flex()
+                                    .gap(px(8.))
+                                    .items_center()
+                                    .child(r::token_preview(token.as_deref()))
+                                    .child(
+                                        Button::new("copy-remote-token")
+                                            .label(r::COPY)
+                                            .variant(ButtonVariant::Outline)
+                                            .disabled(token.is_none() || self.disabled())
+                                            .on_click(move |_, _, cx| {
+                                                if let Some(token) = &token {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(token.clone()),
+                                                    );
+                                                }
+                                            }),
+                                    ),
                             ),
-                    )
-                    .item(
-                        div()
-                            .child(
-                                ListRow::new("new-token", r::NEW_TOKEN).child(
-                                    Button::new("regenerate-token")
-                                        .label(r::REGENERATE)
-                                        .variant(ButtonVariant::Outline)
-                                        .disabled(self.disabled())
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.ask(
-                                                Confirmation {
-                                                    title: r::REGENERATE_TITLE.into(),
-                                                    description: r::regenerate_body(platform),
-                                                    label: r::REGENERATE_CONFIRM,
-                                                    method: "remote.control.regenerate",
-                                                    params: json!({}),
-                                                },
-                                                window,
-                                                cx,
-                                            )
-                                        })),
-                                ),
-                            )
-                            .child(
-                                div()
-                                    .px(px(12.))
-                                    .pb(px(8.))
-                                    .type_scale(text::META)
-                                    .text_color(hsla(t.muted_foreground))
-                                    .child(r::new_token_description(platform)),
+                        )
+                        .child(
+                            div()
+                                .px(px(12.))
+                                .pb(px(8.))
+                                .type_scale(text::META)
+                                .text_color(hsla(t.muted_foreground))
+                                .child(r::connected_clients_line(status.connected_clients)),
+                        ),
+                )
+                .item(
+                    div()
+                        .child(
+                            ListRow::new("new-token", r::NEW_TOKEN).child(
+                                Button::new("regenerate-token")
+                                    .label(r::REGENERATE)
+                                    .variant(ButtonVariant::Outline)
+                                    .disabled(self.disabled())
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.ask(
+                                            Confirmation {
+                                                title: r::REGENERATE_TITLE.into(),
+                                                description: r::regenerate_body(platform),
+                                                label: r::REGENERATE_CONFIRM,
+                                                method: "remote.control.regenerate",
+                                                params: json!({}),
+                                            },
+                                            window,
+                                            cx,
+                                        )
+                                    })),
                             ),
-                    );
-            }
+                        )
+                        .child(
+                            div()
+                                .px(px(12.))
+                                .pb(px(8.))
+                                .type_scale(text::META)
+                                .text_color(hsla(t.muted_foreground))
+                                .child(r::new_token_description(platform)),
+                        ),
+                );
         }
+
         let remote = PanelSection::new(r::REMOTE_CONTROL_TITLE)
             .title(r::REMOTE_CONTROL_TITLE)
             .description(r::remote_control_description(platform))
@@ -236,44 +235,45 @@ impl SettingsScreen {
                 })
             });
         let mut phones = GroupedList::new();
-        if let Some(status) = &self.phone {
-            if status.enabled {
-                let (tone, summary) = r::phone_remote_summary(status);
-                let blocked = tone == r::SummaryTone::Warning;
-                let pair_hint = if blocked {
-                    "Pairing works again once the problem above is fixed.".to_string()
-                } else {
-                    summary.clone()
-                };
-                let mut pair_button = Button::new("pair-phone")
-                    .label("Pair a phone…")
-                    .variant(ButtonVariant::Outline)
-                    .disabled(self.disabled() || blocked)
-                    .on_click(cx.listener(|this, _, _, cx| this.begin_phone_pairing(None, cx)));
-                if blocked {
-                    pair_button = pair_button.tooltip(summary);
-                }
-                phones = phones.item(
-                    div()
-                        .child(ListRow::new("pair-phone-row", "Phones").child(pair_button))
-                        .child(
-                            div()
-                                .px(px(12.))
-                                .pb(px(8.))
-                                .type_scale(text::META)
-                                .text_color(hsla(t.muted_foreground))
-                                .child(pair_hint),
-                        ),
-                );
-                let names = r::phone_display_names(&status.devices);
-                for (index, phone) in status.devices.iter().enumerate() {
-                    let id = phone.id.clone();
-                    let name = names
-                        .get(&id)
-                        .cloned()
-                        .unwrap_or_else(|| phone.name.clone());
-                    let edit = phone.clone();
-                    phones = phones.item(div()
+        if let Some(status) = &self.phone
+            && status.enabled
+        {
+            let (tone, summary) = r::phone_remote_summary(status);
+            let blocked = tone == r::SummaryTone::Warning;
+            let pair_hint = if blocked {
+                "Pairing works again once the problem above is fixed.".to_string()
+            } else {
+                summary.clone()
+            };
+            let mut pair_button = Button::new("pair-phone")
+                .label("Pair a phone…")
+                .variant(ButtonVariant::Outline)
+                .disabled(self.disabled() || blocked)
+                .on_click(cx.listener(|this, _, _, cx| this.begin_phone_pairing(None, cx)));
+            if blocked {
+                pair_button = pair_button.tooltip(summary);
+            }
+            phones = phones.item(
+                div()
+                    .child(ListRow::new("pair-phone-row", "Phones").child(pair_button))
+                    .child(
+                        div()
+                            .px(px(12.))
+                            .pb(px(8.))
+                            .type_scale(text::META)
+                            .text_color(hsla(t.muted_foreground))
+                            .child(pair_hint),
+                    ),
+            );
+            let names = r::phone_display_names(&status.devices);
+            for (index, phone) in status.devices.iter().enumerate() {
+                let id = phone.id.clone();
+                let name = names
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| phone.name.clone());
+                let edit = phone.clone();
+                phones = phones.item(div()
                         .child(ListRow::new(("phone", index), name.clone())
                             .child(Button::new(("rename-phone", index)).label("Rename…")
                                 .variant(ButtonVariant::Ghost).disabled(self.disabled())
@@ -286,9 +286,9 @@ impl SettingsScreen {
                                 }, window, cx)))))
                         .child(div().px(px(12.)).pb(px(8.)).type_scale(text::META).text_color(hsla(t.muted_foreground))
                             .child(r::device_activity_label(phone, chrono::Utc::now().timestamp_millis()))));
-                }
             }
         }
+
         let phone = PanelSection::new(r::PHONE_REMOTE_TITLE)
             .title(r::PHONE_REMOTE_TITLE)
             .description(r::PHONE_REMOTE_DESCRIPTION)

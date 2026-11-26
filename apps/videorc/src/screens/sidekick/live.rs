@@ -22,14 +22,6 @@ impl StatusKind {
             Self::Attention => words::STATUS_ATTENTION,
         }
     }
-
-    pub fn tone(self) -> &'static str {
-        match self {
-            Self::Live => "good",
-            Self::Attention => "warn",
-            Self::Off | Self::On => "neutral",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

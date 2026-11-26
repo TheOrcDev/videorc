@@ -338,9 +338,9 @@ impl Render for TakeoverSection {
         let link = self.link.read(cx).value().clone();
         let view = TakeoverView::of(&self.screens, self.active.as_ref(), link.disconnected);
         if link.retro {
-            self.render_retro(&theme, view, cx)
+            self.render_retro(theme, view, cx)
         } else {
-            self.render_default(&theme, view, cx)
+            self.render_default(theme, view, cx)
         }
     }
 }
