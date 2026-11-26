@@ -419,6 +419,11 @@ fn look(
                     )
                 }
             };
+            // A wheel moves GPUI's pointer to where it scrolls, and hover
+            // follows it: put it back after, so a scroll at the window's
+            // centre leaves no row hovered (Electron's shooter sets
+            // `scrollTop`; the gallery's shots compare to that).
+            let pointer = window.mouse_position();
             window.dispatch_event(
                 PlatformInput::Scroll(ScrollEvent {
                     position,
@@ -428,6 +433,14 @@ fn look(
                     modifiers: Modifiers::none(),
                     touch_phase: TouchPhase::Moved,
                     source: ScrollSource::Pointer,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position: pointer,
+                    pressed_button: None,
+                    modifiers: Modifiers::none(),
                 }),
                 cx,
             );
