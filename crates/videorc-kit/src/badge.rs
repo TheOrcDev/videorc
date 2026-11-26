@@ -144,11 +144,14 @@ impl RenderOnce for Badge {
         let t = resolve(self.appearance, window, cx);
         // 11 px at weight 500: a tag, not the 600 section label. The 16 px
         // line box holds Segoe UI's descenders.
+        // An icon-only badge (`<Badge className="px-1"><Icon/></Badge>`, the
+        // scene card's check): 4 px a side and no label, so no gap.
+        let icon_only = self.label.is_empty() && self.icon.is_some();
         let chip = || {
             div()
                 .relative()
                 .h(px(20.0))
-                .px(px(6.0))
+                .px(px(if icon_only { 4.0 } else { 6.0 }))
                 .flex()
                 .flex_none()
                 .items_center()
@@ -163,7 +166,7 @@ impl RenderOnce for Badge {
                 .line_height(px(16.0))
                 .font_weight(FontWeight::MEDIUM)
         };
-        let words = div().relative().child(self.label);
+        let words = (!icon_only).then(|| div().relative().child(self.label));
         let leading = self.icon.map(|mark| {
             div()
                 .relative()
@@ -186,24 +189,24 @@ impl RenderOnce for Badge {
             BadgeVariant::Default => glass_chip(chip(), t)
                 .text_color(hsla(t.foreground))
                 .children(leading)
-                .child(words),
+                .children(words),
             BadgeVariant::Outline => glass_chip(chip(), t)
                 .text_color(hsla(t.muted_foreground))
                 .children(leading)
-                .child(words),
+                .children(words),
             BadgeVariant::Ghost => chip()
                 .text_color(hsla(t.muted_foreground))
                 .children(leading)
-                .child(words),
-            BadgeVariant::Success => status(t.success, t.chip_dot_glow, leading).child(words),
-            BadgeVariant::Warning => status(t.warning, t.chip_dot_glow, leading).child(words),
+                .children(words),
+            BadgeVariant::Success => status(t.success, t.chip_dot_glow, leading).children(words),
+            BadgeVariant::Warning => status(t.warning, t.chip_dot_glow, leading).children(words),
             BadgeVariant::Neutral => status(t.muted_foreground, 0.0, leading)
                 .text_color(hsla(t.muted_foreground))
-                .child(words),
+                .children(words),
             BadgeVariant::Destructive => tinted(chip(), t, t.destructive)
                 .children(leading)
-                .child(words),
-            BadgeVariant::Live => tinted(chip(), t, t.live).children(leading).child(words),
+                .children(words),
+            BadgeVariant::Live => tinted(chip(), t, t.live).children(leading).children(words),
             BadgeVariant::Chrome => {
                 let mark = match leading {
                     Some(icon) => icon.into_any_element(),
@@ -222,7 +225,7 @@ impl RenderOnce for Badge {
                         Direction::Down,
                     ))
                     .child(mark)
-                    .child(words)
+                    .children(words)
             }
             BadgeVariant::Plate => chip()
                 .bg(linear_gradient(
@@ -234,7 +237,7 @@ impl RenderOnce for Badge {
                 .shadow(plate_shadows(t))
                 .text_color(hsla(t.foreground))
                 .children(leading)
-                .child(words),
+                .children(words),
         }
     }
 }

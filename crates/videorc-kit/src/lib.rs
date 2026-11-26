@@ -143,7 +143,7 @@ pub use theme::{
     Appearance, FONT, FONT_MONO, IncreaseContrast, ReduceMotion, TypeScale, faded_over, hsla,
 };
 pub use toast::{ToastData, ToastKind, Toaster, toast_card};
-pub use toggle_group::{ToggleGroup, ToggleItem};
+pub use toggle_group::{Toggle, ToggleGroup, ToggleItem};
 pub use tooltip::{tooltip, tooltip_with_accelerator, tooltip_with_action, tooltip_with_shortcut};
 pub use tracking::TrackedText;
 pub use window_frame::{WindowFrame, WindowHeader};

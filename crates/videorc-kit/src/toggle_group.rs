@@ -17,12 +17,13 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Axis, ColorSpace, ElementId, FontWeight, IntoElement, SharedString, Window,
-    linear_color_stop, linear_gradient, prelude::*, px,
+    div, linear_color_stop, linear_gradient, prelude::*, px,
 };
 use smallvec::SmallVec;
 
 use crate::{
     badge::plate_shadows,
+    icon::{IconName, icon},
     theme::{Appearance, faded_over, hsla, resolve, with_alpha},
     tokens::{Color, radius, size},
     tooltip::tooltip,
@@ -421,5 +422,185 @@ impl RenderOnce for ToggleGroup {
             group = group.aria_label(label);
         }
         group
+    }
+}
+
+/// The hover group a `Toggle` lights its glyph from.
+const TOGGLE_GROUP: &str = "kit-toggle";
+
+/// A pressed or released state's handler: the new state.
+type PressHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+
+/// One icon button that stays pressed (Electron's `Toggle`, ui/toggle.tsx,
+/// size `xs`: `h-6 min-w-6 px-1.5`, `rounded-chip`): muted ink, hover
+/// `bg-muted` with foreground ink, pressed on the chrome plate with
+/// foreground ink, disabled at half opacity (pre-blended over its ground).
+/// The Show stage's mic and screen-share toggles.
+#[derive(IntoElement)]
+pub struct Toggle {
+    id: ElementId,
+    icon: IconName,
+    icon_size: f32,
+    label: SharedString,
+    pressed: bool,
+    disabled: bool,
+    tooltip: Option<SharedString>,
+    ground: Option<Color>,
+    ink: Option<Color>,
+    dot: bool,
+    on_change: Option<PressHandler>,
+    appearance: Option<Appearance>,
+}
+
+impl Toggle {
+    /// `label` names it for assistive tech (Electron's `aria-label`).
+    pub fn new(id: impl Into<ElementId>, icon: IconName, label: impl Into<SharedString>) -> Self {
+        Toggle {
+            id: id.into(),
+            icon,
+            icon_size: 16.0,
+            label: label.into(),
+            pressed: false,
+            disabled: false,
+            tooltip: None,
+            ground: None,
+            ink: None,
+            dot: false,
+            on_change: None,
+            appearance: None,
+        }
+    }
+
+    pub fn pressed(mut self, pressed: bool) -> Self {
+        self.pressed = pressed;
+        self
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// The glyph's size in px (16 by default).
+    pub fn icon_size(mut self, size: f32) -> Self {
+        self.icon_size = size;
+        self
+    }
+
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
+        self
+    }
+
+    /// The glyph's ink instead of muted / foreground, in every state (the
+    /// Show stage's talking mic: `tone-success text-(--chip-tone)`).
+    pub fn ink(mut self, ink: Color) -> Self {
+        self.ink = Some(ink);
+        self
+    }
+
+    /// A success glass dot in the top-right corner (the Show stage's screen
+    /// share while sharing: `tone-success glass-dot absolute top-0.5
+    /// right-0.5 size-1.5`).
+    pub fn dot(mut self, dot: bool) -> Self {
+        self.dot = dot;
+        self
+    }
+
+    /// The surface under it, for the disabled fade (default glass).
+    pub fn ground(mut self, ground: Color) -> Self {
+        self.ground = Some(ground);
+        self
+    }
+
+    /// Called with the new state when pressed or released.
+    pub fn on_change(mut self, handler: impl Fn(bool, &mut Window, &mut App) + 'static) -> Self {
+        self.on_change = Some(Rc::new(handler));
+        self
+    }
+
+    /// Draws in this appearance instead of the window's (the gallery).
+    pub fn appearance(mut self, appearance: Appearance) -> Self {
+        self.appearance = Some(appearance);
+        self
+    }
+}
+
+impl RenderOnce for Toggle {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let t = resolve(self.appearance, window, cx);
+        let ground = self.ground.unwrap_or(t.glass_solid);
+        let (pressed, disabled) = (self.pressed, self.disabled);
+        let fade = |color: Color| {
+            if disabled {
+                faded_over(color, ground, 0.5)
+            } else {
+                color
+            }
+        };
+        let ink = fade(self.ink.unwrap_or(if pressed {
+            t.foreground
+        } else {
+            t.muted_foreground
+        }));
+        let hoverable = !pressed && !disabled;
+        let lights_on_hover = hoverable && self.ink.is_none();
+        let foreground = hsla(t.foreground);
+        let glyph = icon(self.icon, self.icon_size, hsla(ink)).when(lights_on_hover, |glyph| {
+            glyph.group_hover(TOGGLE_GROUP, move |style| style.text_color(foreground))
+        });
+        let mut toggle = gpui_base::Toggle::new(self.id)
+            .pressed(pressed)
+            .disabled(disabled)
+            .accessibility_label(self.label)
+            .h(px(24.0))
+            .min_w(px(24.0))
+            .px(px(6.0))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::CHIP))
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .relative()
+            .child(glyph)
+            .when(self.dot, |toggle| {
+                toggle.child(
+                    div()
+                        .absolute()
+                        .top(px(2.0))
+                        .right(px(2.0))
+                        .child(crate::badge::dot(fade(t.success), t.chip_dot_glow)),
+                )
+            });
+        if pressed {
+            let mut plate = plate_shadows(t);
+            if disabled {
+                for shadow in &mut plate {
+                    shadow.color.a *= 0.5;
+                }
+            }
+            toggle = toggle
+                .bg(linear_gradient(
+                    180.0,
+                    linear_color_stop(hsla(fade(t.chrome_plate_top)), 0.0),
+                    linear_color_stop(hsla(fade(t.chrome_plate_bottom)), 1.0),
+                )
+                .color_space(ColorSpace::Oklab))
+                .shadow(plate);
+        } else if hoverable {
+            let muted = hsla(t.muted);
+            toggle = toggle
+                .group(TOGGLE_GROUP)
+                .hover(move |style| style.bg(muted));
+        }
+        if let Some(on_change) = self.on_change.filter(|_| !disabled) {
+            toggle = toggle.on_change(move |now, _, window, cx| on_change(now, window, cx));
+        }
+        if let Some(text) = self.tooltip {
+            toggle = toggle.tooltip(tooltip(text));
+        }
+        toggle
     }
 }
