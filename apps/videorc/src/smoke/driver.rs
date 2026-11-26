@@ -622,6 +622,13 @@ fn pointer_drag(
         }),
         cx,
     );
+    // A real pointer's next event arrives after the press can paint. The
+    // Scene stage installs its captured move/up handlers in that paint;
+    // dispatching the whole synthetic drag in this frame otherwise loses
+    // the first drag and leaves its gesture held until the next command.
+    // Build the frame in-process without activating or presenting a window.
+    window.refresh();
+    window.draw(cx).clear(cx);
     let hops = steps.max(1);
     for hop in 1..=hops {
         let t = hop as f64 / hops as f64;
