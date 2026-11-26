@@ -10,7 +10,7 @@ use videorc_kit::sound_pad::{SoundPad, SoundPadGrid, SoundPadMode, SoundPadSize}
 /// Most pads in a row (`SoundPadBoard columns={6}`).
 pub const COLUMNS: usize = 6;
 
-/// Six-column (or fewer via wrap) pad grid.
+/// The pad grid: six equal columns, fewer when a pad would be under 5.5rem.
 pub fn grid(
     sounds: &[Sound],
     voices: &std::collections::BTreeMap<String, SoundVoice>,

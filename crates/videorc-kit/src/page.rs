@@ -39,7 +39,7 @@ pub fn page_width(window: &Window) -> f32 {
 pub const GALLERY_GAP: f32 = 12.0;
 
 /// The width an element had in its last frame, kept between frames.
-fn measured_width(id: &ElementId, window: &mut Window, cx: &mut App) -> Entity<f32> {
+pub(crate) fn measured_width(id: &ElementId, window: &mut Window, cx: &mut App) -> Entity<f32> {
     window.use_keyed_state(
         gpui::SharedString::from(format!("{id}/measured-width")),
         cx,
@@ -49,7 +49,12 @@ fn measured_width(id: &ElementId, window: &mut Window, cx: &mut App) -> Entity<f
 
 /// Records `bounds`' width; when it changed, the window draws again so the
 /// layout that depends on it follows on the next frame.
-fn record_width(state: &Entity<f32>, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+pub(crate) fn record_width(
+    state: &Entity<f32>,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let width = f32::from(bounds.size.width);
     if (state.read(cx) - width).abs() > 0.5 {
         state.update(cx, |w, _| *w = width);

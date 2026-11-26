@@ -10,6 +10,7 @@ use gpui::{
     AnyElement, App, ClickEvent, ElementId, FontWeight, IntoElement, MouseButton, MouseDownEvent,
     MouseUpEvent, SharedString, Toggled, Window, canvas, div, prelude::*, px, relative,
 };
+use gpui_base::ElementExt as _;
 use smallvec::SmallVec;
 
 use crate::{
@@ -74,7 +75,8 @@ impl SoundPadGrid {
         }
     }
 
-    /// Most pads in a row; narrower panes drop columns via flex wrap.
+    /// Most pads in a row; a narrower grid drops columns to keep each pad
+    /// at least 5.5rem wide.
     pub fn columns(mut self, columns: usize) -> Self {
         self.columns = columns.max(1);
         self
@@ -92,26 +94,44 @@ impl ParentElement for SoundPadGrid {
     }
 }
 
+/// The narrowest pad (`--pad-min-width`, 5.5rem).
+const PAD_MIN_WIDTH: f32 = 88.0;
+/// Between pads (`--pad-gap`, 0.5rem).
+const PAD_GAP: f32 = 8.0;
+
+/// How many equal tracks the grid lays across `width`:
+/// `repeat(auto-fill, minmax(max(5.5rem, (100% - (n-1) gap) / n), 1fr))`.
+/// At most `most`, fewer when a pad would be narrower than 5.5rem, never
+/// none. Before the grid is measured (`width` 0) it assumes `most`.
+pub fn sound_pad_columns(width: f32, most: usize) -> u16 {
+    let most = most.clamp(1, u16::MAX as usize) as u16;
+    if width <= 0.0 {
+        return most;
+    }
+    let share = (width - f32::from(most - 1) * PAD_GAP) / f32::from(most);
+    let track = PAD_MIN_WIDTH.max(share);
+    // A hair of slack: `most` tracks of `share` fill `width` exactly.
+    let fit = ((width + PAD_GAP) / (track + PAD_GAP) + 1e-3).floor();
+    (fit as u16).clamp(1, most)
+}
+
 impl RenderOnce for SoundPadGrid {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let min_w = 88.0;
-        let gap = 8.0;
-        let columns = self.columns;
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // A grid, as Electron's: every pad is one track wide, so a short
+        // last row keeps the others' width instead of stretching.
+        let width = crate::page::measured_width(&self.id, window, cx);
+        let columns = sound_pad_columns(*width.read(cx), self.columns);
         div()
             .id(self.id)
             .role(gpui::Role::Group)
-            .flex()
-            .flex_wrap()
-            .gap(px(gap))
+            .grid()
+            .grid_cols(columns)
+            .gap(px(PAD_GAP))
             .w_full()
-            .children(self.children.into_iter().map(move |child| {
-                div()
-                    .flex_grow_1()
-                    .flex_shrink_0()
-                    .min_w(px(min_w))
-                    .flex_basis(relative(1.0 / columns as f32))
-                    .child(child)
-            }))
+            .on_prepaint(move |bounds, window, cx| {
+                crate::page::record_width(&width, bounds, window, cx)
+            })
+            .children(self.children)
     }
 }
 
@@ -456,5 +476,37 @@ fn paint_progress_ring(
     );
     if let Some(image) = chrome::rasterise_for_kit(&svg, d, d) {
         let _ = window.paint_image(bounds, bounds, gpui::Corners::default(), image, 0, false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sound_pad_columns;
+
+    #[test]
+    fn a_wide_grid_keeps_its_most_columns() {
+        // The Studio's soundboard at the default window: six equal pads a row.
+        assert_eq!(sound_pad_columns(718.0, 6), 6);
+        assert_eq!(sound_pad_columns(2000.0, 6), 6);
+    }
+
+    #[test]
+    fn exactly_six_minimum_pads_fit_six() {
+        // 6 × 88 + 5 × 8: the formula's own edge, not one short of it.
+        assert_eq!(sound_pad_columns(568.0, 6), 6);
+        assert_eq!(sound_pad_columns(567.0, 6), 5);
+    }
+
+    #[test]
+    fn a_narrow_grid_drops_columns_to_keep_pads_wide() {
+        assert_eq!(sound_pad_columns(300.0, 6), 3);
+        assert_eq!(sound_pad_columns(90.0, 6), 1);
+        assert_eq!(sound_pad_columns(40.0, 6), 1);
+    }
+
+    #[test]
+    fn an_unmeasured_grid_assumes_its_most_columns() {
+        assert_eq!(sound_pad_columns(0.0, 6), 6);
+        assert_eq!(sound_pad_columns(0.0, 0), 1);
     }
 }
