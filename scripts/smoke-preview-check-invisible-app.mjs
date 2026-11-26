@@ -227,7 +227,16 @@ async function setReplay(armed) {
     if (ring.state === (armed ? 'on' : 'off') && (!armed || ring.replayOnly)) return ring
     await sleep(100)
   } while (Date.now() < until)
-  assert.fail(`Clips switch did not settle: ${JSON.stringify(ring)}`)
+  // GPUI: the Studio's own Clips view says why the ring held (a block or
+  // a wait), as the Output page's Clips row does.
+  const why = gpuiApp
+    ? await command('studio-state', {})
+        .then((state) => state?.clips ?? null)
+        .catch(() => null)
+    : null
+  assert.fail(
+    `Clips switch did not settle: ${JSON.stringify(ring)}${why ? `; the Studio's Clips view: ${JSON.stringify(why)}` : ''}`
+  )
 }
 
 async function importBanner(path) {
