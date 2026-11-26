@@ -33,6 +33,7 @@ use super::layout::{Tier, full_labels, wide_labels};
 
 type WindowAction = Rc<dyn Fn(&mut Window, &mut App)>;
 type BannerAction = Rc<dyn Fn(String, bool, &mut Window, &mut App)>;
+type SoundAction = Rc<dyn Fn(String, &mut Window, &mut App)>;
 
 const CLEAR: &str = "Clear";
 const CLEAR_VIEW: &str = "Clear view";
@@ -442,7 +443,7 @@ fn banners_menu(
 
 fn sounds_menu(
     sounds: Option<&Vec<SoundRow>>,
-    on_sound: Rc<dyn Fn(String, &mut Window, &mut App)>,
+    on_sound: SoundAction,
     stop_all: WindowAction,
 ) -> Menu {
     let mut menu = Menu::new();
