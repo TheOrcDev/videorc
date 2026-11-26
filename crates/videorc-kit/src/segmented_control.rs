@@ -407,8 +407,11 @@ impl RenderOnce for SegmentedControl {
             |mins: &[f32]| track_inner <= 0.0 || track_inner + 0.5 >= mins.iter().sum::<f32>();
         let widths: Option<Vec<f32>> = match &mins {
             Some(mins) if fit && fits_words(mins.as_slice()) => Some(mins.clone()),
+            // A pixel under the measured width: the bounds are snapped to
+            // whole pixels but the layout's room is not, and exact shares of
+            // a width rounded up wrapped the last segment (Go live's Privacy).
             Some(mins) if track_inner > 0.0 => Some(
-                segment_widths(mins, track_inner)
+                segment_widths(mins, (track_inner - 1.0).max(0.0))
                     .into_iter()
                     // A hair under, so float rounding never wraps a line early.
                     .map(|(_, width)| (width - 0.01).max(0.0))
@@ -529,6 +532,10 @@ impl RenderOnce for SegmentedControl {
             .gap_y(px(2.0))
             .min_h(px(height))
             .p(px(2.0))
+            // The default track fills its column (`w-full`): sized from its
+            // content, it measured the shares it had laid out and kept them
+            // (Destinations' Stream quality stayed word-wide).
+            .when(!fit, |track| track.w_full())
             .when_some(track_width, |track, width| {
                 track.flex_none().w(px(width)).max_w(gpui::relative(1.0))
             })
