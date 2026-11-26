@@ -400,14 +400,15 @@ async fn session(
                 }
                 // Before the first frame the ring has no size: ask again
                 // once the backend has published one.
-                if !ring_known && view.borrow().status.frames_published > 0 {
-                    if let Ok(answer) =
+                // Release the watch borrow before awaiting the socket reply.
+                let needs_ring = !ring_known && view.borrow().status.frames_published > 0;
+                if needs_ring
+                    && let Ok(answer) =
                         ring_socket.request(PLAYBACK_CPU_STATUS_METHOD, Value::Null).await
-                        && let Some(ring) = ring_of(answer)
-                    {
-                        source.set_ring(Some(ring));
-                        ring_known = true;
-                    }
+                    && let Some(ring) = ring_of(answer)
+                {
+                    source.set_ring(Some(ring));
+                    ring_known = true;
                 }
                 if !control.is_open() || !ring_socket.is_open() {
                     break Ok(Exit::Disconnected("a player socket closed".into()));

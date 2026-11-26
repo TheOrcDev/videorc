@@ -102,6 +102,19 @@ jobs:
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Plan 260 crates (clippy + test)
+        # Run before the large backend test build so platform lint failures
+        # surface promptly; all backend gates below still run on success.
+        # Plan 260 S1.0: every crate plan 260 adds (the workspace minus the
+        # backend, the addon and the WER helper, which have their own steps).
+        # A lane that fills one of them is linted and tested here with no
+        # workflow edit.
+        run: |
+          cargo clippy --workspace --exclude videorc-backend --exclude videorc-native-preview-addon --exclude videorc-wer-helper --all-targets -- -D warnings
+          cargo test --workspace --exclude videorc-backend --exclude videorc-native-preview-addon --exclude videorc-wer-helper
 
       - name: Clippy
         # clippy -D warnings is the compile gate (compile errors fail it
@@ -125,15 +138,6 @@ jobs:
           CARGO_BUILD_JOBS: '1'
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
         run: cargo test -p videorc-backend
-
-      - name: Plan 260 crates (clippy + test)
-        # Plan 260 S1.0: every crate plan 260 adds (the workspace minus the
-        # backend, the addon and the WER helper, which have their own steps).
-        # A lane that fills one of them is linted and tested here with no
-        # workflow edit.
-        run: |
-          cargo clippy --workspace --exclude videorc-backend --exclude videorc-native-preview-addon --exclude videorc-wer-helper --all-targets -- -D warnings
-          cargo test --workspace --exclude videorc-backend --exclude videorc-native-preview-addon --exclude videorc-wer-helper
 
   gates-skip:
     name: Linux gates (FFmpeg policy + Rust compile/test)

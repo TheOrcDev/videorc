@@ -13,7 +13,6 @@ serde_json = "1.0"
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }
 uuid = { version = "1.19", features = ["v4"] }
 videorc-app-core = { workspace = true }
-videorc-gpu-import = { workspace = true }
 videorc-preview-ring = { workspace = true }
 videorc-protocol = { workspace = true }
 # Only for `wgpu::TextureFormat`, which the import crate's API speaks.
@@ -35,6 +34,8 @@ wayland-protocols = { version = "0.32", features = ["client"] }
 x11rb = { version = "0.13", features = ["render", "shape", "shm"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# IOSurface texture imports are used only by the macOS presenter/feed.
+videorc-gpu-import = { workspace = true }
 block2 = "0.6"
 objc2 = { version = "0.6.4" }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSGraphics", "NSResponder", "NSScreen", "NSView", "NSWindow", "objc2-core-foundation", "objc2-quartz-core"] }
