@@ -20,6 +20,8 @@ use videorc_app_core::smoke::capture::{
     Bitmap, CAPTURE_COMMANDS, COMMENTS_CAPTURE_SIZE, PixelOrder, contain, mean_rects,
     parse_normalized_rects, stage_capture_rect,
 };
+#[cfg(target_os = "macos")]
+use videorc_app_core::smoke::capture::{SIPS, srgb_match_args};
 use videorc_app_core::smoke::security::{UiWindow, capture_page_file_name, ui_window};
 use videorc_app_core::smoke::{CommandFuture, SmokeCommandHandler};
 use videorc_preview::lifecycle::WindowMode;
@@ -169,8 +171,17 @@ impl CaptureCommands {
             .join(format!("videorc-preview-sample-{}.png", std::process::id()));
         // PNG, never BMP: a BMP carries no colour profile, so ImageIO
         // converts the display's values on the way (about +60 per channel on
-        // bca6ce49b), while a PNG keeps what the screen shows.
+        // bca6ce49b), while a PNG keeps what the screen shows, with the
+        // display's profile.
         capture(target.id, &file, Format::Png).await?;
+        // What the screen shows is in the display's colour space (sRGB cyan
+        // reads [117, 251, 253] on Display P3); the program, and Electron's
+        // `preview.debug.sample`, are sRGB. Match it back before reading.
+        let matched = match_to_srgb(&file).await;
+        if matched.is_err() {
+            let _ = std::fs::remove_file(&file);
+        }
+        matched?;
         let bytes = std::fs::read(&file);
         let _ = std::fs::remove_file(&file);
         let bytes = bytes.map_err(|error| format!("The capture is unreadable: {error}"))?;
@@ -404,6 +415,31 @@ async fn capture_once(id: u32, file: &Path, format: Format) -> Result<(), String
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
+    Ok(())
+}
+
+/// The PNG at `file` colour-matched to sRGB in place, through the profile
+/// the capture carries (`sips --matchTo`; the core's `srgb_match_args`).
+#[cfg(target_os = "macos")]
+async fn match_to_srgb(file: &Path) -> Result<(), String> {
+    let args = srgb_match_args(file);
+    let output =
+        tokio::task::spawn_blocking(move || std::process::Command::new(SIPS).args(args).output())
+            .await
+            .map_err(|error| format!("sips did not finish: {error}"))?
+            .map_err(|error| format!("sips did not start: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "The capture could not be matched to sRGB ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn match_to_srgb(_file: &Path) -> Result<(), String> {
     Ok(())
 }
 

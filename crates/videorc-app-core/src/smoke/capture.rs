@@ -38,6 +38,32 @@ pub const MAX_RECTS: usize = 64;
 /// `comments-window-capture-page`'s default size.
 pub const COMMENTS_CAPTURE_SIZE: (f64, f64) = (420.0, 640.0);
 
+/// macOS's own sRGB profile: the colour space the program's pixels are in.
+pub const SRGB_PROFILE: &str = "/System/Library/ColorSync/Profiles/sRGB Profile.icc";
+
+/// The tool that colour-matches a capture (`sips`, on every Mac).
+pub const SIPS: &str = "/usr/bin/sips";
+
+/// `sips`'s arguments that colour-match the PNG at `file` to sRGB in place.
+///
+/// `screencapture -l` writes the window as the display shows it: its pixels
+/// in the display's colour space (Display P3 on a Mac's own screen), tagged
+/// with that profile. The Preview's layer is colour-matched from sRGB to the
+/// display, so a sampled sRGB cyan banner reads `[117, 251, 253]` and yellow
+/// `[254, 254, 84]` (plan 260 L1). Electron's macOS oracle
+/// (`preview.debug.sample`) reads the program's own sRGB pixels, so a
+/// sample is matched back to sRGB first, through the profile the capture
+/// carries. A PNG with no profile is left as it is.
+pub fn srgb_match_args(file: &std::path::Path) -> Vec<std::ffi::OsString> {
+    vec![
+        "--matchTo".into(),
+        SRGB_PROFILE.into(),
+        file.as_os_str().to_owned(),
+        "--out".into(),
+        file.as_os_str().to_owned(),
+    ]
+}
+
 /// A rectangle in canvas fractions (0..1).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NormalizedRect {
@@ -465,6 +491,32 @@ mod tests {
             contain((10.0, 0.0, 160.0, 180.0), (200, 100)),
             (10.0, 50.0, 160.0, 80.0)
         );
+    }
+
+    #[test]
+    fn a_capture_is_matched_to_srgb_in_place() {
+        let file = std::path::Path::new("/tmp/videorc preview sample.png");
+        assert_eq!(
+            srgb_match_args(file),
+            vec![
+                std::ffi::OsString::from("--matchTo"),
+                SRGB_PROFILE.into(),
+                file.as_os_str().to_owned(),
+                "--out".into(),
+                file.as_os_str().to_owned(),
+            ]
+        );
+    }
+
+    /// The profile and the tool are the system's own, on every Mac.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_srgb_profile_and_sips_exist_on_macos() {
+        assert!(
+            std::path::Path::new(SRGB_PROFILE).is_file(),
+            "{SRGB_PROFILE}"
+        );
+        assert!(std::path::Path::new(SIPS).is_file(), "{SIPS}");
     }
 
     #[test]
