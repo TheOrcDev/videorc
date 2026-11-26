@@ -131,6 +131,8 @@ pub const ELECTRON_SMOKE_COMMAND_NAMES: &[&str] = &[
     "open-backdrop-window",
     "open-layout-tab",
     "open-tab",
+    // Gallery: scroll Studio to the Vertical stream panel.
+    "studio-reveal-vertical-stream",
     "preview-lifecycle-allow-app-quit",
     "preview-lifecycle-attempt-app-quit",
     "preview-surface-sample",
@@ -250,6 +252,8 @@ pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     // Plan 260 C4: gallery Show stage / Vertical stream seeds (no LiveKit).
     "gallery-seed-show-stage",
     "gallery-seed-vertical-stream",
+    // Scroll the Studio's Vertical stream panel into view for the gallery.
+    "studio-reveal-vertical-stream",
     "studio-put-setting",
     "studio-record",
     // L6: "Check this computer" as the Output page starts it
@@ -353,6 +357,7 @@ pub const PACKAGED_SMOKE_COMMAND_NAMES: &[&str] = &[
     "notes-window-save-document",
     "notes-window-set-bounds",
     "open-tab",
+    "studio-reveal-vertical-stream",
     "preview-window-state",
     "preview-window-open",
     "resize-window",

@@ -75,6 +75,9 @@ pub enum StudioSection {
     /// Open Audio (P172 / P180): the Microphone row centred
     /// (`use-section-focus.ts:61`, `block: 'center'`).
     Audio,
+    /// Gallery Vertical stream shot: the bottom-row panel at the foot of
+    /// the preview column (`vertical-leg-monitor.tsx`).
+    VerticalStream,
 }
 
 /// The scroll offset (GPUI's: zero at the top, more negative further down)
@@ -92,7 +95,7 @@ pub fn reveal_offset(
     let (view_top, view_bottom) = view;
     let (top, bottom) = target;
     let shift = match section {
-        StudioSection::Scenes => view_top - top,
+        StudioSection::Scenes | StudioSection::VerticalStream => view_top - top,
         StudioSection::Audio if bottom - top > view_bottom - view_top => view_top - top,
         StudioSection::Audio => (view_top + view_bottom) / 2. - (top + bottom) / 2.,
     };

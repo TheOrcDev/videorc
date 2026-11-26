@@ -76,6 +76,8 @@ pub trait ShellSmoke: 'static {
     /// `open-tab`: the main window shows `page`, as its sidebar row would,
     /// on `open`'s sub-tab with its dialog over it.
     fn open_page(&self, page: PageId, open: OpenTab, cx: &mut App) -> Result<(), String>;
+    /// Gallery: Studio with the Vertical stream panel scrolled into view.
+    fn reveal_studio_vertical_stream(&self, cx: &mut App) -> Result<(), String>;
     /// The preview's commands ([`PREVIEW_COMMANDS`]): its state, its own
     /// window opened, closed or toggled, and Retry preview.
     fn preview(&self, command: &str, cx: &mut App) -> Result<Value, String>;
@@ -175,7 +177,10 @@ pub struct ShellCommands {
 
 impl SmokeCommandHandler for ShellCommands {
     fn handles(&self, command: &str) -> bool {
-        command == "open-tab" || command == "main-window-id" || PREVIEW_COMMANDS.contains(&command)
+        command == "open-tab"
+            || command == "main-window-id"
+            || command == "studio-reveal-vertical-stream"
+            || PREVIEW_COMMANDS.contains(&command)
     }
 
     fn run<'a>(
@@ -199,6 +204,15 @@ impl SmokeCommandHandler for ShellCommands {
             }
             if command == "main-window-id" {
                 return self.ui.run(main_window_id).await?;
+            }
+            if command == "studio-reveal-vertical-stream" {
+                return self
+                    .ui
+                    .run(move |cx| {
+                        shell(cx)?.reveal_studio_vertical_stream(cx)?;
+                        Ok(serde_json::json!({ "revealed": "vertical-stream" }))
+                    })
+                    .await?;
             }
             let tab = params
                 .get("tab")

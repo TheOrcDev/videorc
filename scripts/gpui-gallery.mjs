@@ -540,6 +540,11 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
               )
             }
             await sleep(screen.open.dialog ? SETTLE_MS + 800 : SETTLE_MS)
+            // A door that scrolls a Studio section into view (Vertical stream).
+            if (screen.afterSeed) {
+              await command(screen.afterSeed.command, screen.afterSeed.params ?? {})
+              await sleep(SETTLE_MS)
+            }
             // Below the fold: a wheel at the window's centre (the page's
             // own scroller), `dy` CSS pixels down, as Electron's shooter
             // sets the page-tabs scroller's `scrollTop`.

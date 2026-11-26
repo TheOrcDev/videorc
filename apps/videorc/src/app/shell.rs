@@ -690,6 +690,18 @@ impl Shell {
             .update(cx, |studio, cx| studio.reveal_audio(window, cx));
     }
 
+    /// Gallery Vertical stream: Studio with the bottom-row Vertical stream
+    /// panel scrolled into view (after `gallery-seed-vertical-stream`).
+    pub fn reveal_studio_vertical_stream(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_page(PageId::Studio, window, cx);
+        self.studio.update(cx, |studio, cx| {
+            studio.reveal_section(
+                crate::screens::studio::layout::StudioSection::VerticalStream,
+                cx,
+            )
+        });
+    }
+
     pub fn open_page(&mut self, page: PageId, window: &mut Window, cx: &mut Context<Self>) {
         // P017: a fired page shortcut closes the reminder layer.
         if self.command_held {

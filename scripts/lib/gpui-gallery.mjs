@@ -245,6 +245,9 @@ export const SCREENS = Object.freeze([
     deck: 'shell-studio',
     open: page('studio'),
     seed: { command: 'gallery-seed-show-stage', params: { kind: 'open' } },
+    // Layout / Screens / People sit under the Program well; scroll so the
+    // kinds differ on screen (open vs screens vs host-camera-off).
+    scroll: { dy: 420 },
     // Clear the seed after the looks so later Studio shots stay Preview.
     after: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
     baseline: null,
@@ -256,6 +259,7 @@ export const SCREENS = Object.freeze([
     deck: 'shell-studio',
     open: page('studio'),
     seed: { command: 'gallery-seed-show-stage', params: { kind: 'screens' } },
+    scroll: { dy: 420 },
     after: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
     baseline: null,
     sections: ['Show stage']
@@ -266,6 +270,7 @@ export const SCREENS = Object.freeze([
     deck: 'shell-studio',
     open: page('studio'),
     seed: { command: 'gallery-seed-show-stage', params: { kind: 'host-camera-off' } },
+    scroll: { dy: 420 },
     after: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
     baseline: null,
     sections: ['Show stage', 'Talk-show room host']
@@ -276,9 +281,10 @@ export const SCREENS = Object.freeze([
     deck: 'shell-studio',
     open: page('studio'),
     seed: { command: 'gallery-seed-vertical-stream', params: { on: true } },
+    // After the seed, scroll the Vertical stream panel into view (Studio's
+    // reveal door), as Electron scrolls the Studio scroller to its foot.
+    afterSeed: { command: 'studio-reveal-vertical-stream' },
     after: { command: 'gallery-seed-vertical-stream', params: { on: false } },
-    // The Studio scrolled to its foot, as the Electron baseline's vertical-leg.
-    scroll: { dy: 900 },
     baseline: { screen: 'studio', state: 'vertical-leg' },
     sections: ['Vertical stream', 'Studio dashboard bottom row']
   },

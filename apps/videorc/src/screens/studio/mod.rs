@@ -1179,7 +1179,13 @@ impl Render for StudioPage {
                     .child(self.reveal_probe(StudioSection::Scenes)),
             )
             .child(self.soundboard.clone())
-            .child(self.vertical_stream.clone());
+            .child(
+                div()
+                    .id("studio-vertical-stream-reveal")
+                    .relative()
+                    .child(self.vertical_stream.clone())
+                    .child(self.reveal_probe(StudioSection::VerticalStream)),
+            );
         let preview_column = div()
             .id("studio-preview-and-scenes")
             .flex()

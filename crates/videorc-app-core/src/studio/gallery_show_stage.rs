@@ -65,8 +65,9 @@ pub fn gallery_cloud_status(kind: GalleryShowStage) -> CloudStatus {
     };
     status.room = Some(match kind {
         GalleryShowStage::Closed => room_closed(),
-        GalleryShowStage::Open | GalleryShowStage::HostCameraOff => room_open(),
+        GalleryShowStage::Open => room_open(),
         GalleryShowStage::Screens => room_screens(),
+        GalleryShowStage::HostCameraOff => room_host_camera_off(),
     });
     status
 }
@@ -163,6 +164,27 @@ fn room_open() -> Value {
         "stageSet": true,
         "live": false,
     })
+}
+
+fn room_host_camera_off() -> Value {
+    let mut room = room_open();
+    let Some(obj) = room.as_object_mut() else {
+        return room;
+    };
+    if let Some(participants) = obj.get_mut("participants").and_then(|v| v.as_array_mut()) {
+        for person in participants {
+            let identity = person
+                .get("identity")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            if identity.as_deref() == Some(HOST)
+                && let Some(entry) = person.as_object_mut()
+            {
+                entry.insert("video".into(), json!(false));
+            }
+        }
+    }
+    room
 }
 
 fn room_screens() -> Value {
@@ -312,6 +334,13 @@ mod tests {
                 .people
                 .iter()
                 .any(|p| p.identity == "g_grace" && p.camera_off)
+        );
+        let status = gallery_cloud_status(GalleryShowStage::HostCameraOff);
+        let room = RoomStatus::from_value(status.room.as_ref().unwrap()).unwrap();
+        assert!(
+            room.participants
+                .iter()
+                .any(|p| p.identity == HOST && !p.video)
         );
     }
 }
