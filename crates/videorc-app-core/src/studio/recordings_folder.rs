@@ -342,9 +342,10 @@ mod tests {
 
     #[test]
     fn the_store_holds_an_absolute_path_or_nothing() {
-        let stored = json!({"path": "/Volumes/Media/Takes", "displayName": "Takes"}).to_string();
+        let path = std::env::temp_dir().join("Takes");
+        let stored = json!({"path": path, "displayName": "Takes"}).to_string();
         let folder = StoredFolder::from_stored(Some(&stored)).unwrap();
-        assert_eq!(folder.path, PathBuf::from("/Volumes/Media/Takes"));
+        assert_eq!(folder.path, path);
         assert_eq!(
             StoredFolder::from_stored(Some(r#"{"path":"Takes"}"#)),
             None,
@@ -352,11 +353,21 @@ mod tests {
         );
         assert_eq!(StoredFolder::from_stored(Some("Takes")), None);
         assert_eq!(StoredFolder::from_stored(None), None);
+        assert_eq!(StoredFolder::picked(path.clone()).display_name, "Takes");
+        let root = path.ancestors().last().unwrap();
         assert_eq!(
-            StoredFolder::picked(PathBuf::from("/Users/me/Movies/Takes")).display_name,
-            "Takes"
+            StoredFolder::picked(root.to_path_buf()).display_name,
+            root.to_string_lossy()
         );
-        assert_eq!(StoredFolder::picked(PathBuf::from("/")).display_name, "/");
+        #[cfg(target_os = "windows")]
+        for relative in [r"\Takes", r"C:Takes"] {
+            let stored = json!({"path": relative}).to_string();
+            assert_eq!(
+                StoredFolder::from_stored(Some(&stored)),
+                None,
+                "a rooted or drive-relative path is not absolute: {relative}"
+            );
+        }
     }
 
     #[test]
@@ -444,29 +455,25 @@ mod tests {
 
     #[test]
     fn the_snapshot_keeps_facts_only_for_the_folder_still_chosen() {
+        let base = std::env::temp_dir();
+        let path = base.join("Takes");
         let mut settings = UiSettingsCache::new();
         settings.put_local(
             keys::RECORDINGS_FOLDER,
-            serde_json::Value::String(
-                json!({"path": "/Volumes/Media/Takes", "displayName": "Takes"}).to_string(),
-            ),
+            serde_json::Value::String(json!({"path": path, "displayName": "Takes"}).to_string()),
         );
         let facts = DirectoryFacts {
             exists: true,
             writable: true,
             free_bytes: Some(1024),
         };
-        let same = RecordingsFolderState::of(
-            &settings,
-            Some(&(PathBuf::from("/Volumes/Media/Takes"), facts)),
-        );
+        let same = RecordingsFolderState::of(&settings, Some(&(path, facts)));
         assert_eq!(same.facts, Some(facts));
         assert_eq!(same.view().path, "Takes");
-        let other =
-            RecordingsFolderState::of(&settings, Some(&(PathBuf::from("/Volumes/Old"), facts)));
+        let other = RecordingsFolderState::of(&settings, Some(&(base.join("Old"), facts)));
         assert_eq!(other.facts, None, "another folder's facts are stale");
         let none =
-            RecordingsFolderState::of(&UiSettingsCache::new(), Some(&(PathBuf::from("/x"), facts)));
+            RecordingsFolderState::of(&UiSettingsCache::new(), Some(&(base.join("x"), facts)));
         assert_eq!(none, RecordingsFolderState::default());
         assert!(!none.view().custom);
     }

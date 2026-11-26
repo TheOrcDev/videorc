@@ -747,7 +747,12 @@ async fn a_delete_moves_each_operations_files_and_keeps_what_would_not_move() {
     assert_eq!(
         library.delete(&["s1".to_string()]).await,
         Err(DeleteError::FilesKept(
-            "1 file couldn't be moved to the Trash, so its recording was kept.".into()
+            if cfg!(target_os = "windows") {
+                "1 file couldn't be moved to the Recycle Bin, so its recording was kept."
+            } else {
+                "1 file couldn't be moved to the Trash, so its recording was kept."
+            }
+            .into()
         ))
     );
     fake.refuse(
@@ -1057,9 +1062,17 @@ fn the_page_view_reads_rows_menus_and_the_questions() {
     assert_eq!(page.selected_count, 1);
     assert_eq!(page.select_all, SelectAllState::Some);
     let delete = page.delete.unwrap();
-    assert_eq!(delete.title, "Move 2 recordings to the Trash?");
+    let (title, confirm_label) = if cfg!(target_os = "windows") {
+        (
+            "Move 2 recordings to the Recycle Bin?",
+            "Move to Recycle Bin",
+        )
+    } else {
+        ("Move 2 recordings to the Trash?", "Move to Trash")
+    };
+    assert_eq!(delete.title, title);
     assert_eq!(delete.names, ["Alpha", "Beta"]);
-    assert_eq!(delete.confirm_label, "Move to Trash");
+    assert_eq!(delete.confirm_label, confirm_label);
 }
 
 #[test]
