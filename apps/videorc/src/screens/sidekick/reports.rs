@@ -29,8 +29,8 @@ use videorc_kit::tooltip::tooltip;
 use videorc_protocol::streaming::StreamPlatform;
 use videorc_protocol::{ClipMomentSource, CohostReportPayload};
 
-use super::SidekickScreen;
 use super::live::{LiveView, UnlockAction};
+use super::{SidekickScreen, Tab};
 use crate::screens::session_player;
 
 /// A platform mark in a row or the stream line (`ChatPlatformIcon`'s
@@ -186,6 +186,14 @@ impl SidekickScreen {
             });
         })
         .detach();
+    }
+
+    /// Library's ⋯ → Sidekick report (`onOpenBuddyReport`): Reports, on
+    /// this stream's report.
+    pub(crate) fn open_report(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        self.reports.get_or_insert_with(Default::default);
+        self.select_tab(Tab::Reports.index(), cx);
+        self.choose_report_session(session_id, cx);
     }
 
     /// The picker's choice (`reportSessionChoice`): the newest stream

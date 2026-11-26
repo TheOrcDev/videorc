@@ -56,6 +56,9 @@ pub struct LibraryScreen {
     markers: Option<cloud_markers::MarkersState>,
 }
 impl gpui::EventEmitter<Navigate> for LibraryScreen {}
+/// A row's ⋯ → Sidekick report: Sidekick → Reports on that stream.
+pub struct OpenSidekickReport(pub String);
+impl gpui::EventEmitter<OpenSidekickReport> for LibraryScreen {}
 impl Focusable for LibraryScreen {
     fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
         self.focus.clone()

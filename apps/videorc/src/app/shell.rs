@@ -382,6 +382,16 @@ impl Shell {
             },
         )
         .detach();
+        cx.subscribe_in(
+            &library,
+            window,
+            |this, _, open: &crate::screens::library::OpenSidekickReport, window, cx| {
+                this.sidekick
+                    .update(cx, |sidekick, cx| sidekick.open_report(&open.0, cx));
+                this.open_page(PageId::Ai, window, cx);
+            },
+        )
+        .detach();
         cx.observe(&backend, |_, _, cx| cx.notify()).detach();
         cx.observe(&connection, |_, _, cx| cx.notify()).detach();
         // The preview notifies only when its slot's words or its window
