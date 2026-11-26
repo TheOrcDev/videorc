@@ -184,9 +184,9 @@ impl RenderOnce for TrackedText {
     }
 }
 
-/// The truncating line, cut in the frame it's laid out in: its box is the
-/// whole tracked width (so it shrinks in a flex row, `min-w-0`, and grows
-/// back), and a canvas paints the glyphs that fit its final width, then the
+/// The truncating line, cut in the frame it's laid out in: a spacer the
+/// whole tracked width sizes its box (it shrinks in a flex row, `min-w-0`,
+/// stretches in a block parent, and grows back), and a canvas over it paints the glyphs that fit its final width, then the
 /// tracked `…`. The glyphs are shaped here, in the face, size and ink the line
 /// inherits (a component renders inside its parent's text style).
 fn truncated(
@@ -215,11 +215,15 @@ fn truncated(
     let ellipsis_width = f32::from(ellipsis.ink.width());
     div()
         .id(id)
-        .w(px(natural))
-        .h(line_height)
+        .relative()
         .min_w(px(0.0))
         .overflow_hidden()
         .aria_label(text)
+        // The whole line's width sizes the box from inside, as CSS text
+        // does: a flex row shrinks it (`min-w-0`), a block parent stretches
+        // it to its own width. A fixed width wouldn't shrink in a block
+        // parent, so the cut never came (L7: '3 DESTINATIO' with no '…').
+        .child(div().w(px(natural)).h(line_height))
         .child(
             canvas(
                 |_, _, _| (),
@@ -257,6 +261,9 @@ fn truncated(
                     }
                 },
             )
+            .absolute()
+            .top(px(0.0))
+            .left(px(0.0))
             .size_full(),
         )
         .into_any_element()
