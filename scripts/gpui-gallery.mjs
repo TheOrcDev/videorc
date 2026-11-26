@@ -190,6 +190,21 @@ function mainWindowId(pid, scriptFile) {
   return main.id
 }
 
+/** The pid's on-screen window nearest `width` x `height`, not `exclude`. */
+function windowIdNear(pid, scriptFile, { width, height }, exclude) {
+  const windows = JSON.parse(
+    execFileSync('osascript', ['-l', 'JavaScript', scriptFile, String(pid)], { encoding: 'utf8' })
+  ).filter((window) => window.id !== exclude)
+  const near = windows.sort(
+    (a, b) =>
+      Math.abs(a.width - width) +
+      Math.abs(a.height - height) -
+      (Math.abs(b.width - width) + Math.abs(b.height - height))
+  )[0]
+  if (!near) throw new Error(`The app (pid ${pid}) has no other window on screen.`)
+  return near.id
+}
+
 function toJpeg(png, jpg) {
   execFileSync(
     'sips',
@@ -512,10 +527,18 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
           let otherWindowId = null
           if (screen.window) otherWindowId = await openOtherWindow(command, screen.window)
           const png = join(gpuiDir, `${name}.png`)
-          const windowId = String(
+          let windowId = String(
             otherWindowId ?? raisedWindowId ?? mainWindowId(app.process.pid, jxa)
           )
-          execFileSync('screencapture', ['-x', '-o', '-l', windowId, png])
+          try {
+            execFileSync('screencapture', ['-x', '-o', '-l', windowId, png])
+          } catch (error) {
+            // An id the window server doesn't take (the Notes window's):
+            // the app's on-screen window nearest the asked size instead.
+            if (!screen.window) throw error
+            windowId = String(windowIdNear(app.process.pid, jxa, screen.window, raisedWindowId))
+            execFileSync('screencapture', ['-x', '-o', '-l', windowId, png])
+          }
           await sleep(WAKE_MS)
           execFileSync('screencapture', ['-x', '-o', '-l', windowId, png])
           const bytes = readFileSync(png)

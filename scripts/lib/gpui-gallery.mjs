@@ -399,7 +399,7 @@ export const SCREENS = Object.freeze([
     title: 'Scene ⌘3, Add scene…',
     deck: 'shell-studio',
     open: page('layout'),
-    clicks: [{ names: ['Add scene…'], role: 'button' }],
+    clicks: [{ names: ['Add scene…', 'Add scene'] }],
     close: 'Escape',
     baseline: { screen: 'scene', state: 'new-scene' },
     sections: ['Scene ⌘3: Add scene / Change screen picker']
