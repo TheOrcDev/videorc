@@ -17,7 +17,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Axis, ColorSpace, ElementId, FontWeight, IntoElement, SharedString, Window,
-    linear_color_stop, linear_gradient, prelude::*, px,
+    div, linear_color_stop, linear_gradient, prelude::*, px,
 };
 use smallvec::SmallVec;
 
@@ -446,6 +446,8 @@ pub struct Toggle {
     disabled: bool,
     tooltip: Option<SharedString>,
     ground: Option<Color>,
+    ink: Option<Color>,
+    dot: bool,
     on_change: Option<PressHandler>,
     appearance: Option<Appearance>,
 }
@@ -462,6 +464,8 @@ impl Toggle {
             disabled: false,
             tooltip: None,
             ground: None,
+            ink: None,
+            dot: false,
             on_change: None,
             appearance: None,
         }
@@ -485,6 +489,21 @@ impl Toggle {
 
     pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
         self.tooltip = Some(text.into());
+        self
+    }
+
+    /// The glyph's ink instead of muted / foreground, in every state (the
+    /// Show stage's talking mic: `tone-success text-(--chip-tone)`).
+    pub fn ink(mut self, ink: Color) -> Self {
+        self.ink = Some(ink);
+        self
+    }
+
+    /// A success glass dot in the top-right corner (the Show stage's screen
+    /// share while sharing: `tone-success glass-dot absolute top-0.5
+    /// right-0.5 size-1.5`).
+    pub fn dot(mut self, dot: bool) -> Self {
+        self.dot = dot;
         self
     }
 
@@ -519,14 +538,15 @@ impl RenderOnce for Toggle {
                 color
             }
         };
-        let ink = fade(if pressed {
+        let ink = fade(self.ink.unwrap_or(if pressed {
             t.foreground
         } else {
             t.muted_foreground
-        });
+        }));
         let hoverable = !pressed && !disabled;
+        let lights_on_hover = hoverable && self.ink.is_none();
         let foreground = hsla(t.foreground);
-        let glyph = icon(self.icon, self.icon_size, hsla(ink)).when(hoverable, |glyph| {
+        let glyph = icon(self.icon, self.icon_size, hsla(ink)).when(lights_on_hover, |glyph| {
             glyph.group_hover(TOGGLE_GROUP, move |style| style.text_color(foreground))
         });
         let mut toggle = gpui_base::Toggle::new(self.id)
@@ -543,7 +563,17 @@ impl RenderOnce for Toggle {
             .rounded(px(radius::CHIP))
             .border_1()
             .border_color(gpui::transparent_black())
-            .child(glyph);
+            .relative()
+            .child(glyph)
+            .when(self.dot, |toggle| {
+                toggle.child(
+                    div()
+                        .absolute()
+                        .top(px(2.0))
+                        .right(px(2.0))
+                        .child(crate::badge::dot(fade(t.success), t.chip_dot_glow)),
+                )
+            });
         if pressed {
             let mut plate = plate_shadows(t);
             if disabled {
