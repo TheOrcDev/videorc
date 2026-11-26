@@ -184,6 +184,8 @@ pub(super) fn test_dialog(
 
     let pick = entity.clone();
     let mut states = SegmentedControl::new("avatar-test-state")
+        // Electron fills it (`w-full`, or a vertical Field's `*:w-full`).
+        .full(true)
         .small(true)
         .accessibility_label("State")
         .value(Some(STATES[test_view::state_index(state)].2))

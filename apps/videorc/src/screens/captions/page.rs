@@ -566,6 +566,8 @@ impl CaptionsPanel {
         // The one choice beside the one switch: the live stream always,
         // the recording too if picked.
         let mut outputs = SegmentedControl::new("captions-outputs")
+            // Electron fills it (`w-full`, or a vertical Field's `*:w-full`).
+            .full(true)
             .accessibility_label(c::OUTPUTS_LABEL)
             .disabled(locked || view.outputs_locked)
             .value(Some(view.outputs.clone()));
@@ -675,6 +677,8 @@ impl CaptionsPanel {
 
         let sizes = c::TEXT_SIZES.iter().fold(
             SegmentedControl::new("caption-text-size")
+                // Electron fills it (`w-full`, or a vertical Field's `*:w-full`).
+                .full(true)
                 .accessibility_label(c::TEXT_SIZE_LABEL)
                 .disabled(locked)
                 .value(Some(view.text_size.clone())),
