@@ -48,6 +48,7 @@ import {
   shotPath
 } from './rust-ui-baseline-manifest.mjs'
 import { UI_SWEEP_SIZES } from './ui-layout-check.mjs'
+import { galleryCloudStatus, galleryHostCameraOff } from './gallery-show-stage-fixtures.mjs'
 import { startFakeApiRouter } from './fake-api-router.mjs'
 import {
   AI_CAPABILITIES_PATH,
@@ -661,6 +662,22 @@ async function shootIdleStates({ ctx, tryStep, only, missing }) {
     await ctx.shoot('studio', 'vertical-leg')
     await setVerticalLeg(ctx, false)
   })
+  // Plan 260 C4: Show stage gallery baselines (synthetic room; no LiveKit).
+  for (const [state, kind] of [
+    ['closed', 'closed'],
+    ['open', 'open'],
+    ['screens', 'screens'],
+    ['host-camera-off', 'host-camera-off']
+  ]) {
+    await tryStep('show-stage', state, async () => {
+      await ctx.dismiss()
+      await seedShowStage(ctx, kind)
+      await ctx.open('studio')
+      await sleep(800)
+      await ctx.shoot('show-stage', state)
+      await seedShowStage(ctx, null)
+    })
+  }
   await tryStep('assets', 'kebab-menu', async () => {
     await ctx.open('assets')
     await ctx.click('^Actions for ', {
@@ -852,6 +869,23 @@ async function stopSink(sink) {
       })
     })
   }
+}
+
+/** Plan 260 C4: synthetic talk-show CloudStatus for Show stage baselines. */
+async function seedShowStage(ctx, kind) {
+  if (kind == null) {
+    await ctx.js(
+      `if (!window.__videorcSmokeSeedShowStage) throw new Error('gallery Show stage seed missing');
+       return window.__videorcSmokeSeedShowStage(null)`
+    )
+    return
+  }
+  const status = galleryCloudStatus(kind)
+  const cameraOff = galleryHostCameraOff(kind)
+  await ctx.js(
+    `if (!window.__videorcSmokeSeedShowStage) throw new Error('gallery Show stage seed missing');
+     return window.__videorcSmokeSeedShowStage(${JSON.stringify(status)}, ${JSON.stringify({ cameraOff })})`
+  )
 }
 
 /** S3.1b: YouTube Vertical on (and the saved mode streaming) arms the

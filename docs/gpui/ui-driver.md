@@ -130,6 +130,12 @@ binaries (`~/cloud-test/gpui-builds/latest/`) on a profile seeded like the basel
 `screencapture -l` (gap 3), and writes a manifest (each shot, its baseline pair, the parity rows it covers) and the
 Live pages the owner answers per screen. Rows are ticked only from those answers.
 
+Show stage / Vertical stream / talk-show host screens (plan 260 C4) also call harness-only Studio smoke
+commands before the shot: `gallery-seed-show-stage {kind}` (`closed` | `open` | `screens` |
+`host-camera-off`) commits a synthetic `CloudStatus` and optional room media with no LiveKit, X or
+YouTube; `gallery-seed-vertical-stream {on}` arms YouTube Vertical so the Studio slot shows. Electron's
+baseline shooter uses the same fixtures through `__videorcSmokeSeedShowStage` (DEV only).
+
 ## Recording smokes on the GPUI app
 
 Run with `VIDEORC_APP=gpui`:

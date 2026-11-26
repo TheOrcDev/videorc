@@ -225,6 +225,63 @@ export const SCREENS = Object.freeze([
     baseline: null,
     sections: ['Guests']
   },
+  // Plan 260 C4: Show stage / Vertical stream / talk-show host. Seeds are
+  // harness-only (`gallery-seed-show-stage` / `gallery-seed-vertical-stream`);
+  // no LiveKit, X or YouTube.
+  {
+    id: 'show-stage-closed',
+    title: 'Show stage, room closed (Preview stays)',
+    deck: 'shell-studio',
+    open: page('studio'),
+    seed: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
+    // Electron PNGs land with the next `--screens=show-stage` baseline run
+    // (`rust-ui-baseline.mjs` already shoots closed/open/screens/host-camera-off).
+    baseline: null,
+    sections: ['Preview stage', 'Show stage']
+  },
+  {
+    id: 'show-stage-open',
+    title: 'Show stage, room open (guests + layout cards, one disabled)',
+    deck: 'shell-studio',
+    open: page('studio'),
+    seed: { command: 'gallery-seed-show-stage', params: { kind: 'open' } },
+    // Clear the seed after the looks so later Studio shots stay Preview.
+    after: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
+    baseline: null,
+    sections: ['Show stage']
+  },
+  {
+    id: 'show-stage-screens',
+    title: 'Show stage, Screens cards',
+    deck: 'shell-studio',
+    open: page('studio'),
+    seed: { command: 'gallery-seed-show-stage', params: { kind: 'screens' } },
+    after: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
+    baseline: null,
+    sections: ['Show stage']
+  },
+  {
+    id: 'talk-show-host-camera-off',
+    title: 'Talk-show host, camera off',
+    deck: 'shell-studio',
+    open: page('studio'),
+    seed: { command: 'gallery-seed-show-stage', params: { kind: 'host-camera-off' } },
+    after: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
+    baseline: null,
+    sections: ['Show stage', 'Talk-show room host']
+  },
+  {
+    id: 'vertical-stream',
+    title: 'Studio ⌘1, Vertical stream slot',
+    deck: 'shell-studio',
+    open: page('studio'),
+    seed: { command: 'gallery-seed-vertical-stream', params: { on: true } },
+    after: { command: 'gallery-seed-vertical-stream', params: { on: false } },
+    // The Studio scrolled to its foot, as the Electron baseline's vertical-leg.
+    scroll: { dy: 900 },
+    baseline: { screen: 'studio', state: 'vertical-leg' },
+    sections: ['Vertical stream', 'Studio dashboard bottom row']
+  },
   {
     id: 'avatar-profile',
     title: 'Avatar ⌘8, Profile',

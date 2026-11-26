@@ -4984,6 +4984,11 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     }
     const smokeWindow = window as Window & {
       __videorcSmokeSetTalkShowRoomOpen?: (open: boolean) => boolean
+      /** Plan 260 C4 gallery / Electron baseline: synthetic CloudStatus (no LiveKit). */
+      __videorcSmokeSeedShowStage?: (
+        status: CloudStatus | null,
+        opts?: { cameraOff?: boolean }
+      ) => boolean
       __videorcSmokeSelectFirstCamera?: () => string | null
       __videorcSmokeSelectFirstScreen?: (
         sourceId?: string
@@ -5018,6 +5023,27 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
     smokeWindow.__videorcSmokeSetTalkShowRoomOpen = (open: boolean): boolean => {
       setSmokeTalkShowRoomOpen(open)
       return open
+    }
+    smokeWindow.__videorcSmokeSeedShowStage = (status, opts): boolean => {
+      if (!status) {
+        setCloudStatus(null)
+        setSmokeTalkShowRoomOpen(false)
+        setCaptureConfig((current) => ({
+          ...current,
+          sources: { ...current.sources, cameraOff: false }
+        }))
+        return true
+      }
+      setCloudStatus(status)
+      setSmokeTalkShowRoomOpen(status.room?.phase === 'open')
+      if (opts?.cameraOff !== undefined) {
+        const off = opts.cameraOff
+        setCaptureConfig((current) => ({
+          ...current,
+          sources: { ...current.sources, cameraOff: off }
+        }))
+      }
+      return true
     }
     smokeWindow.__videorcSmokeSelectFirstCamera = (): string | null => {
       const camera = deviceList.devices.find(
@@ -5060,6 +5086,8 @@ function StudioProviderReady({ children }: { children: ReactNode }): ReactElemen
       return { id: source.id, kind: source.kind }
     }
     return () => {
+      delete smokeWindow.__videorcSmokeSetTalkShowRoomOpen
+      delete smokeWindow.__videorcSmokeSeedShowStage
       delete smokeWindow.__videorcSmokeSelectFirstCamera
       delete smokeWindow.__videorcSmokeSelectFirstScreen
     }

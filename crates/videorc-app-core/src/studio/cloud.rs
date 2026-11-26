@@ -69,6 +69,11 @@ pub struct CloudState {
     /// room by itself after a backend restart. The Resume notice reads
     /// "Reconnecting to your show…" and its Resume waits.
     pub talk_rejoining: bool,
+    /// Gallery/smoke only (`gallery-seed-show-stage`): synthetic room media
+    /// so Show stage tiles and the host camera-off avatar paint without a
+    /// LiveKit room. Cleared when the seed is `closed`. Never set from a
+    /// real `cloud.room.presentation`.
+    pub gallery_room_media: Option<crate::studio::room_media::RoomMedia>,
     /// `heldRoomRef`: the show whose room this app has open, and the
     /// connection (the bootstrap generation) that held it.
     held_room: Option<(String, u64)>,
@@ -614,6 +619,22 @@ impl<B: StudioBackend> Studio<B> {
     pub async fn close_talk_room(&self) {
         self.cloud_action("cloud.room.close", Value::Null, "close", "the room")
             .await;
+    }
+
+    /// Gallery/smoke only: commit a synthetic talk-show `CloudStatus` and
+    /// optional room media (plan 260 C4). No LiveKit, X or YouTube.
+    pub async fn seed_gallery_show_stage(
+        &self,
+        kind: crate::studio::gallery_show_stage::GalleryShowStage,
+    ) {
+        let status = crate::studio::gallery_show_stage::gallery_cloud_status(kind);
+        let media = crate::studio::gallery_show_stage::gallery_room_media(kind);
+        self.commit_cloud(status).await;
+        self.edit_cloud(|state| {
+            let changed = state.gallery_room_media != media;
+            state.gallery_room_media = media;
+            changed
+        });
     }
 
     /// `cloud.room.invite.rotate`.

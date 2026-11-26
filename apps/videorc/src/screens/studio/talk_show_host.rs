@@ -161,8 +161,18 @@ impl TalkShowRoomHost {
         let clouds = studio.clone();
         cx.spawn(async move |this, cx| {
             let mut watch = clouds.cloud();
-            while watch.changed().await.is_ok() {
-                if this.update(cx, |host, cx| host.sync_room(cx)).is_err() {
+            loop {
+                let state = watch.borrow().clone();
+                if this
+                    .update(cx, |host, cx| {
+                        host.apply_gallery_room_media(state.gallery_room_media.clone(), cx);
+                        host.sync_room(cx);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                if watch.changed().await.is_err() {
                     break;
                 }
             }
@@ -404,6 +414,21 @@ impl TalkShowRoomHost {
     /// is open: the Show stage's people and the Program monitor read it.
     pub fn room_media(&self) -> Option<&RoomMedia> {
         self.room_media.as_ref()
+    }
+
+    /// Gallery/smoke seed (`gallery-seed-show-stage`): synthetic media so
+    /// tiles and the host camera-off avatar paint without LiveKit.
+    fn apply_gallery_room_media(&mut self, media: Option<RoomMedia>, cx: &mut Context<Self>) {
+        match media {
+            Some(media) if self.room_media.as_ref() != Some(&media) => {
+                self.room_media = Some(media);
+                cx.notify();
+            }
+            None if !self.room_open() && self.room_media.take().is_some() => {
+                cx.notify();
+            }
+            _ => {}
+        }
     }
 
     /// R3: a person's latest picture (`Camera` or `Screen`), or the Program
