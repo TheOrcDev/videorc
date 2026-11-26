@@ -193,6 +193,11 @@ pub enum IconName {
     InstagramLogoFill,
     /// Facebook's mark at Phosphor's fill weight.
     FacebookLogoFill,
+    /// `SealCheck` (Phosphor): a verified badge.
+    SealCheck,
+    /// X's verified check after a name (`VerifiedCheck`, comment-row.tsx):
+    /// `SealCheck` at Phosphor's fill weight.
+    SealCheckFill,
     /// `StopIcon` at Phosphor's fill weight.
     StopFill,
     /// `StudioIcon` at Phosphor's fill weight: the Studio slab and its row on the Studio page.
@@ -307,6 +312,7 @@ impl IconName {
             IconName::TiktokLogo => IconName::TiktokLogoFill,
             IconName::InstagramLogo => IconName::InstagramLogoFill,
             IconName::FacebookLogo => IconName::FacebookLogoFill,
+            IconName::SealCheck => IconName::SealCheckFill,
             other => other,
         }
     }
@@ -407,6 +413,8 @@ impl IconName {
             IconName::TiktokLogoFill => include_bytes!("../icons/tiktok-logo-fill.svg"),
             IconName::InstagramLogoFill => include_bytes!("../icons/instagram-logo-fill.svg"),
             IconName::FacebookLogoFill => include_bytes!("../icons/facebook-logo-fill.svg"),
+            IconName::SealCheck => include_bytes!("../icons/seal-check.svg"),
+            IconName::SealCheckFill => include_bytes!("../icons/seal-check-fill.svg"),
             IconName::KickLogo => include_bytes!("../icons/kick-logo.svg"),
             IconName::StopFill => include_bytes!("../icons/stop-fill.svg"),
             IconName::VideoCameraFill => include_bytes!("../icons/video-camera-fill.svg"),
