@@ -8,8 +8,24 @@ import { createHash } from 'node:crypto'
 /** The two looks the owner checks (Increase Contrast stays in the baseline). */
 export const LOOKS = Object.freeze(['dark', 'light'])
 
-/** The window's content size, the baseline's page size (CSS pixels, shot at 2x). */
-export const WINDOW = Object.freeze({ width: 1280, height: 800 })
+/** The baseline's page sizes (S0.10 shot every screen at each). */
+export const WINDOW_SIZES = Object.freeze(['1280x800', '1100x720', '960x660'])
+
+/** A `WIDTHxHEIGHT` the baseline has, as a window size. */
+export function parseWindowSize(size) {
+  if (!WINDOW_SIZES.includes(size)) {
+    throw new Error(`The baseline has no ${size} shots; pick one of ${WINDOW_SIZES.join(', ')}.`)
+  }
+  const [width, height] = size.split('x').map(Number)
+  return Object.freeze({ width, height })
+}
+
+/**
+ * The window's content size, the baseline's page size (CSS pixels, shot at
+ * 2x). `VIDEORC_GALLERY_WINDOW=960x660` shoots a narrow window (one-column
+ * layouts under 940 px of page) against the baseline's shots at that size.
+ */
+export const WINDOW = parseWindowSize(process.env.VIDEORC_GALLERY_WINDOW ?? '1280x800')
 
 /** The pages a gallery is cut into, so each stays under a Live page's 8 MiB. */
 export const DECKS = Object.freeze([
