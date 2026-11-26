@@ -830,42 +830,60 @@ impl StudioPage {
                 .left_0()
                 .size_full()
                 .rounded(px(radius::PANEL))
-                .bg(hsla(theme.inset))
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(12.))
-                .px(px(24.))
-                .child(icon(
-                    IconName::VideoCameraDuotone,
-                    32.,
-                    hsla(theme.muted_foreground),
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap(px(4.))
-                        .child(
-                            div()
-                                .text_size(px(14.))
-                                .line_height(px(20.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(hsla(theme.foreground))
-                                .child(copy.title),
-                        )
-                        .child(
-                            div()
-                                .type_scale(text::META)
-                                .text_color(hsla(theme.muted_foreground))
-                                .child(copy.detail),
-                        ),
-                )
-                .children(buttons)
+                // `bg-inset` is a 3 % wash: Electron's card lays it on the
+                // page, so the page's colour goes under it here, opaque,
+                // and the slot's own words never show through.
+                .bg(hsla(theme.background))
+                .child(self.closed_card_face(theme, copy, buttons))
                 .into_any_element(),
         )
+    }
+
+    /// The closed card's face: the inset wash, the glyph, the words and
+    /// both homes.
+    fn closed_card_face(
+        &self,
+        theme: &videorc_kit::tokens::Theme,
+        copy: videorc_preview::words::PreviewWords,
+        buttons: Option<AnyElement>,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .rounded(px(radius::PANEL))
+            .bg(hsla(theme.inset))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(12.))
+            .px(px(24.))
+            .child(icon(
+                IconName::VideoCameraDuotone,
+                32.,
+                hsla(theme.muted_foreground),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .line_height(px(20.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(hsla(theme.foreground))
+                            .child(copy.title),
+                    )
+                    .child(
+                        div()
+                            .type_scale(text::META)
+                            .text_color(hsla(theme.muted_foreground))
+                            .child(copy.detail),
+                    ),
+            )
+            .children(buttons)
     }
 
     /// `preview-stage.tsx`'s dock control under the video: "Pop out" and
