@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 
+use serde_json::Value;
 use videorc_protocol::{
     LayoutPreset, LayoutSettings, RecordingState, SceneConfigParams, SourceSelection,
 };
@@ -198,6 +199,42 @@ pub fn preview_scene_request(
     })
 }
 
+/// A preview reload as `loadScene(config, config.sources)` keeps it: the
+/// request, and the capture config's own layout and sources it was made
+/// from, which are what its commit confirms as the working setup (D11).
+/// The request's sources are not: they name no screen or camera, stand for
+/// an absent id with `null` (which `normalizeSceneVisual` refuses as
+/// "Invalid source identity"), and in the preview smoke mode are the test
+/// pattern in place of the picks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreviewReload {
+    pub request: SceneConfigParams,
+    pub layout: Value,
+    pub sources: Value,
+}
+
+impl PreviewReload {
+    /// The layout and sources a commit of `committed` confirms, or `None`
+    /// when the feed committed another request than this one (the newer
+    /// reload confirms its own).
+    pub fn confirms(&self, committed: &SceneConfigParams) -> Option<(&Value, &Value)> {
+        (committed.sources == self.request.sources && committed.layout == self.request.layout)
+            .then_some((&self.layout, &self.sources))
+    }
+}
+
+/// [`preview_scene_request`] with the capture config it reads.
+pub fn preview_scene_reload(
+    snapshot: &StudioSnapshot,
+    smoke_preview: bool,
+) -> Option<PreviewReload> {
+    preview_scene_request(snapshot, smoke_preview).map(|request| PreviewReload {
+        request,
+        layout: snapshot.settings.capture_doc["layout"].clone(),
+        sources: snapshot.settings.capture_doc["sources"].clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,5 +360,58 @@ mod tests {
         assert!(params.layout.camera_background.is_some());
         assert!(params.layout.camera_chroma_key_enabled);
         assert_eq!(params.layout.camera_chroma_key_color, "#0000FF");
+    }
+
+    /// `loadScene(config, config.sources)`: a reload confirms the capture
+    /// config's own sources, which read as a scene visual. The request's
+    /// protocol sources don't (a `null` id is "Invalid source identity"),
+    /// so confirming those saved nothing and the scene on stream never took
+    /// a screen pick such as the test pattern (L6's layout-source-loop red).
+    #[test]
+    fn a_reload_confirms_the_capture_configs_sources_not_the_requests() {
+        use crate::scenes::model::{normalize_scene_visual, visual_sources};
+        use serde_json::json;
+
+        let doc = json!({
+            "layout": {"layoutPreset": "screen-camera"},
+            "sources": {"cameraId": "camera:1", "cameraName": "Camera", "testPattern": true},
+        });
+        let mut capture = CaptureConfig::default();
+        capture.sources.camera_id = Some("camera:1".into());
+        capture.sources.test_pattern = true;
+        let request = studio_scene_params(&capture, &StudioSettings::default(), false);
+        let reload = PreviewReload {
+            request: request.clone(),
+            layout: doc["layout"].clone(),
+            sources: doc["sources"].clone(),
+        };
+
+        let (layout, sources) = reload.confirms(&request).expect("its own commit");
+        let visual = normalize_scene_visual(&json!({
+            "layout": layout,
+            "sources": visual_sources(sources),
+            "background": null,
+        }))
+        .expect("the capture config's sources read");
+        assert_eq!(visual["sources"]["testPattern"], json!(true));
+        assert_eq!(visual["sources"]["cameraName"], json!("Camera"));
+
+        let protocol = serde_json::to_value(&request.sources).unwrap();
+        assert_eq!(
+            normalize_scene_visual(&json!({
+                "layout": layout,
+                "sources": visual_sources(&protocol),
+                "background": null,
+            })),
+            Err("Invalid source identity")
+        );
+
+        // The feed committed another request: the newer reload confirms its own.
+        let mut other = request.clone();
+        other.sources.test_pattern = false;
+        assert_eq!(reload.confirms(&other), None);
+        let mut moved = request;
+        moved.layout.layout_preset = LayoutPreset::CameraOnly;
+        assert_eq!(reload.confirms(&moved), None);
     }
 }

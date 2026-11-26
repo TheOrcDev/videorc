@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use videorc_app_core::smoke;
 use videorc_app_core::studio::capture_config::CaptureConfig;
-use videorc_app_core::studio::preview_scene::preview_scene_request;
+use videorc_app_core::studio::preview_scene::preview_scene_reload;
 use videorc_app_core::{BackendClient, Studio};
 use videorc_preview::bounds::Canvas;
 use videorc_preview::feed::{SceneCommitted, SceneFeed};
@@ -125,42 +125,57 @@ fn follow_studio(
     smoke_preview: bool,
 ) -> SceneFeed {
     let mut snapshots = studio.watch();
-    let first = preview_scene_request(&snapshots.borrow(), smoke_preview);
-    let (requests, request_rx) = watch::channel(first);
+    let first = preview_scene_reload(&snapshots.borrow(), smoke_preview);
+    // The capture config each request was made from: what its commit
+    // confirms (`loadScene(config, config.sources)`), never the request's
+    // protocol sources, which read as "Invalid source identity".
+    let sent = Arc::new(Mutex::new(first.clone()));
+    let (requests, request_rx) = watch::channel(first.map(|reload| reload.request));
     let (adopt, adopt_rx) = watch::channel::<Option<(u64, SceneConfigParams)>>(None);
     // `loadScene` reads the mark before its request: a reload a switch or
     // a key overtook confirms nothing.
     let mark = Arc::new(Mutex::new(studio.scene_reload_mark()));
 
+    // The request the backend shows now (committed or adopted).
+    let landed = Arc::new(Mutex::new(None::<SceneConfigParams>));
+
     let hook_studio = studio.clone();
     let hook_mark = mark.clone();
+    let hook_sent = sent.clone();
+    let hook_landed = landed.clone();
     let hook_runtime = runtime.clone();
     let on_committed: SceneCommitted = Arc::new(move |params: &SceneConfigParams| {
+        if let Ok(mut landed) = hook_landed.lock() {
+            *landed = Some(params.clone());
+        }
         let Ok(mark) = hook_mark.lock().map(|mark| mark.clone()) else {
             return;
         };
-        let layout = serde_json::to_value(&params.layout).unwrap_or_default();
-        let sources = serde_json::to_value(&params.sources).unwrap_or_default();
-        let background = params
-            .background
-            .as_ref()
-            .and_then(|background| serde_json::to_value(background).ok());
+        let Some((layout, sources)) = hook_sent.lock().ok().and_then(|sent| {
+            let reload = sent.as_ref()?;
+            let (layout, sources) = reload.confirms(params)?;
+            Some((layout.clone(), sources.clone()))
+        }) else {
+            return;
+        };
         let studio = hook_studio.clone();
         hook_runtime.spawn(async move {
             studio
-                .note_scene_reloaded(mark, &layout, &sources, background)
+                .note_preview_scene_reloaded(mark, &layout, &sources)
                 .await;
         });
     });
 
     let studio = studio.clone();
+    let confirm_runtime = runtime.clone();
     runtime.spawn(async move {
         let mut seen_commit = studio.layout_commit_revision();
         // A transaction committed: the request it leaves behind, when it
         // changes, is that commit's scene.
         let mut armed: Option<(u64, Option<SceneConfigParams>, Instant)> = None;
         loop {
-            let request = preview_scene_request(&snapshots.borrow_and_update(), smoke_preview);
+            let reload = preview_scene_reload(&snapshots.borrow_and_update(), smoke_preview);
+            let request = reload.as_ref().map(|reload| reload.request.clone());
             let commit = studio.layout_commit_revision();
             if commit > seen_commit {
                 seen_commit = commit;
@@ -173,14 +188,58 @@ fn follow_studio(
                     request.as_ref().filter(|now| Some(*now) != before.as_ref())
                 {
                     adopt.send_replace(Some((*commit, params.clone())));
+                    if let Ok(mut landed) = landed.lock() {
+                        *landed = Some(params.clone());
+                    }
                     armed = None;
                 }
             }
-            if *requests.borrow() != request {
+            let resend = *requests.borrow() != request;
+            if resend {
                 if let Ok(mut held) = mark.lock() {
                     *held = studio.scene_reload_mark();
                 }
                 requests.send_replace(request);
+            }
+            let Some(reload) = reload else {
+                if snapshots.changed().await.is_err() {
+                    break;
+                }
+                continue;
+            };
+            // `reloadSceneFromCaptureConfig` runs on every change of the
+            // capture config's sources, and after the scene on stream
+            // changed: a change the request doesn't carry (a camera or the
+            // test pattern under the smoke's preview scene, a name) is
+            // confirmed too once the backend shows the request, so the
+            // scene on stream sees the pick (D2, D11).
+            let now_mark = studio.scene_reload_mark();
+            let reconfirm = !resend
+                && landed
+                    .lock()
+                    .is_ok_and(|landed| landed.as_ref() == Some(&reload.request))
+                && (sent.lock().is_ok_and(|held| {
+                    held.as_ref().is_none_or(|held| {
+                        held.layout != reload.layout || held.sources != reload.sources
+                    })
+                }) || mark.lock().is_ok_and(|held| *held != now_mark));
+            if reconfirm {
+                if let Ok(mut held) = mark.lock() {
+                    *held = now_mark.clone();
+                }
+                let (studio, layout, sources) = (
+                    studio.clone(),
+                    reload.layout.clone(),
+                    reload.sources.clone(),
+                );
+                confirm_runtime.spawn(async move {
+                    studio
+                        .note_preview_scene_reloaded(now_mark, &layout, &sources)
+                        .await;
+                });
+            }
+            if let Ok(mut held) = sent.lock() {
+                *held = Some(reload);
             }
             if snapshots.changed().await.is_err() {
                 break;

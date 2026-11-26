@@ -2872,6 +2872,22 @@ impl<B: StudioBackend> Studio<B> {
         let _ = self.flush_settings().await;
         true
     }
+
+    /// The preview feed's `loadScene`: its reload of the capture config's
+    /// scene (`layout` and `sources` from [`super::preview_scene::PreviewReload`])
+    /// landed, or the capture config changed under a scene that already
+    /// shows it. The scene wears the working background, as the request
+    /// sent it (`background: activeSceneBackground`).
+    pub async fn note_preview_scene_reloaded(
+        &self,
+        mark: ReloadMark,
+        layout: &Value,
+        sources: &Value,
+    ) -> bool {
+        let background = self.lock().scenes.switch.working_background.clone();
+        self.note_scene_reloaded(mark, layout, sources, background)
+            .await
+    }
 }
 
 #[cfg(test)]
