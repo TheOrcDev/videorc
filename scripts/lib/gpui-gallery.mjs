@@ -246,7 +246,11 @@ export const SCREENS = Object.freeze([
     title: 'Guests ⌘7',
     deck: 'livestream',
     open: page('guests'),
-    baseline: null,
+    // Same entitled/max CloudStatus seed as Show stage open (no LiveKit).
+    seed: { command: 'gallery-seed-show-stage', params: { kind: 'open' } },
+    after: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
+    // Electron `guests/default` from the supplemental rust-ui-baseline pass.
+    baseline: { screen: 'guests', state: 'default' },
     sections: ['Guests']
   },
   // Plan 260 C4: Show stage / Vertical stream / talk-show host. Seeds are
