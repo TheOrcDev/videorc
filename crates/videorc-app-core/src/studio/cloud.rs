@@ -95,7 +95,7 @@ impl Drop for TalkRejoining<'_> {
 }
 
 /// `cloudStatus.room.phase === 'open'`.
-fn room_open(status: &CloudStatus) -> bool {
+pub(crate) fn room_open(status: &CloudStatus) -> bool {
     status
         .room
         .as_ref()

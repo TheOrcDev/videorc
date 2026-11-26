@@ -305,6 +305,12 @@ impl StudioBackend for Scripted {
         }
     }
 
+    /// No takeover on air (the backend retires one at launch).
+    async fn screens_active(&self) -> Result<Option<videorc_protocol::StreamScreen>, RpcError> {
+        self.note("screens.active");
+        Ok(None)
+    }
+
     async fn remote_intent_ack(&self, params: RemoteIntentAckParams) -> Result<(), RpcError> {
         self.note("remote.intent.ack");
         self.script.lock().unwrap().remote_acks.push(params);
@@ -5261,5 +5267,120 @@ async fn a_remote_intent_is_run_and_acked() {
             message: Some(remote_copy::NOT_RUNNING.to_string()),
         }]
     );
+    driver.abort();
+}
+
+// ── A takeover's microphone mute (`studio::takeover_mute`) ──────────────
+
+const TAKEOVER_RECORD: &str = "videorc.screenTakeoverMuteOwnership.v1";
+
+fn stored_record(backend: &Scripted) -> Option<Value> {
+    backend
+        .script
+        .lock()
+        .unwrap()
+        .settings
+        .get(TAKEOVER_RECORD)
+        .cloned()
+}
+
+fn takeover_event(payload: Value) -> BackendEvent {
+    BackendEvent::Untyped {
+        event: "screens.active.changed".to_string(),
+        payload,
+    }
+}
+
+#[tokio::test]
+async fn a_relaunch_releases_the_mute_a_takeover_left() {
+    let backend = Scripted::new();
+    backend.with(|script| {
+        script.settings.insert(
+            keys::CAPTURE_CONFIG.to_string(),
+            Value::String(json!({ "audio": { "microphoneMuted": true } }).to_string()),
+        );
+        script.settings.insert(
+            TAKEOVER_RECORD.to_string(),
+            Value::String(json!({ "priorMicrophoneMuted": false }).to_string()),
+        );
+    });
+    let studio = new_studio(&backend);
+    let (events, receiver) = broadcast::channel(16);
+    let driver = tokio::spawn(Arc::clone(&studio).drive(receiver));
+    events.send(ready()).unwrap();
+    // The backend retired the last run's takeover: the read says none.
+    eventually("the record is released", || {
+        stored_record(&backend).is_none()
+    })
+    .await;
+    assert_eq!(stored_audio(&backend)["microphoneMuted"], json!(false));
+    assert!(!studio.snapshot().settings.capture.audio.microphone_muted);
+    driver.abort();
+}
+
+#[tokio::test]
+async fn a_takeover_on_air_mutes_the_microphone_and_gives_it_back() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    let (events, receiver) = broadcast::channel(16);
+    let driver = tokio::spawn(Arc::clone(&studio).drive(receiver));
+    events.send(ready()).unwrap();
+    eventually("the bootstrap", || studio.snapshot().bootstrapped).await;
+    assert!(!studio.snapshot().settings.capture.audio.microphone_muted);
+
+    events
+        .send(takeover_event(
+            json!({ "id": "brb", "name": "Be right back" }),
+        ))
+        .unwrap();
+    eventually("the takeover mutes", || {
+        studio.snapshot().settings.capture.audio.microphone_muted
+            && stored_record(&backend).is_some()
+    })
+    .await;
+    assert_eq!(
+        stored_record(&backend),
+        Some(Value::String(
+            json!({ "priorMicrophoneMuted": false }).to_string()
+        ))
+    );
+
+    events.send(takeover_event(Value::Null)).unwrap();
+    eventually("the takeover gives the mute back", || {
+        !studio.snapshot().settings.capture.audio.microphone_muted
+            && stored_record(&backend).is_none()
+    })
+    .await;
+    driver.abort();
+}
+
+#[tokio::test]
+async fn a_microphone_muted_before_the_takeover_stays_muted_after_it() {
+    let backend = Scripted::new();
+    backend.with(|script| {
+        script.settings.insert(
+            keys::CAPTURE_CONFIG.to_string(),
+            Value::String(json!({ "audio": { "microphoneMuted": true } }).to_string()),
+        );
+    });
+    let studio = new_studio(&backend);
+    let (events, receiver) = broadcast::channel(16);
+    let driver = tokio::spawn(Arc::clone(&studio).drive(receiver));
+    events.send(ready()).unwrap();
+    eventually("the bootstrap", || studio.snapshot().bootstrapped).await;
+    events.send(takeover_event(json!({ "id": "brb" }))).unwrap();
+    eventually("the record", || stored_record(&backend).is_some()).await;
+    assert_eq!(
+        stored_record(&backend),
+        Some(Value::String(
+            json!({ "priorMicrophoneMuted": true }).to_string()
+        ))
+    );
+    events.send(takeover_event(Value::Null)).unwrap();
+    eventually("the record is released", || {
+        stored_record(&backend).is_none()
+    })
+    .await;
+    assert!(studio.snapshot().settings.capture.audio.microphone_muted);
     driver.abort();
 }
