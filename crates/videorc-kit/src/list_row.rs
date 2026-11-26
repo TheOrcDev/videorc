@@ -366,12 +366,16 @@ impl RenderOnce for ListRow {
             }
             Some(on_click) => {
                 let ring = focus_ring(t);
+                // The content paints the selected accent; the button must
+                // not paint it again (two layers read darker / lighter than
+                // Electron's single `bg-accent`).
                 gpui_base::Button::new(self.id)
                     .disabled(self.disabled)
                     .w_full()
                     .rounded(px(corner))
-                    .when(self.selected, |row| row.bg(hsla(t.accent)))
-                    .when(interactive, |row| {
+                    // A selected row's content already wears the accent;
+                    // hovering it must not add a second layer.
+                    .when(interactive && !self.selected, |row| {
                         row.hover(|style| style.bg(hsla(t.accent)))
                     })
                     .when(self.disabled, |row| row.opacity(0.5))
