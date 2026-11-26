@@ -344,6 +344,7 @@ pub fn render_voice(
                     vec![
                         SegmentedControl::new("remove-confirm")
                             .small(true)
+                            .fit(true)
                             .accessibility_label(BEFORE_REMOVE)
                             .value(Some(remove_confirm))
                             .disabled(locked)

@@ -1733,6 +1733,7 @@ fn reference_step(
     let pick = entity.clone();
     let source = SegmentedControl::new("avatar-creator-reference")
         .small(true)
+        .fit(true)
         .accessibility_label(REFERENCE_LABEL)
         .disabled(disabled)
         .value(Some(match creator.reference {

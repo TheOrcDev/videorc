@@ -281,8 +281,10 @@ pub(super) fn style_picker(
     style: CohostBubbleStyle,
     entity: gpui::Entity<AvatarScreen>,
 ) -> SegmentedControl {
+    // `w-fit`: the strip hugs its words beside the sample.
     let mut picker = SegmentedControl::new(id)
         .small(true)
+        .fit(true)
         .value(Some(bubble_word(style)))
         .on_change(move |value: SharedString, _, cx| {
             let index = words::BUBBLE_STYLES
