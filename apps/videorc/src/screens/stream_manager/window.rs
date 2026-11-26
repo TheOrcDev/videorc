@@ -440,6 +440,25 @@ impl StreamManager {
     fn back_to_live(&mut self, cx: &mut Context<Self>) {
         self.history = None;
         self.facts.in_history = false;
+        self.chat.update(cx, |chat, cx| chat.leave_history(cx));
+        cx.notify();
+    }
+
+    /// Library ⋯ → Open in Stream Manager (`openSessionCommentsWindow`): a
+    /// past session's chat in History, with its title and start on the bar.
+    pub fn open_history(
+        &mut self,
+        session_id: String,
+        title: String,
+        started: String,
+        messages: Vec<videorc_app_core::chat::model::LiveChatMessage>,
+        cx: &mut Context<Self>,
+    ) {
+        self.history = Some((title, started));
+        self.facts.in_history = true;
+        self.panes.pick(Pane::Chat);
+        self.chat
+            .update(cx, |chat, cx| chat.show_history(session_id, messages, cx));
         cx.notify();
     }
 

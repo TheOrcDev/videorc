@@ -7,6 +7,46 @@ use videorc_app_core::{
     },
 };
 impl LibraryScreen {
+    /// Open in Stream Manager (`openSessionCommentsWindow`): this stream's
+    /// saved chat (`sessions.comments.history`) in the Stream Manager's
+    /// History, the window opened if it is closed.
+    fn open_in_stream_manager(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(row) = self.view().rows.into_iter().find(|r| r.id == id) else {
+            return;
+        };
+        let title = row.title.clone();
+        let started = row.meta.split(" · ").next().unwrap_or_default().to_string();
+        let backend = self.studio.backend().clone();
+        let session_id = id.clone();
+        self.task(
+            async move {
+                let raw = backend
+                    .request(
+                        "sessions.comments.history",
+                        serde_json::json!({ "sessionId": session_id }),
+                    )
+                    .await
+                    .map_err(|_| "Couldn't open this stream's chat.".to_string())?;
+                let messages: Vec<videorc_app_core::chat::model::LiveChatMessage> =
+                    serde_json::from_value(raw.get("messages").cloned().unwrap_or_default())
+                        .map_err(|_| "Couldn't read this stream's chat.".to_string())?;
+                Ok(messages)
+            },
+            move |this, result, cx| match result {
+                Ok(messages) => {
+                    crate::screens::stream_manager::window::show(cx);
+                    if let Some(window) = crate::screens::stream_manager::window::view(cx) {
+                        let _ = window.update(cx, |manager, _, cx| {
+                            manager.open_history(id, title, started, messages, cx)
+                        });
+                    }
+                }
+                Err(error) => this.message = Some(error),
+            },
+            cx,
+        );
+    }
+
     pub(super) fn action(
         &mut self,
         id: String,
@@ -41,6 +81,7 @@ impl LibraryScreen {
             MenuId::Delete => self.ask_delete(vec![id], window, cx),
             MenuId::Play => self.external_recording(id, cx),
             MenuId::BuddyReport => cx.emit(OpenSidekickReport(id)),
+            MenuId::StreamManager => self.open_in_stream_manager(id, cx),
             MenuId::Markers => {
                 if let Some(session) = self
                     .core

@@ -122,6 +122,7 @@ impl LibraryScreen {
                     item.id,
                     MenuId::Play
                         | MenuId::BuddyReport
+                        | MenuId::StreamManager
                         | MenuId::Markers
                         | MenuId::Reveal
                         | MenuId::ExportMp4
