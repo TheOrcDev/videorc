@@ -100,6 +100,16 @@ const dismiss = async () => {
 };
 `
 
+/**
+ * The launches a run needs: the signed-out parts together, then `buddy` on
+ * its own (it signs the launch in). One group when there is nothing to split.
+ */
+export function splitSignedInParts(parts) {
+  const signedOut = parts.filter((part) => part !== 'buddy')
+  if (!parts.includes('buddy') || signedOut.length === 0) return [parts]
+  return [signedOut, ['buddy']]
+}
+
 /** The screens (and states) a `--screens=` filter keeps. */
 function wanted(only, screen) {
   return !only || only.includes(screen)
@@ -114,6 +124,20 @@ export async function runBaseline({
   sizes = UI_SWEEP_SIZES,
   log = (line) => console.log(line)
 }) {
+  // The Buddy part signs the whole launch in (the mock Developer
+  // entitlement, below). Every other part is shot signed out on Basic, as
+  // the GPUI gallery runs, so Buddy gets a launch of its own: otherwise
+  // Captions, Library, the account menu and Community came out unlocked.
+  const split = splitSignedInParts(parts)
+  if (split.length > 1) {
+    const failures = []
+    for (const group of split) {
+      log(`-- launch: ${group.join(', ')}`)
+      const run = await runBaseline({ out, appCommit, only, looks, parts: group, sizes, log })
+      failures.push(...run.failures)
+    }
+    return { failures }
+  }
   mkdirSync(out, { recursive: true })
   const entriesFile = join(out, 'entries.jsonl')
   const missingFile = join(out, 'missing.jsonl')

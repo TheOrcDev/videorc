@@ -6,6 +6,7 @@ import test from 'node:test'
 import { inflateSync } from 'node:zlib'
 
 import { parseLooks } from './rust-ui-baseline-cli.mjs'
+import { splitSignedInParts } from './rust-ui-baseline.mjs'
 import {
   BASELINE_LOOKS,
   BASELINE_SCREEN_IDS,
@@ -242,4 +243,13 @@ test('the fake chat rows are few and quick on three platforms', () => {
     assert.equal(fake.count, 8)
     assert.ok(fake.intervalMs <= 100)
   }
+})
+
+test('the signed-in Buddy part gets its own launch; the rest are shot signed out', () => {
+  assert.deepEqual(splitSignedInParts(['idle', 'windows', 'first-run', 'buddy']), [
+    ['idle', 'windows', 'first-run'],
+    ['buddy']
+  ])
+  assert.deepEqual(splitSignedInParts(['buddy']), [['buddy']])
+  assert.deepEqual(splitSignedInParts(['idle', 'windows']), [['idle', 'windows']])
 })
