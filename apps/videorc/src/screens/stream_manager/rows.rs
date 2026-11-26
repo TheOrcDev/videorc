@@ -25,7 +25,7 @@ use videorc_kit::{
     context_menu::ContextMenu,
     dropdown_menu::{Menu, MenuItem},
     kebab_menu::{KebabMenu, KebabMenuItem, KebabReveal},
-    platform_glyph::PlatformMark,
+    platform_glyph::{PlatformMark, VerifiedCheck, VerifiedKind},
     tokens::radius,
 };
 
@@ -210,6 +210,17 @@ fn row_body(view: &ManagerRow, platform: &str, pictures: &HashMap<String, Pictur
                 .line_height(px(20.))
                 .child(view.row.author.clone()),
         )
+        // X's verified check after the name (`VerifiedCheck`: X's own badge).
+        .children(view.verified.map(|(kind, _)| {
+            VerifiedCheck::new(
+                SharedString::from(format!("verified-{}", view.row.id)),
+                match kind {
+                    "business" => VerifiedKind::Business,
+                    "government" => VerifiedKind::Government,
+                    _ => VerifiedKind::Blue,
+                },
+            )
+        }))
         .children(
             view.roles
                 .iter()
