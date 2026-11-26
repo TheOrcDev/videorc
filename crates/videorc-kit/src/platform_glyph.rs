@@ -262,8 +262,10 @@ impl RenderOnce for PlatformMark {
             .role(gpui::Role::Image)
             .aria_label(label);
         if self.platform != ChatPlatform::Youtube {
+            // Electron's ChatPlatformIcon draws every glyph at
+            // `weight="fill"` (Twitch a solid purple tile).
             return mark.child(icon(
-                self.platform.icon(),
+                self.platform.icon().filled(),
                 self.size,
                 self.platform.tint_hsla(t),
             ));
