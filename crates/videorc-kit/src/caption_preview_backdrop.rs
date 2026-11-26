@@ -14,6 +14,12 @@ use crate::{
     theme::{Appearance, hsla, resolve},
 };
 
+/// A miniature's text: Electron's caption style cards draw their sample
+/// caption at `text-[8px]` (captions-controls.tsx). It is a picture of a
+/// caption, not text to read, so it is the one named exception to the
+/// design guards' 11 px floor; reading text stays on the type scale.
+pub const MINIATURE_TEXT_PX: f32 = 8.0;
+
 /// Which Electron caption-preview surface to draw.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CaptionPreviewBackdrop {

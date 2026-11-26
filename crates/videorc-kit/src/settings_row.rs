@@ -57,6 +57,16 @@ impl SettingsRow {
         self
     }
 
+    /// The description as balanced lines, as Electron's horizontal
+    /// FieldDescription draws it (`text-balance`): use it for words, and
+    /// [`Self::description`] for an element.
+    pub fn description_balanced(mut self, text: impl Into<SharedString>) -> Self {
+        let id = SharedString::from(format!("{}/description", self.id));
+        self.description =
+            Some(crate::balanced_text::BalancedText::new(id, text, 12.0, 18.0).into_any_element());
+        self
+    }
+
     pub fn description(mut self, description: impl IntoElement) -> Self {
         self.description = Some(description.into_any_element());
         self

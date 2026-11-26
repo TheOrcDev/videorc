@@ -39,6 +39,9 @@ pub struct ToggleItem {
     /// Hover words (L3 Kinds of cuts chips).
     tooltip: Option<SharedString>,
     disabled: bool,
+    /// The child is a chip's content (a leading mark, words, a badge), not
+    /// a card: drawn at the control height in a row.
+    chip: bool,
 }
 
 impl ToggleItem {
@@ -49,6 +52,7 @@ impl ToggleItem {
             child: None,
             tooltip: None,
             disabled: false,
+            chip: false,
         }
     }
 
@@ -56,6 +60,15 @@ impl ToggleItem {
     /// label remains the accessible name.
     pub fn child(mut self, child: impl IntoElement) -> Self {
         self.child = Some(child.into_any_element());
+        self
+    }
+
+    /// The [`Self::child`] is a chip's content (Scene's source chips: a
+    /// leading mark, the name, a badge), not a card: the item stays a
+    /// 28 px chip in a row, padded as a Toggle with a leading icon
+    /// (`pl-2` beside it, `pr-2.5`), rather than a card's 8 px all round.
+    pub fn chip(mut self, chip: bool) -> Self {
+        self.chip = chip;
         self
     }
 
@@ -246,7 +259,8 @@ impl RenderOnce for ToggleGroup {
                 let current = current.clone();
                 let value = item.value.clone();
                 let chip_id = SharedString::from(format!("{group_id}/{}", item.value));
-                let custom = item.child.is_some();
+                let custom = item.child.is_some() && !item.chip;
+                let inline_chip = item.child.is_some() && item.chip;
                 let tip = item.tooltip.clone();
                 let body = item
                     .child
@@ -263,6 +277,9 @@ impl RenderOnce for ToggleGroup {
                     } else {
                         10.0
                     }))
+                    // `has-data-[icon=inline-start]:pl-2`: 8 px beside the
+                    // leading mark, 10 on the far side.
+                    .when(inline_chip, |chip| chip.pl(px(8.0)))
                     .py(px(if custom { 8.0 } else { 0.0 }))
                     .flex()
                     .gap(px(4.0))

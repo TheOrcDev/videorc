@@ -10,6 +10,7 @@ use gpui::{
 use smallvec::SmallVec;
 
 use crate::{
+    balanced_text::BalancedText,
     icon::{IconName, icon},
     theme::{Appearance, TypeScale, hsla, resolve},
     tokens::{radius, text},
@@ -205,13 +206,24 @@ impl RenderOnce for Field {
         // after it in the Field sits 4 px closer to what is above it.
         let followed = self.error.is_some() || !self.footer.is_empty();
         let pull_up = followed && !self.description_above;
+        // A horizontal field balances its description (`group-has-data-
+        // horizontal/field:text-balance`); a vertical one fills its lines.
+        let horizontal = self.orientation == FieldOrientation::Horizontal;
+        let description_id = SharedString::from(format!("{}/description", self.id));
         let description = self.description.map(|description| {
+            let line = if compact { 16.0 } else { 18.0 };
             div()
-                .when(pull_up, |line| line.mt(px(-4.0)))
+                .when(pull_up, |row| row.mt(px(-4.0)))
                 .type_scale(text::META)
-                .line_height(px(if compact { 16.0 } else { 18.0 }))
+                .line_height(px(line))
                 .text_color(hsla(t.muted_foreground))
-                .child(description)
+                .map(|row| {
+                    if horizontal {
+                        row.child(BalancedText::new(description_id, description, 12.0, line))
+                    } else {
+                        row.child(description)
+                    }
+                })
         });
         let error = self.error.map(|error| {
             let error = FieldError::new(error);

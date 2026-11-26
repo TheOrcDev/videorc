@@ -7,6 +7,7 @@
 pub mod alert;
 pub mod avatar;
 pub mod badge;
+pub mod balanced_text;
 pub mod bar_visualizer;
 pub mod button;
 pub mod caption_preview_backdrop;
@@ -76,6 +77,7 @@ pub mod window_frame;
 pub use alert::{Alert, AlertVariant};
 pub use avatar::Avatar;
 pub use badge::{Badge, BadgeVariant, plate_shadows};
+pub use balanced_text::BalancedText;
 pub use bar_visualizer::{BarVisualizer, BarVisualizerState};
 pub use button::{Button, ButtonSize, ButtonVariant};
 pub use caption_preview_backdrop::{CaptionPreviewBackdrop, CaptionPreviewBackdropEl};
