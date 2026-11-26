@@ -19,10 +19,13 @@ use videorc_app_core::stream_manager::removal::{
 };
 use videorc_app_core::stream_manager::rows::ManagerRow;
 use videorc_kit::{
+    ChatPlatform,
+    avatar::Avatar,
     badge::{Badge, BadgeVariant},
     context_menu::ContextMenu,
     dropdown_menu::{Menu, MenuItem},
     kebab_menu::{KebabMenu, KebabMenuItem, KebabReveal},
+    platform_glyph::PlatformMark,
     tokens::radius,
 };
 
@@ -110,7 +113,7 @@ pub fn chat_row(
     let has_person =
         !author.is_empty() && message.event_type != "system" && message.event_type != "moderation";
 
-    let body = row_body(&view, pictures);
+    let body = row_body(&view, &message.platform, pictures);
     let chips = view.row.chips.iter().map(|(label, chip)| {
         Badge::new(*label).variant(match chip {
             StatusChip::Neutral => BadgeVariant::Default,
@@ -177,77 +180,106 @@ fn person_menu(name: &str, platform: &str) -> Menu {
         .item(MenuItem::new(MARK_AS_BOT).on_select(|_, _| {}))
 }
 
-fn row_body(view: &ManagerRow, pictures: &HashMap<String, Picture>) -> AnyElement {
-    div()
+/// `CommentContent` at the Stream Manager's comfortable density: the 40 px
+/// avatar (picture, else the monogram), then the name line closed by the
+/// 20 px platform mark on the far right, then the words at 15 px.
+fn row_body(view: &ManagerRow, platform: &str, pictures: &HashMap<String, Picture>) -> AnyElement {
+    let picture = view
+        .row
+        .avatar_url
+        .as_ref()
+        .and_then(|url| pictures.get(url).and_then(Picture::ready));
+    let avatar = match picture {
+        Some(image) => Avatar::new(view.row.initials.clone()).lg().image(image),
+        None => Avatar::new(view.row.initials.clone()).lg(),
+    };
+    let name_line = div()
+        .w_full()
+        .min_w(px(0.))
         .flex()
-        .flex_col()
-        .gap(px(2.))
+        .items_center()
+        .gap(px(6.))
         .child(
             div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(22.))
-                        .rounded_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(11.))
-                        .child(view.row.initials.clone()),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .flex()
-                        .flex_wrap()
-                        .items_baseline()
-                        .gap(px(6.))
-                        .child(
-                            div()
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_size(px(12.))
-                                .child(view.row.author.clone()),
-                        )
-                        .child(div().text_size(px(11.)).child(view.row.platform_label))
-                        .children(view.roles.iter().map(|role| {
-                            div()
-                                .text_size(px(11.))
-                                .child((*role).to_string())
-                                .into_any_element()
-                        }))
-                        .when(view.first_chat, |row| {
-                            row.child(div().text_size(px(11.)).child("First chat"))
-                        })
-                        .when(view.mentioned, |row| {
-                            row.child(div().text_size(px(11.)).child("@you"))
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(11.))
-                        .child(view.time.clone()),
-                ),
+                .min_w(px(0.))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_size(px(14.))
+                .line_height(px(20.))
+                .child(view.row.author.clone()),
         )
-        .when_some(view.reply.clone(), |col, reply| {
-            col.child(div().text_size(px(11.)).child(reply))
+        .children(
+            view.roles
+                .iter()
+                .map(|role| Badge::new(*role).variant(BadgeVariant::Outline)),
+        )
+        .when(view.first_chat, |line| {
+            line.child(Badge::new("First chat").variant(BadgeVariant::Outline))
         })
-        .when_some(view.notice.clone(), |col, notice| {
-            col.child(div().text_size(px(12.)).italic().child(notice))
+        .when(view.mentioned, |line| line.child(Badge::new("@you")))
+        .child(div().flex_1())
+        .when(!view.time.is_empty(), |line| {
+            line.child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.))
+                    .opacity(0.7)
+                    .child(view.time.clone()),
+            )
         })
-        // P198: emotes and GIFs as pictures (Electron CommentMessageBody).
-        .child(chat_media::message_body(
-            &view.pieces,
-            &view.gifs,
-            pictures,
-            13.,
-            96.,
-        ))
+        // The platform mark closes the line on the far right (plan 165).
+        .child(
+            div()
+                .flex_none()
+                .ml(px(4.))
+                .child(PlatformMark::new(chat_platform(platform)).size(20.)),
+        );
+    div()
+        .w_full()
+        .flex()
+        .items_start()
+        .gap(px(12.))
+        .child(div().flex_none().mt(px(2.)).child(avatar))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(name_line)
+                .when_some(view.reply.clone(), |col, reply| {
+                    col.child(div().text_size(px(12.)).opacity(0.7).child(reply))
+                })
+                .when_some(view.notice.clone(), |col, notice| {
+                    col.child(div().text_size(px(15.)).italic().child(notice))
+                })
+                // P198: emotes and GIFs as pictures (Electron CommentMessageBody).
+                .child(chat_media::message_body(
+                    &view.pieces,
+                    &view.gifs,
+                    pictures,
+                    15.,
+                    96.,
+                )),
+        )
         .into_any_element()
+}
+
+/// `ChatPlatformIcon`'s platform: the backend's id, anything else custom.
+pub(super) fn chat_platform(platform: &str) -> ChatPlatform {
+    match platform {
+        "youtube" => ChatPlatform::Youtube,
+        "twitch" => ChatPlatform::Twitch,
+        "kick" => ChatPlatform::Kick,
+        "x" => ChatPlatform::X,
+        "facebook" => ChatPlatform::Facebook,
+        "tiktok" => ChatPlatform::Tiktok,
+        "instagram" => ChatPlatform::Instagram,
+        _ => ChatPlatform::Custom,
+    }
 }
 
 /// Offline shell samples so row + menu chrome is reviewable; the chat

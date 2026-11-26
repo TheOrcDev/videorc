@@ -152,6 +152,9 @@ pub struct ChatPane {
     completion_index: usize,
     /// Follow the newest message (Electron's pinned follow).
     following: bool,
+    /// Frames left to keep a following list at its newest message while the
+    /// rows lay out (a window opened onto chat that is already there).
+    settle_scroll: u8,
     /// A past session's transcript is on screen (Library ⋯ → Open in Stream
     /// Manager): the live chat waits until Back to live.
     history: bool,
@@ -293,6 +296,7 @@ impl ChatPane {
             completion_index: 0,
             following: true,
             history: false,
+            settle_scroll: 0,
             unread: 0,
             incomplete: false,
             delivery_cursor,
@@ -559,6 +563,10 @@ impl ChatPane {
             self.incomplete = false;
             if self.following {
                 self.scroll.scroll_to_bottom();
+                // Before the list's first layout the scroll has no extent
+                // yet: scroll again on the next frames, once rows are laid
+                // out (Electron opens on the newest message).
+                self.settle_scroll = 2;
             }
         } else {
             self.unread = self.unread.saturating_add(progress.count);
@@ -1004,7 +1012,11 @@ impl ChatPane {
             .xs(true)
             .multiple(true)
             .accessibility_label(pane::copy::CHAT_FILTERS)
-            .item(ToggleItem::new("questions", pane::copy::QUESTIONS))
+            // Questions shows while it is on (Electron also while Sidekick
+            // holds open questions, which this pane doesn't read yet).
+            .when(questions, |group| {
+                group.item(ToggleItem::new("questions", pane::copy::QUESTIONS))
+            })
             .item(ToggleItem::new("mentions", pane::copy::MENTIONS))
             .value(kind_values)
             .on_change({
@@ -1039,8 +1051,20 @@ impl ChatPane {
                         let _ = this.update(app, |this, cx| this.set_platform(next, cx));
                     }
                 });
+            // `PlatformFilter`: each platform is its mark (`ChatPlatformIcon`),
+            // named by its label.
             for p in &platforms {
-                group = group.item(ToggleItem::new(p.clone(), platform_label(p)));
+                group = group.item(
+                    ToggleItem::new(p.clone(), platform_label(p))
+                        .child(
+                            videorc_kit::platform_glyph::PlatformMark::new(
+                                super::rows::chat_platform(p),
+                            )
+                            .id(SharedString::from(format!("chat-filter-mark-{p}")))
+                            .size(20.),
+                        )
+                        .chip(true),
+                );
             }
             Some(group)
         } else {
@@ -1153,6 +1177,13 @@ impl Render for ChatPane {
         if let Some(value) = self.pending_draft.take() {
             self.draft
                 .update(cx, |draft, cx| draft.set_value(&value, window, cx));
+        }
+        if self.settle_scroll > 0 {
+            self.settle_scroll -= 1;
+            if self.following {
+                self.scroll.scroll_to_bottom();
+            }
+            cx.on_next_frame(window, |_, _, cx| cx.notify());
         }
         let width = f32::from(window.viewport_size().width);
         let tier = Tier::of(width);
