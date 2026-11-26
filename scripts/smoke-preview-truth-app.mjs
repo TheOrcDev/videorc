@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { classifyBuddyPetTag, writeBuddyPetFixturePack } from './lib/buddy-pet-fixture.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
@@ -27,6 +27,7 @@ const userDataDir = join(outputDirectory, 'profile')
 mkdirSync(userDataDir)
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const timeoutMs = 120_000
+const gpuiApp = smokeAppIsGpui()
 const colours = [
   [255, 0, 255],
   [0, 255, 255],
@@ -60,8 +61,20 @@ const logs = []
 const receivers = []
 let launch, ws
 const rpc = (method, params = {}) => request(ws, timeoutMs, method, params)
-const command = (name, params = {}) =>
-  requestSmokeCommand(launch.connections['preview-motion-ready'], name, params, { timeoutMs })
+const command = async (name, params = {}) => {
+  const until = Date.now() + 20_000
+  for (;;) {
+    try {
+      return await requestSmokeCommand(launch.connections['preview-motion-ready'], name, params, {
+        timeoutMs
+      })
+    } catch (error) {
+      if (!gpuiApp || !/The scene is changing\./.test(error?.message ?? '') || Date.now() >= until)
+        throw error
+      await sleep(250)
+    }
+  }
+}
 const near = (rgb, target) => rgb.every((v, i) => Math.abs(v - target[i]) < 65)
 // The pet's tag is any gaze or reaction frame, but a close one: a drawn tag
 // samples within a few units of its colour, while the nearest-tag classifier
@@ -100,9 +113,11 @@ async function oracle(expected, label, deadlineMs = 5000) {
   )
 }
 async function runCase(name, work) {
+  console.log(`preview-truth: step ${name}`)
   try {
     await work()
     rows.push({ case: name, result: 'PASS', reason: '' })
+    console.log(`preview-truth: PASS ${name}`)
   } catch (error) {
     rows.push({ case: name, result: 'FAIL', reason: error.message })
     throw error
@@ -116,10 +131,20 @@ async function layout(on = true) {
   })
 }
 async function setReplay(armed) {
-  const switched = await command('eval-js', {
-    code: `return window.__videorcSmokeSetReplayBuffer?.(${armed}, 30) ?? null`
-  })
-  assert.equal(switched.result, true, 'the maintained renderer Clips hook must be available')
+  if (gpuiApp) {
+    // The Electron hook also saves the switch. GPUI's shorter smoke ring
+    // is run-only, so persist the choice separately for the cold-launch case.
+    await command('studio-capture-configure', {
+      config: { replayBuffer: { enabled: armed, explicit: true } }
+    })
+    const switched = await command('studio-replay-buffer', { armed, seconds: 30 })
+    assert.equal(switched.armed, armed, 'the Studio must accept the Clips switch')
+  } else {
+    const switched = await command('eval-js', {
+      code: `return window.__videorcSmokeSetReplayBuffer?.(${armed}, 30) ?? null`
+    })
+    assert.equal(switched.result, true, 'the maintained renderer Clips hook must be available')
+  }
   const until = Date.now() + 30000
   let ring
   do {
@@ -279,9 +304,20 @@ try {
   await launchApp()
   // Seed the renderer's own capture configuration too: its Clips reconciler
   // owns buffer-only starts/stops and must agree with the backend scene.
-  await command('eval-js', {
-    video: sessionParams(null).output.video,
-    code: `
+  if (gpuiApp) {
+    await command('studio-capture-configure', {
+      config: {
+        video: sessionParams(null).output.video,
+        layout: { layoutPreset: 'screen-only' },
+        recordEnabled: true,
+        streamEnabled: false,
+        replayBuffer: { enabled: false, explicit: true }
+      }
+    })
+  } else {
+    await command('eval-js', {
+      video: sessionParams(null).output.video,
+      code: `
       const settings = await ${UI_SETTINGS_READY_JS};
       const key = 'videorc.captureConfig';
       const current = JSON.parse(settings.getItem(key) ?? '{}');
@@ -294,15 +330,16 @@ try {
       ${RELOAD_KEEPING_SEED_JS}
       return true;
     `
-  })
-  const reloadDeadline = Date.now() + 30000
-  while (true) {
-    const ready = await command('eval-js', {
-      code: 'return !window.__previewTruthBeforeReload && typeof window.__videorcSmokeSetReplayBuffer === "function"'
-    }).catch(() => null)
-    if (ready?.result === true) break
-    assert(Date.now() < reloadDeadline, 'renderer did not reload its camera-free profile')
-    await sleep(100)
+    })
+    const reloadDeadline = Date.now() + 30000
+    while (true) {
+      const ready = await command('eval-js', {
+        code: 'return !window.__previewTruthBeforeReload && typeof window.__videorcSmokeSetReplayBuffer === "function"'
+      }).catch(() => null)
+      if (ready?.result === true) break
+      assert(Date.now() < reloadDeadline, 'renderer did not reload its camera-free profile')
+      await sleep(100)
+    }
   }
   await setReplay(false)
   await rpc('session.stop')
@@ -484,12 +521,12 @@ try {
     await launchApp()
     const until = Date.now() + 30000
     let ring
-    do {
+    for (;;) {
       ring = await rpc('replay.status')
       if (ring.state === 'on' && ring.replayOnly) break
       assert(Date.now() < until, `Clips did not come back on at launch: ${JSON.stringify(ring)}`)
       await sleep(200)
-    } while (true)
+    }
     await command('preview-window-open')
     // Nothing touches the layout: the Preview shows the program from launch.
     await oracle(program, 'cold launch, Clips on, untouched layout', 8000)
