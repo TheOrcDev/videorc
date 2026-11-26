@@ -831,9 +831,11 @@ impl StudioPage {
                 .size_full()
                 .rounded(px(radius::PANEL))
                 // `bg-inset` is a 3 % wash: Electron's card lays it on the
-                // page, so the page's colour goes under it here, opaque,
-                // and the slot's own words never show through.
-                .bg(hsla(theme.background))
+                // page. The page colour is translucent here (the glass
+                // window), so it goes under the wash fully opaque: Electron's
+                // #0e0e0e dark and #f2f2f2 light, and the slot's own words
+                // never show through.
+                .bg(hsla(theme.background | 0xff))
                 .child(self.closed_card_face(theme, copy, buttons))
                 .into_any_element(),
         )
