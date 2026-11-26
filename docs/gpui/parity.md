@@ -56,82 +56,82 @@ The page keys come from `assignPageKeys` (shared/sidebar-pages.ts:129). Fixed ke
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P001 | Sidebar layout (zones) | Studio slab; Setup, Livestream, Assets groups; Library and Settings at foot | `shared/sidebar-pages.ts:45` | [ ] | [ ] | [ ] |
-| P002 | Zone label "Setup" / "Livestream" / "Assets" | Section label above each labelled group | `renderer/components/sidebar.tsx:391` | [ ] | [ ] | [ ] |
-| P003 | Row "Studio" (⌘1) | Big chrome row, goes home; shows session clock while live | `renderer/components/sidebar.tsx:375` | [ ] | [ ] | [ ] |
-| P004 | Studio row session clock | Live dot and elapsed time while recording or on air | `renderer/components/sidebar.tsx:382` | [ ] | [ ] | [ ] |
-| P005 | Row "Sources" (⌘2) | Opens Sources page | `shared/sidebar-pages.ts:47` | [ ] | [ ] | [ ] |
-| P006 | Row "Scene" (⌘3) (id `layouts`) | Opens Scene page | `shared/sidebar-pages.ts:57` | [ ] | [ ] | [ ] |
-| P007 | Row "Captions" (⌘4) | Opens Captions page | `shared/sidebar-pages.ts:58` | [ ] | [ ] | [ ] |
-| P008 | Row "Output" (⌘5) (id `recording`) | Opens Output page | `shared/sidebar-pages.ts:59` | [ ] | [ ] | [ ] |
-| P009 | Row "Destinations" (⌘6) (id `live`) | Opens Destinations page | `shared/sidebar-pages.ts:60` | [ ] | [ ] | [ ] |
-| P010 | Row "Guests" (⌘7) | Opens Guests; shown only when cloud talk shows are available | `renderer/components/sidebar.tsx:254` | [ ] | [ ] | [ ] |
-| P011 | Row "Avatar" (⌘8) | Opens Avatar page | `shared/sidebar-pages.ts:62` | [ ] | [ ] | [ ] |
-| P012 | Row "Sidekick" (⌘9) (id `ai`) | Opens Sidekick page | `shared/sidebar-pages.ts:63` | [ ] | [ ] | [ ] |
-| P013 | Row "Images" (⇧⌘G) (id `assets`) | Opens Images page | `shared/sidebar-pages.ts:111` | [ ] | [ ] | [ ] |
-| P014 | Row "Sounds" (⇧⌘S) | Opens Sounds page | `shared/sidebar-pages.ts:112` | [ ] | [ ] | [ ] |
-| P015 | Row "Library" (⌘0) | Opens Library; sits in the bottom block | `shared/sidebar-pages.ts:113` | [ ] | [ ] | [ ] |
-| P016 | Row "Settings" (⌘,) | Opens Settings; bottom block | `shared/sidebar-pages.ts:114` | [ ] | [ ] | [ ] |
-| P017 | Row shortcut chips | Key chips appear on rows while ⌘/Ctrl is held | `renderer/components/sidebar.tsx:298` | [ ] | [ ] | [ ] |
-| P018 | Page-key routing | Main catches page chords in every window, forwards `shortcut:navigate` | `main/index.ts:3141` | [ ] | [ ] | [ ] |
-| P019 | Sidebar "Search" icon button (⌘K) | Opens command palette | `renderer/components/sidebar.tsx:344` | [ ] | [ ] | [ ] |
-| P020 | Traffic-light gutter (88 px) | Header leaves room for the window buttons *(macOS only (window-frame.tsx:42))* | `renderer/components/window-frame.tsx:36` | [ ] | n/a | n/a |
-| P021 | Update chip "Update available" / "Downloading… N%" / "Restart to update" / "Update after stop" | Installs if downloaded and idle, otherwise opens Settings → About *("Update available" on Linux links to videorc.com (update-ui.ts:40))* | `renderer/components/sidebar.tsx:407 (labels renderer/lib/update-ui.ts:30)` | [ ] | [ ] | [ ] |
-| P022 | Theme toggle (D) "Toggle color theme" | Switches light/dark; tooltip "Switch to light/dark theme" | `renderer/components/theme-toggle.tsx:42` | [ ] | [ ] | [ ] |
-| P023 | Health page (no row) | Reachable from ⌘K, the status bar and the account menu | `renderer/components/sidebar.tsx:399` | [ ] | [ ] | [ ] |
+| P001 | Sidebar layout (zones) | Studio slab; Setup, Livestream, Assets groups; Library and Settings at foot | `shared/sidebar-pages.ts:45` | [x] | [ ] | [ ] |
+| P002 | Zone label "Setup" / "Livestream" / "Assets" | Section label above each labelled group | `renderer/components/sidebar.tsx:391` | [x] | [ ] | [ ] |
+| P003 | Row "Studio" (⌘1) | Big chrome row, goes home; shows session clock while live | `renderer/components/sidebar.tsx:375` | [x] | [ ] | [ ] |
+| P004 | Studio row session clock | Live dot and elapsed time while recording or on air | `renderer/components/sidebar.tsx:382` | [x] | [ ] | [ ] |
+| P005 | Row "Sources" (⌘2) | Opens Sources page | `shared/sidebar-pages.ts:47` | [x] | [ ] | [ ] |
+| P006 | Row "Scene" (⌘3) (id `layouts`) | Opens Scene page | `shared/sidebar-pages.ts:57` | [x] | [ ] | [ ] |
+| P007 | Row "Captions" (⌘4) | Opens Captions page | `shared/sidebar-pages.ts:58` | [x] | [ ] | [ ] |
+| P008 | Row "Output" (⌘5) (id `recording`) | Opens Output page | `shared/sidebar-pages.ts:59` | [x] | [ ] | [ ] |
+| P009 | Row "Destinations" (⌘6) (id `live`) | Opens Destinations page | `shared/sidebar-pages.ts:60` | [x] | [ ] | [ ] |
+| P010 | Row "Guests" (⌘7) | Opens Guests; shown only when cloud talk shows are available | `renderer/components/sidebar.tsx:254` | [x] | [ ] | [ ] |
+| P011 | Row "Avatar" (⌘8) | Opens Avatar page | `shared/sidebar-pages.ts:62` | [x] | [ ] | [ ] |
+| P012 | Row "Sidekick" (⌘9) (id `ai`) | Opens Sidekick page | `shared/sidebar-pages.ts:63` | [x] | [ ] | [ ] |
+| P013 | Row "Images" (⇧⌘G) (id `assets`) | Opens Images page | `shared/sidebar-pages.ts:111` | [x] | [ ] | [ ] |
+| P014 | Row "Sounds" (⇧⌘S) | Opens Sounds page | `shared/sidebar-pages.ts:112` | [x] | [ ] | [ ] |
+| P015 | Row "Library" (⌘0) | Opens Library; sits in the bottom block | `shared/sidebar-pages.ts:113` | [x] | [ ] | [ ] |
+| P016 | Row "Settings" (⌘,) | Opens Settings; bottom block | `shared/sidebar-pages.ts:114` | [x] | [ ] | [ ] |
+| P017 | Row shortcut chips | Key chips appear on rows while ⌘/Ctrl is held | `renderer/components/sidebar.tsx:298` | [x] | [ ] | [ ] |
+| P018 | Page-key routing | Main catches page chords in every window, forwards `shortcut:navigate` | `main/index.ts:3141` | [x] | [ ] | [ ] |
+| P019 | Sidebar "Search" icon button (⌘K) | Opens command palette | `renderer/components/sidebar.tsx:344` | [x] | [ ] | [ ] |
+| P020 | Traffic-light gutter (88 px) | Header leaves room for the window buttons *(macOS only (window-frame.tsx:42))* | `renderer/components/window-frame.tsx:36` | [x] | n/a | n/a |
+| P021 | Update chip "Update available" / "Downloading… N%" / "Restart to update" / "Update after stop" | Installs if downloaded and idle, otherwise opens Settings → About *("Update available" on Linux links to videorc.com (update-ui.ts:40))* | `renderer/components/sidebar.tsx:407 (labels renderer/lib/update-ui.ts:30)` | [x] | [ ] | [ ] |
+| P022 | Theme toggle (D) "Toggle color theme" | Switches light/dark; tooltip "Switch to light/dark theme" | `renderer/components/theme-toggle.tsx:42` | [x] | [ ] | [ ] |
+| P023 | Health page (no row) | Reachable from ⌘K, the status bar and the account menu | `renderer/components/sidebar.tsx:399` | [x] | [ ] | [ ] |
 
 ### Shell: account row and menu
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P024 | Account trigger (avatar or icon + name / "Sign in") | Opens the account menu; ↑/↓ also open it | `renderer/components/account-menu-trigger.tsx:29; account-menu.tsx:180` | [ ] | [ ] | [ ] |
-| P025 | Needs-sign-in dot | Warning dot while chat or Sidekick waits on a Videorc sign-in | `renderer/components/account-menu-trigger.tsx:38` | [ ] | [ ] | [ ] |
-| P026 | Menu header (name / "Not signed in") | Avatar and display name | `renderer/components/account-menu-body.tsx:140` | [ ] | [ ] | [ ] |
-| P027 | Plan badge "Basic" / "Premium" / "Max" / "Developer" | Shows entitlement tier | `renderer/components/account-menu-body.tsx:149; renderer/lib/account.ts:56` | [ ] | [ ] | [ ] |
-| P028 | "Account" | Opens the web account page (signed in) | `renderer/components/account-menu-body.tsx:155` | [ ] | [ ] | [ ] |
-| P029 | "Sign in" | Starts Videorc sign-in (signed out) | `renderer/components/account-menu-body.tsx:160` | [ ] | [ ] | [ ] |
-| P030 | "View Premium" | Opens the Premium web page | `renderer/components/account-menu-body.tsx:165` | [ ] | [ ] | [ ] |
-| P031 | "Health" (with status dot) | Opens Health page | `renderer/components/account-menu-body.tsx:172` | [ ] | [ ] | [ ] |
-| P032 | "Settings" | Opens Settings | `renderer/components/account-menu-body.tsx:179` | [ ] | [ ] | [ ] |
-| P033 | "Sign out" | Signs out; disabled while recording or live | `renderer/components/account-menu-body.tsx:187` | [ ] | [ ] | [ ] |
-| P034 | "Sign out is locked while you're recording or live." | Reason line under the disabled Sign out | `renderer/components/account-menu-body.tsx:193` | [ ] | [ ] | [ ] |
-| P035 | Toast "Couldn't open the account menu" | Shown when the lazy menu chunk fails to load | `renderer/components/account-menu.tsx:128` | [ ] | [ ] | [ ] |
+| P024 | Account trigger (avatar or icon + name / "Sign in") | Opens the account menu; ↑/↓ also open it | `renderer/components/account-menu-trigger.tsx:29; account-menu.tsx:180` | [x] | [ ] | [ ] |
+| P025 | Needs-sign-in dot | Warning dot while chat or Sidekick waits on a Videorc sign-in | `renderer/components/account-menu-trigger.tsx:38` | [x] | [ ] | [ ] |
+| P026 | Menu header (name / "Not signed in") | Avatar and display name | `renderer/components/account-menu-body.tsx:140` | [x] | [ ] | [ ] |
+| P027 | Plan badge "Basic" / "Premium" / "Max" / "Developer" | Shows entitlement tier | `renderer/components/account-menu-body.tsx:149; renderer/lib/account.ts:56` | [x] | [ ] | [ ] |
+| P028 | "Account" | Opens the web account page (signed in) | `renderer/components/account-menu-body.tsx:155` | [x] | [ ] | [ ] |
+| P029 | "Sign in" | Starts Videorc sign-in (signed out) | `renderer/components/account-menu-body.tsx:160` | [x] | [ ] | [ ] |
+| P030 | "View Premium" | Opens the Premium web page | `renderer/components/account-menu-body.tsx:165` | [x] | [ ] | [ ] |
+| P031 | "Health" (with status dot) | Opens Health page | `renderer/components/account-menu-body.tsx:172` | [x] | [ ] | [ ] |
+| P032 | "Settings" | Opens Settings | `renderer/components/account-menu-body.tsx:179` | [x] | [ ] | [ ] |
+| P033 | "Sign out" | Signs out; disabled while recording or live | `renderer/components/account-menu-body.tsx:187` | [x] | [ ] | [ ] |
+| P034 | "Sign out is locked while you're recording or live." | Reason line under the disabled Sign out | `renderer/components/account-menu-body.tsx:193` | [x] | [ ] | [ ] |
+| P035 | Toast "Couldn't open the account menu" | Shown when the lazy menu chunk fails to load | `renderer/components/account-menu.tsx:128` | [x] | [ ] | [ ] |
 
 ### Shell: status bar and bell
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P036 | Session state ("Ready", "Recording", "On air", "· Rec", clock) | Session words and elapsed time; click opens Health | `renderer/components/status-bar-session.tsx:53` | [ ] | [ ] | [ ] |
-| P037 | Tooltip "Open Health" | Tooltip on the state button | `renderer/components/status-bar-session.tsx:71` | [ ] | [ ] | [ ] |
-| P038 | "Search" hint (⌘K) | Opens command palette | `renderer/components/app-shell.tsx:736` | [ ] | [ ] | [ ] |
-| P039 | "Preview" hint (⌘P), pressed when open | Toggles Preview window | `renderer/components/app-shell.tsx:741` | [ ] | [ ] | [ ] |
-| P040 | "Notes" hint (⇧⌘N), pressed when open | Toggles Notes window; hidden if VIDEORC_NOTES_WINDOW=0 | `renderer/components/app-shell.tsx:750` | [ ] | [ ] | [ ] |
-| P041 | "Stream Manager" hint (⇧⌘J), pressed when open | Toggles Stream Manager; hidden if VIDEORC_COMMENTS_WINDOW=0 | `renderer/components/app-shell.tsx:760` | [ ] | [ ] | [ ] |
-| P042 | Bell (⇧⌘B), unread count text | Opens the notification centre popover; tooltip "Notifications" | `renderer/components/notifications/notification-bell.tsx:153; main-notification-bell.tsx:13` | [ ] | [ ] | [ ] |
+| P036 | Session state ("Ready", "Recording", "On air", "· Rec", clock) | Session words and elapsed time; click opens Health | `renderer/components/status-bar-session.tsx:53` | [x] | [ ] | [ ] |
+| P037 | Tooltip "Open Health" | Tooltip on the state button | `renderer/components/status-bar-session.tsx:71` | [x] | [ ] | [ ] |
+| P038 | "Search" hint (⌘K) | Opens command palette | `renderer/components/app-shell.tsx:736` | [x] | [ ] | [ ] |
+| P039 | "Preview" hint (⌘P), pressed when open | Toggles Preview window | `renderer/components/app-shell.tsx:741` | [x] | [ ] | [ ] |
+| P040 | "Notes" hint (⇧⌘N), pressed when open | Toggles Notes window; hidden if VIDEORC_NOTES_WINDOW=0 | `renderer/components/app-shell.tsx:750` | [x] | [ ] | [ ] |
+| P041 | "Stream Manager" hint (⇧⌘J), pressed when open | Toggles Stream Manager; hidden if VIDEORC_COMMENTS_WINDOW=0 | `renderer/components/app-shell.tsx:760` | [x] | [ ] | [ ] |
+| P042 | Bell (⇧⌘B), unread count text | Opens the notification centre popover; tooltip "Notifications" | `renderer/components/notifications/notification-bell.tsx:153; main-notification-bell.tsx:13` | [x] | [ ] | [ ] |
 
 ### Shell: window frame, title bar, toolbar, tabs, shell keys
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P043 | Main window 1180×780 (min 960×660), title "Videorc" | Main window; its frame is not saved | `main/index.ts:3042` | [ ] | [ ] | [ ] |
-| P044 | Hidden-inset title bar + traffic lights | Native buttons sit in the 40 px header band *(macOS only (window-glass.ts:268))* | `main/window-glass.ts:268` | [ ] | n/a | n/a |
+| P043 | Main window 1180×780 (min 960×660), title "Videorc" | Main window; its frame is not saved | `main/index.ts:3042` | [x] | [ ] | [ ] |
+| P044 | Hidden-inset title bar + traffic lights | Native buttons sit in the 40 px header band *(macOS only (window-glass.ts:268))* | `main/window-glass.ts:268` | [x] | n/a | n/a |
 | P045 | Mica backdrop | Windows 11 window material *(Windows only (window-glass.ts:147))* | `main/window-glass.ts:285` | n/a | [ ] | n/a |
 | P046 | Native frame / title bar | OS draws the title bar *(Windows and Linux)* | `main/window-glass.ts:161` | n/a | [ ] | [ ] |
-| P047 | Toolbar page title (h1, drag region) | Active page name; gets focus after keyboard navigation | `renderer/components/pane.tsx:21; app-shell.tsx:664` | [ ] | [ ] | [ ] |
-| P048 | WindowHeader (aux windows) | Title, optional meta and controls; drag band | `renderer/components/window-frame.tsx:64` | [ ] | [ ] | [ ] |
-| P049 | PageTabs strip | Shared pinned tab list pages use | `renderer/components/page-tabs.tsx:57` | [ ] | [ ] | [ ] |
-| P050 | Page error panel "This page hit a problem" + "Try again" | Page crash stays inside the page | `renderer/components/page-error-panel.tsx:22; app-shell.tsx:676` | [ ] | [ ] | [ ] |
-| P051 | ⌘K | Toggles Search; closes it from inside its dialog | `renderer/lib/shell-shortcuts.ts:57` | [ ] | [ ] | [ ] |
-| P052 | ⌘P | Toggles Preview window | `renderer/lib/shell-shortcuts.ts:58` | [ ] | [ ] | [ ] |
-| P053 | ⇧⌘N | Toggles Notes; also works from aux windows | `renderer/lib/shell-shortcuts.ts:52; main/index.ts:3716` | [ ] | [ ] | [ ] |
-| P054 | ⌘J | Shows Stream Manager | `renderer/lib/shell-shortcuts.ts:61` | [ ] | [ ] | [ ] |
+| P047 | Toolbar page title (h1, drag region) | Active page name; gets focus after keyboard navigation | `renderer/components/pane.tsx:21; app-shell.tsx:664` | [x] | [ ] | [ ] |
+| P048 | WindowHeader (aux windows) | Title, optional meta and controls; drag band | `renderer/components/window-frame.tsx:64` | [x] | [ ] | [ ] |
+| P049 | PageTabs strip | Shared pinned tab list pages use | `renderer/components/page-tabs.tsx:57` | [x] | [ ] | [ ] |
+| P050 | Page error panel "This page hit a problem" + "Try again" | Page crash stays inside the page | `renderer/components/page-error-panel.tsx:22; app-shell.tsx:676` | [x] | [ ] | [ ] |
+| P051 | ⌘K | Toggles Search; closes it from inside its dialog | `renderer/lib/shell-shortcuts.ts:57` | [x] | [ ] | [ ] |
+| P052 | ⌘P | Toggles Preview window | `renderer/lib/shell-shortcuts.ts:58` | [x] | [ ] | [ ] |
+| P053 | ⇧⌘N | Toggles Notes; also works from aux windows | `renderer/lib/shell-shortcuts.ts:52; main/index.ts:3716` | [x] | [ ] | [ ] |
+| P054 | ⌘J | Shows Stream Manager | `renderer/lib/shell-shortcuts.ts:61` | [x] | [ ] | [ ] |
 | P055 | ⇧⌘J | Toggles Stream Manager | `renderer/lib/shell-shortcuts.ts:53` | [x] | [ ] | [ ] |
-| P056 | ⇧⌘C | Toggles Captions reader | `renderer/lib/shell-shortcuts.ts:54` | [ ] | [ ] | [ ] |
-| P057 | ⇧⌘B | Toggles notification centre | `renderer/lib/shell-shortcuts.ts:51` | [ ] | [ ] | [ ] |
-| P058 | ⌘/ | Opens Settings → Shortcuts | `renderer/lib/shell-shortcuts.ts:62` | [ ] | [ ] | [ ] |
-| P059 | Space (Studio page) | Record / stop, or asks End livestream while live | `renderer/lib/shortcuts.ts:57` | [ ] | [ ] | [ ] |
-| P060 | D | Toggle light/dark theme | `renderer/lib/shortcuts.ts:188` | [ ] | [ ] | [ ] |
-| P061 | Modal gate | No shell chord fires while a dialog or menu is open | `renderer/lib/shell-shortcuts.ts:46` | [ ] | [ ] | [ ] |
+| P056 | ⇧⌘C | Toggles Captions reader | `renderer/lib/shell-shortcuts.ts:54` | [x] | [ ] | [ ] |
+| P057 | ⇧⌘B | Toggles notification centre | `renderer/lib/shell-shortcuts.ts:51` | [x] | [ ] | [ ] |
+| P058 | ⌘/ | Opens Settings → Shortcuts | `renderer/lib/shell-shortcuts.ts:62` | [x] | [ ] | [ ] |
+| P059 | Space (Studio page) | Record / stop, or asks End livestream while live | `renderer/lib/shortcuts.ts:57` | [x] | [ ] | [ ] |
+| P060 | D | Toggle light/dark theme | `renderer/lib/shortcuts.ts:188` | [x] | [ ] | [ ] |
+| P061 | Modal gate | No shell chord fires while a dialog or menu is open | `renderer/lib/shell-shortcuts.ts:46` | [x] | [ ] | [ ] |
 
 ### Health page (diagnostics-tab, cloud-program-health)
 
@@ -171,32 +171,32 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P085 | Input "Search commands…" / "No results found." | Filters commands | `renderer/components/command-palette.tsx:280` | [ ] | [ ] | [ ] |
-| P086 | Footer (selected item + ↵) | Shows the selected action and its key | `renderer/components/command-palette.tsx:855` | [ ] | [ ] | [ ] |
-| P087 | Group "Session": "Start recording" / "Go live…" / "Stop recording" / "End livestream" | Starts, or stops (End livestream asks first) | `renderer/components/command-palette.tsx:287` | [ ] | [ ] | [ ] |
-| P088 | Session: "Hide screen" / "Show screen" | Toggles screen privacy (default Ctrl+Alt+H) | `renderer/components/command-palette.tsx:324` | [ ] | [ ] | [ ] |
-| P089 | Session: camera background command | Cycles camera background effect | `renderer/components/command-palette.tsx:332` | [ ] | [ ] | [ ] |
-| P090 | Session: green screen command | Toggles chroma key | `renderer/components/command-palette.tsx:343` | [ ] | [ ] | [ ] |
-| P091 | Session: "Turn Videorc Camera on/off" | Toggles the virtual camera *(hidden where the camera is hidden)* *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/command-palette.tsx:360` | [ ] | n/a | [ ] |
-| P092 | Session: "Mute microphone" / "Unmute microphone" | Toggles mic mute | `renderer/components/command-palette.tsx:383` | [ ] | [ ] | [ ] |
-| P093 | Session: "Save a 30-second clip" / "Save a 1-minute clip" | Saves a clip; shown while live or replay is on | `renderer/components/command-palette.tsx:397` | [ ] | [ ] | [ ] |
-| P094 | Session: "Stop agents" | Stops every agent action and turns Agents off | `renderer/components/command-palette.tsx:419` | [ ] | [ ] | [ ] |
-| P095 | Group "Pages": every sidebar page + "Health" | Opens the page; shows its key *(Guests only with talk shows)* | `renderer/components/command-palette.tsx:441` | [ ] | [ ] | [ ] |
-| P096 | Pages: "Edit scene", "Background settings" | Scene editor; Scene background panel | `renderer/components/command-palette.tsx:462` | [ ] | [ ] | [ ] |
-| P097 | Pages: "Upcoming events", "Discord announcements" | Opens those Destinations views | `renderer/components/command-palette.tsx:493` | [ ] | [ ] | [ ] |
-| P098 | Pages: "Open notifications" | Opens the bell's list | `renderer/components/command-palette.tsx:513` | [ ] | [ ] | [ ] |
-| P099 | Group "Windows": "Open/Close Preview", "Notes", "Stream Manager", "Captions reader" | Toggles each window | `renderer/components/command-palette.tsx:527` | [ ] | [ ] | [ ] |
-| P100 | Windows: "Hide Stream Manager from stream" / "Show Stream Manager on stream" | Toggles capture hiding for Stream Manager *(disabled on Linux ("This system cannot hide a window from screen capture.") (window-capture-protection.ts:64))* | `renderer/components/command-palette.tsx:578` | [ ] | [ ] | [ ] |
-| P101 | Group "Scenes": "Add scene…", "Switch to {name}" | Adds a scene / applies a saved scene | `renderer/components/command-palette.tsx:617` | [ ] | [ ] | [ ] |
-| P102 | Group "Banners": "Show/Hide banner: {name}", "Hide all banners" | Toggles banners | `renderer/components/command-palette.tsx:654` | [ ] | [ ] | [ ] |
-| P103 | Group "Sounds": "Play sound: {name}", "Stop all sounds" | Plays a soundboard pad / stops all | `renderer/components/command-palette.tsx:690` | [ ] | [ ] | [ ] |
-| P104 | Group "Avatar": "Profile", "Greetings" | Opens Avatar tabs | `renderer/components/command-palette.tsx:723` | [ ] | [ ] | [ ] |
-| P105 | Group "Sidekick": "Overview", "Chat", "Community", "Voice", "Reports", "Clean cut" | Opens Sidekick tabs | `renderer/components/command-palette.tsx:742` | [ ] | [ ] | [ ] |
-| P106 | Group "Settings": "General", "Permissions", "Shortcuts" (⌘/), "Remote", "About" | Opens Settings tabs | `renderer/components/command-palette.tsx:761` | [ ] | [ ] | [ ] |
-| P107 | Settings: "Connect an agent…" | Settings → Remote with the connect dialog open | `renderer/components/command-palette.tsx:777` | [ ] | [ ] | [ ] |
-| P108 | Settings: "Run setup again…" | Replays first-run setup; hidden during a session | `renderer/components/command-palette.tsx:794` | [ ] | [ ] | [ ] |
-| P109 | Group "Appearance": "Light", "Dark", "System" (checked) | Sets the theme | `renderer/components/command-palette.tsx:808` | [ ] | [ ] | [ ] |
-| P110 | Appearance: "Chat in Studio" (checked) | Toggles the studioChat setting | `renderer/components/command-palette.tsx:839` | [ ] | [ ] | [ ] |
+| P085 | Input "Search commands…" / "No results found." | Filters commands | `renderer/components/command-palette.tsx:280` | [x] | [ ] | [ ] |
+| P086 | Footer (selected item + ↵) | Shows the selected action and its key | `renderer/components/command-palette.tsx:855` | [x] | [ ] | [ ] |
+| P087 | Group "Session": "Start recording" / "Go live…" / "Stop recording" / "End livestream" | Starts, or stops (End livestream asks first) | `renderer/components/command-palette.tsx:287` | [x] | [ ] | [ ] |
+| P088 | Session: "Hide screen" / "Show screen" | Toggles screen privacy (default Ctrl+Alt+H) | `renderer/components/command-palette.tsx:324` | [x] | [ ] | [ ] |
+| P089 | Session: camera background command | Cycles camera background effect | `renderer/components/command-palette.tsx:332` | [x] | [ ] | [ ] |
+| P090 | Session: green screen command | Toggles chroma key | `renderer/components/command-palette.tsx:343` | [x] | [ ] | [ ] |
+| P091 | Session: "Turn Videorc Camera on/off" | Toggles the virtual camera *(hidden where the camera is hidden)* *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/command-palette.tsx:360` | [x] | n/a | [ ] |
+| P092 | Session: "Mute microphone" / "Unmute microphone" | Toggles mic mute | `renderer/components/command-palette.tsx:383` | [x] | [ ] | [ ] |
+| P093 | Session: "Save a 30-second clip" / "Save a 1-minute clip" | Saves a clip; shown while live or replay is on | `renderer/components/command-palette.tsx:397` | [x] | [ ] | [ ] |
+| P094 | Session: "Stop agents" | Stops every agent action and turns Agents off | `renderer/components/command-palette.tsx:419` | [x] | [ ] | [ ] |
+| P095 | Group "Pages": every sidebar page + "Health" | Opens the page; shows its key *(Guests only with talk shows)* | `renderer/components/command-palette.tsx:441` | [x] | [ ] | [ ] |
+| P096 | Pages: "Edit scene", "Background settings" | Scene editor; Scene background panel | `renderer/components/command-palette.tsx:462` | [x] | [ ] | [ ] |
+| P097 | Pages: "Upcoming events", "Discord announcements" | Opens those Destinations views | `renderer/components/command-palette.tsx:493` | [x] | [ ] | [ ] |
+| P098 | Pages: "Open notifications" | Opens the bell's list | `renderer/components/command-palette.tsx:513` | [x] | [ ] | [ ] |
+| P099 | Group "Windows": "Open/Close Preview", "Notes", "Stream Manager", "Captions reader" | Toggles each window | `renderer/components/command-palette.tsx:527` | [x] | [ ] | [ ] |
+| P100 | Windows: "Hide Stream Manager from stream" / "Show Stream Manager on stream" | Toggles capture hiding for Stream Manager *(disabled on Linux ("This system cannot hide a window from screen capture.") (window-capture-protection.ts:64))* | `renderer/components/command-palette.tsx:578` | [x] | [ ] | [ ] |
+| P101 | Group "Scenes": "Add scene…", "Switch to {name}" | Adds a scene / applies a saved scene | `renderer/components/command-palette.tsx:617` | [x] | [ ] | [ ] |
+| P102 | Group "Banners": "Show/Hide banner: {name}", "Hide all banners" | Toggles banners | `renderer/components/command-palette.tsx:654` | [x] | [ ] | [ ] |
+| P103 | Group "Sounds": "Play sound: {name}", "Stop all sounds" | Plays a soundboard pad / stops all | `renderer/components/command-palette.tsx:690` | [x] | [ ] | [ ] |
+| P104 | Group "Avatar": "Profile", "Greetings" | Opens Avatar tabs | `renderer/components/command-palette.tsx:723` | [x] | [ ] | [ ] |
+| P105 | Group "Sidekick": "Overview", "Chat", "Community", "Voice", "Reports", "Clean cut" | Opens Sidekick tabs | `renderer/components/command-palette.tsx:742` | [x] | [ ] | [ ] |
+| P106 | Group "Settings": "General", "Permissions", "Shortcuts" (⌘/), "Remote", "About" | Opens Settings tabs | `renderer/components/command-palette.tsx:761` | [x] | [ ] | [ ] |
+| P107 | Settings: "Connect an agent…" | Settings → Remote with the connect dialog open | `renderer/components/command-palette.tsx:777` | [x] | [ ] | [ ] |
+| P108 | Settings: "Run setup again…" | Replays first-run setup; hidden during a session | `renderer/components/command-palette.tsx:794` | [x] | [ ] | [ ] |
+| P109 | Group "Appearance": "Light", "Dark", "System" (checked) | Sets the theme | `renderer/components/command-palette.tsx:808` | [x] | [ ] | [ ] |
+| P110 | Appearance: "Chat in Studio" (checked) | Toggles the studioChat setting | `renderer/components/command-palette.tsx:839` | [x] | [ ] | [ ] |
 
 
 ## Studio ⌘1 and Sources ⌘2
@@ -208,45 +208,45 @@ until the runtime, visual and accessibility checks above can run.
 | P111 | Space key | Records when idle; stops a recording; asks to end a livestream | `renderer/components/tabs/studio-tab.tsx:137` | [x] | [ ] | [ ] |
 | P112 | Space yields | Ignored while a dialog, menu, focused control or repeat owns it | `renderer/lib/studio-space-shortcut.ts:1` | [x] | [ ] | [ ] |
 | P113 | Responsive layout | Inspector sits beside preview from 720 px; narrower, transport leads | `renderer/components/tabs/studio-tab.tsx:185` | [x] | [ ] | [ ] |
-| P114 | "Session inspector" aside | Holds cloud notice, Session, Chat, Audio, Sources, Takeover | `renderer/components/tabs/studio-tab.tsx:225` | [ ] | [ ] | [ ] |
-| P115 | Retro LCD switch | Settings → General Retro LCD swaps every inspector section to LCD | `renderer/components/tabs/studio-tab.tsx:72` | [ ] | [ ] | [ ] |
-| P116 | "Preview" section | Holds the preview stage; untitled when docked | `renderer/components/tabs/studio-tab.tsx:480` | [ ] | [ ] | [ ] |
-| P117 | Preview health alert + "Retry preview" | Degraded preview error, with retry | `renderer/components/tabs/studio-tab.tsx:437` | [ ] | [ ] | [ ] |
-| P118 | "Open Health" (preview alert) | Opens Health page | `renderer/components/tabs/studio-tab.tsx:449` | [ ] | [ ] | [ ] |
-| P119 | Blocked jump "Open Destinations" | Go Live blocked: entitlement or destination not set up | `renderer/components/tabs/studio-tab.tsx:516` | [ ] | [ ] | [ ] |
-| P120 | Blocked jump "Open Health" | Recorder (ffmpeg) unavailable blocks Record | `renderer/components/tabs/studio-tab.tsx:506` | [ ] | [ ] | [ ] |
-| P121 | Loading skeletons | Scenes, Chat, Audio placeholders while chunks load | `renderer/components/tabs/studio-tab.tsx:352` | [ ] | [ ] | [ ] |
-| P122 | Show stage swap | Show stage replaces Preview while talk-show room is open | `renderer/components/tabs/studio-tab.tsx:402` | [ ] | [ ] | [ ] |
-| P123 | Talk-show outputs on transport | Room open: Record/Go Live drive cloud recording/live | `renderer/components/tabs/studio-tab.tsx:278` | [ ] | [ ] | [ ] |
+| P114 | "Session inspector" aside | Holds cloud notice, Session, Chat, Audio, Sources, Takeover | `renderer/components/tabs/studio-tab.tsx:225` | [x] | [ ] | [ ] |
+| P115 | Retro LCD switch | Settings → General Retro LCD swaps every inspector section to LCD | `renderer/components/tabs/studio-tab.tsx:72` | [x] | [ ] | [ ] |
+| P116 | "Preview" section | Holds the preview stage; untitled when docked | `renderer/components/tabs/studio-tab.tsx:480` | [x] | [ ] | [ ] |
+| P117 | Preview health alert + "Retry preview" | Degraded preview error, with retry | `renderer/components/tabs/studio-tab.tsx:437` | [x] | [ ] | [ ] |
+| P118 | "Open Health" (preview alert) | Opens Health page | `renderer/components/tabs/studio-tab.tsx:449` | [x] | [ ] | [ ] |
+| P119 | Blocked jump "Open Destinations" | Go Live blocked: entitlement or destination not set up | `renderer/components/tabs/studio-tab.tsx:516` | [x] | [ ] | [ ] |
+| P120 | Blocked jump "Open Health" | Recorder (ffmpeg) unavailable blocks Record | `renderer/components/tabs/studio-tab.tsx:506` | [x] | [ ] | [ ] |
+| P121 | Loading skeletons | Scenes, Chat, Audio placeholders while chunks load | `renderer/components/tabs/studio-tab.tsx:352` | [x] | [ ] | [ ] |
+| P122 | Show stage swap | Show stage replaces Preview while talk-show room is open | `renderer/components/tabs/studio-tab.tsx:402` | [x] | [ ] | [ ] |
+| P123 | Talk-show outputs on transport | Room open: Record/Go Live drive cloud recording/live | `renderer/components/tabs/studio-tab.tsx:278` | [x] | [ ] | [ ] |
 
 ### Preview stage (docked / detached), preview-stage.tsx
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P124 | "Preview is closed" empty state | Says Preview can open here or in its own window | `renderer/components/preview-stage.tsx:224` | [ ] | [ ] | [ ] |
-| P125 | "Show here" (closed) | Opens Preview docked in Studio; shows ⌘P when docked mode | `renderer/components/preview-stage.tsx:619` | [ ] | [ ] | [ ] |
-| P126 | "Open in its own window" | Opens floating Preview window; shows ⌘P when floating mode | `renderer/components/preview-stage.tsx:629` | [ ] | [ ] | [ ] |
-| P127 | ⌘P / Ctrl+P | Opens Preview in remembered mode | `renderer/lib/shortcuts.ts:70` | [ ] | [ ] | [ ] |
-| P128 | "Preview is open in its own window" | Floating-state status with detail and fallback path label | `renderer/components/preview-stage.tsx:218` | [ ] | [ ] | [ ] |
-| P129 | "Show here" (floating) | Moves floating Preview into Studio (dock) | `renderer/components/preview-stage.tsx:589` | [ ] | [ ] | [ ] |
-| P130 | "Bring to front" | Raises the floating Preview window | `renderer/components/preview-stage.tsx:593` | [ ] | [ ] | [ ] |
-| P131 | "Close Preview" | Closes the floating Preview window | `renderer/components/preview-stage.tsx:596` | [ ] | [ ] | [ ] |
-| P132 | "Keep on top of other apps" switch | Floating Preview always-on-top | `renderer/components/preview-stage.tsx:605` | [ ] | [ ] | [ ] |
-| P133 | Permission fix button ("Allow…"/"Reopen Videorc"/"Open System Settings…"/"Open Permissions") | Fixes missing camera/screen grant blocking preview *(wording per OS (apps/desktop/src/renderer/src/lib/system-access-view.ts))* | `renderer/components/preview-stage.tsx:599` | [ ] | [ ] | [ ] |
-| P134 | Docked surface slot | Native preview glued over slot, true canvas aspect *(macOS CAMetalLayer in-window; child window elsewhere (preview-stage.tsx:287))* | `renderer/components/preview-stage.tsx:362` | [ ] | [ ] | [ ] |
-| P135 | Docked startup card ("Step n of N", "Open Sources") | Shows startup step until first frame; opens Sources | `renderer/components/preview-startup-card.tsx:22` | [ ] | [ ] | [ ] |
-| P136 | Docked hidden-reason text | "Placing preview…", hidden under window/scrolled/fullscreen messages | `renderer/components/preview-stage.tsx:449` | [ ] | [ ] | [ ] |
-| P137 | "Waiting for the first frame…" | Docked slot text before frame | `renderer/components/preview-stage.tsx:444` | [ ] | [ ] | [ ] |
-| P138 | Checking spinner label | Preview holds picture while performance check runs | `renderer/components/preview-stage.tsx:397` | [ ] | [ ] | [ ] |
-| P139 | "Pop out" | Moves docked Preview to its own window | `renderer/components/preview-stage.tsx:412` | [ ] | [ ] | [ ] |
-| P140 | "Close" (docked) | Closes docked Preview | `renderer/components/preview-stage.tsx:416` | [ ] | [ ] | [ ] |
-| P141 | Supervisor states | "Opening preview…", "Closing preview…", "Preview failed", "Preview needs permission", "Preview is recovering" | `renderer/components/preview-stage.tsx:684` | [ ] | [ ] | [ ] |
-| P142 | "Using a slower preview path" | Names non-native fallback path *(macOS + Windows only (preview-stage.tsx:827); not for Windows proof surface (:836))* | `renderer/components/preview-stage.tsx:818` | [ ] | [ ] | n/a |
+| P124 | "Preview is closed" empty state | Says Preview can open here or in its own window | `renderer/components/preview-stage.tsx:224` | [x] | [ ] | [ ] |
+| P125 | "Show here" (closed) | Opens Preview docked in Studio; shows ⌘P when docked mode | `renderer/components/preview-stage.tsx:619` | [x] | [ ] | [ ] |
+| P126 | "Open in its own window" | Opens floating Preview window; shows ⌘P when floating mode | `renderer/components/preview-stage.tsx:629` | [x] | [ ] | [ ] |
+| P127 | ⌘P / Ctrl+P | Opens Preview in remembered mode | `renderer/lib/shortcuts.ts:70` | [x] | [ ] | [ ] |
+| P128 | "Preview is open in its own window" | Floating-state status with detail and fallback path label | `renderer/components/preview-stage.tsx:218` | [x] | [ ] | [ ] |
+| P129 | "Show here" (floating) | Moves floating Preview into Studio (dock) | `renderer/components/preview-stage.tsx:589` | [x] | [ ] | [ ] |
+| P130 | "Bring to front" | Raises the floating Preview window | `renderer/components/preview-stage.tsx:593` | [x] | [ ] | [ ] |
+| P131 | "Close Preview" | Closes the floating Preview window | `renderer/components/preview-stage.tsx:596` | [x] | [ ] | [ ] |
+| P132 | "Keep on top of other apps" switch | Floating Preview always-on-top | `renderer/components/preview-stage.tsx:605` | [x] | [ ] | [ ] |
+| P133 | Permission fix button ("Allow…"/"Reopen Videorc"/"Open System Settings…"/"Open Permissions") | Fixes missing camera/screen grant blocking preview *(wording per OS (apps/desktop/src/renderer/src/lib/system-access-view.ts))* | `renderer/components/preview-stage.tsx:599` | [x] | [ ] | [ ] |
+| P134 | Docked surface slot | Native preview glued over slot, true canvas aspect *(macOS CAMetalLayer in-window; child window elsewhere (preview-stage.tsx:287))* | `renderer/components/preview-stage.tsx:362` | [x] | [ ] | [ ] |
+| P135 | Docked startup card ("Step n of N", "Open Sources") | Shows startup step until first frame; opens Sources | `renderer/components/preview-startup-card.tsx:22` | [x] | [ ] | [ ] |
+| P136 | Docked hidden-reason text | "Placing preview…", hidden under window/scrolled/fullscreen messages | `renderer/components/preview-stage.tsx:449` | [x] | [ ] | [ ] |
+| P137 | "Waiting for the first frame…" | Docked slot text before frame | `renderer/components/preview-stage.tsx:444` | [x] | [ ] | [ ] |
+| P138 | Checking spinner label | Preview holds picture while performance check runs | `renderer/components/preview-stage.tsx:397` | [x] | [ ] | [ ] |
+| P139 | "Pop out" | Moves docked Preview to its own window | `renderer/components/preview-stage.tsx:412` | [x] | [ ] | [ ] |
+| P140 | "Close" (docked) | Closes docked Preview | `renderer/components/preview-stage.tsx:416` | [x] | [ ] | [ ] |
+| P141 | Supervisor states | "Opening preview…", "Closing preview…", "Preview failed", "Preview needs permission", "Preview is recovering" | `renderer/components/preview-stage.tsx:684` | [x] | [ ] | [ ] |
+| P142 | "Using a slower preview path" | Names non-native fallback path *(macOS + Windows only (preview-stage.tsx:827); not for Windows proof surface (:836))* | `renderer/components/preview-stage.tsx:818` | [x] | [ ] | n/a |
 | P143 | "Preview runs on the CPU" | No native surface; Open preview / Retry *(Linux only)* | `renderer/components/preview-stage.tsx:245` | n/a | n/a | [ ] |
-| P144 | "The fast preview is off" | Native surface disabled warning *(macOS/Windows)* | `renderer/components/preview-stage.tsx:253` | [ ] | [ ] | n/a |
-| P145 | "Open preview" (no native surface) | Opens Preview window, with ⌘P | `renderer/components/preview-stage.tsx:652` | [ ] | [ ] | [ ] |
-| P146 | "Retry preview" (card) | Retries preview pipeline | `renderer/components/preview-stage.tsx:660` | [ ] | [ ] | [ ] |
-| P147 | Room-open card + "Close the room" | Preview replaced by Show stage; closes room | `renderer/components/preview-stage.tsx:188` | [ ] | [ ] | [ ] |
+| P144 | "The fast preview is off" | Native surface disabled warning *(macOS/Windows)* | `renderer/components/preview-stage.tsx:253` | [x] | [ ] | n/a |
+| P145 | "Open preview" (no native surface) | Opens Preview window, with ⌘P | `renderer/components/preview-stage.tsx:652` | [x] | [ ] | [ ] |
+| P146 | "Retry preview" (card) | Retries preview pipeline | `renderer/components/preview-stage.tsx:660` | [x] | [ ] | [ ] |
+| P147 | Room-open card + "Close the room" | Preview replaced by Show stage; closes room | `renderer/components/preview-stage.tsx:188` | [x] | [ ] | [ ] |
 
 ### Session transport (session-panel.tsx SessionTransport)
 
@@ -254,29 +254,29 @@ until the runtime, visual and accessibility checks above can run.
 | --- | --- | --- | --- | :-: | :-: | :-: |
 | P148 | "Record" (Space chip) | Starts recording; lit while starting/running | `renderer/components/studio/session-panel.tsx:168` | [x] | [ ] | [ ] |
 | P149 | Record → "Stop recording"/"Stopping…"/"Force stop"/"Cancel livestream"/"End livestream" | Same button stops session per state | `renderer/lib/studio-session-view.ts:124` | [x] | [ ] | [ ] |
-| P150 | "Go Live" / "Checking…" | Starts record+stream; preflight checks state | `renderer/components/studio/session-panel.tsx:186` | [ ] | [ ] | [ ] |
-| P151 | Go Live → "End livestream" | While room live, ends talk-show livestream | `renderer/components/go-live-button.tsx:19` | [ ] | [ ] | [ ] |
+| P150 | "Go Live" / "Checking…" | Starts record+stream; preflight checks state | `renderer/components/studio/session-panel.tsx:186` | [x] | [ ] | [ ] |
+| P151 | Go Live → "End livestream" | While room live, ends talk-show livestream | `renderer/components/go-live-button.tsx:19` | [x] | [ ] | [ ] |
 | P152 | Hidden Go Live while active | Go Live disappears while a local session runs | `renderer/components/studio/session-panel.tsx:181` | [x] | [ ] | [ ] |
 | P153 | Disabled-reason tooltips | Hover/focus tells why Record or Go Live is off | `renderer/components/studio/session-panel.tsx:167` | [x] | [ ] | [ ] |
 | P154 | Stop note "Your recording stops too." | Explains End livestream also stops recording | `renderer/components/studio/session-panel.tsx:200` | [x] | [ ] | [ ] |
-| P155 | Blocked reason line + jump link | One line why start is blocked, link to fix page | `renderer/components/studio/session-panel.tsx:233` | [ ] | [ ] | [ ] |
+| P155 | Blocked reason line + jump link | One line why start is blocked, link to fix page | `renderer/components/studio/session-panel.tsx:233` | [x] | [ ] | [ ] |
 | P156 | Alert "Stopping is taking longer than expected" | Explains Force stop when stop overruns | `renderer/components/studio/session-panel.tsx:210` | [x] | [ ] | [ ] |
-| P157 | "End livestream?" dialog (shell) | Confirms ending livestream; "Keep streaming"/hand-off options | `renderer/components/end-livestream-dialog.tsx:81` | [ ] | [ ] | [ ] |
-| P158 | Go Live confirmation dialog (shell) | Opened by Go Live; ⌘Enter confirms | `renderer/lib/shortcuts.ts:64` | [ ] | [ ] | [ ] |
+| P157 | "End livestream?" dialog (shell) | Confirms ending livestream; "Keep streaming"/hand-off options | `renderer/components/end-livestream-dialog.tsx:81` | [x] | [ ] | [ ] |
+| P158 | Go Live confirmation dialog (shell) | Opened by Go Live; ⌘Enter confirms | `renderer/lib/shortcuts.ts:64` | [x] | [ ] | [ ] |
 
 ### Session panel rows and alerts (session-panel.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P159 | "Livestream" row | Destinations summary; opens Destinations | `renderer/components/studio/session-panel.tsx:296` | [ ] | [ ] | [ ] |
-| P160 | "Output" row | Recording/encode summary; opens Recording settings panel | `renderer/components/studio/session-panel.tsx:302` | [ ] | [ ] | [ ] |
-| P161 | "Destinations" row (live) | "n of n on air" status dot; opens Destinations | `renderer/components/studio/session-panel.tsx:532` | [ ] | [ ] | [ ] |
+| P159 | "Livestream" row | Destinations summary; opens Destinations | `renderer/components/studio/session-panel.tsx:296` | [x] | [ ] | [ ] |
+| P160 | "Output" row | Recording/encode summary; opens Recording settings panel | `renderer/components/studio/session-panel.tsx:302` | [x] | [ ] | [ ] |
+| P161 | "Destinations" row (live) | "n of n on air" status dot; opens Destinations | `renderer/components/studio/session-panel.tsx:532` | [x] | [ ] | [ ] |
 | P162 | Per-destination problem rows | One row per problem: the destination's name, then its word ("Ended", "Failed", "Reconnecting…", "Not receiving"); opens Destinations | `renderer/components/studio/session-panel.tsx:547` | [x] | [ ] | [ ] |
-| P163 | "Stream" health row (live) | Healthy or failing stage; opens Health | `renderer/components/studio/session-panel.tsx:597` | [ ] | [ ] | [ ] |
-| P164 | "Sidekick" (co-host) row (live) | Buddy presence/alerts; hint lines; opens Stream Manager | `renderer/components/studio/session-panel.tsx:639` | [ ] | [ ] | [ ] |
-| P165 | "Guests" row (room open) | "Room open · n backstage"; opens Guests page | `renderer/components/studio/guests-session-row.tsx:22` | [ ] | [ ] | [ ] |
-| P166 | Agents row + "Stop" | "Claude Desktop connected"; Stop cuts all agents | `renderer/components/studio/agents-session-row.tsx:54` | [ ] | [ ] | [ ] |
-| P167 | Watchdog alert cards | One card per open watchdog problem | `renderer/components/studio/session-panel.tsx:401` | [ ] | [ ] | [ ] |
+| P163 | "Stream" health row (live) | Healthy or failing stage; opens Health | `renderer/components/studio/session-panel.tsx:597` | [x] | [ ] | [ ] |
+| P164 | "Sidekick" (co-host) row (live) | Buddy presence/alerts; hint lines; opens Stream Manager | `renderer/components/studio/session-panel.tsx:639` | [x] | [ ] | [ ] |
+| P165 | "Guests" row (room open) | "Room open · n backstage"; opens Guests page | `renderer/components/studio/guests-session-row.tsx:22` | [x] | [ ] | [ ] |
+| P166 | Agents row + "Stop" | "Claude Desktop connected"; Stop cuts all agents | `renderer/components/studio/agents-session-row.tsx:54` | [x] | [ ] | [ ] |
+| P167 | Watchdog alert cards | One card per open watchdog problem | `renderer/components/studio/session-panel.tsx:401` | [x] | [ ] | [ ] |
 | P168 | Alert "Couldn't start" + "Retry"/"Dismiss" | Persistent refused-start reason with retry | `renderer/components/studio/session-panel.tsx:417` | [x] | [ ] | [ ] |
 | P169 | Alert "Camera opened twice" | Camera shared between capture paths warning | `renderer/components/studio/session-panel.tsx:445` | [x] | [ ] | [ ] |
 | P170 | Session runtime notice | Mid-session failure/degradation alert | `renderer/components/studio/session-panel.tsx:451` | [x] | [ ] | [ ] |
@@ -334,64 +334,64 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P200 | "Microphone" row title | Microphone channel strip | `renderer/components/studio/audio-section.tsx:368` | [ ] | [ ] | [ ] |
-| P201 | "Muted"/takeover status badge | Says microphone is muted or held by takeover | `renderer/components/studio/audio-section.tsx:334` | [ ] | [ ] | [ ] |
-| P202 | Mute shortcut keys chip | Shows bound global mic-mute key | `renderer/components/studio/audio-section.tsx:340` | [ ] | [ ] | [ ] |
-| P203 | "Mute microphone" toggle | Mutes/unmutes mic; tooltip with shortcut | `renderer/components/studio/audio-section.tsx:341` | [ ] | [ ] | [ ] |
-| P204 | Microphone picker ("Off", "Finding microphones…") | Switches microphone live | `renderer/components/studio/audio-section.tsx:375` | [ ] | [ ] | [ ] |
-| P205 | Microphone level meter | Live level; dims when muted | `renderer/components/studio/audio-section.tsx:397` | [ ] | [ ] | [ ] |
-| P206 | Takeover hold hint | Why takeover is silencing the mic | `renderer/components/studio/audio-section.tsx:408` | [ ] | [ ] | [ ] |
-| P207 | Microphone "Gain" fader | −24…+24 dB, detent 0; readout resets "Reset to 0 dB" | `renderer/components/audio/gain-faders.tsx:42` | [ ] | [ ] | [ ] |
-| P208 | Session level unavailable line | Says bus sends no level | `renderer/components/studio/audio-section.tsx:416` | [ ] | [ ] | [ ] |
-| P209 | "System audio" row | Switch, level, gain, issues *(macOS always; Linux/older Windows hidden (apps/desktop/src/renderer/src/lib/system-audio.ts:34))* | `renderer/components/studio/audio-section.tsx:490` | [ ] | [ ] | [ ] |
-| P210 | "System audio" switch | Turns system audio capture on/off; shortcut tooltip *(as above)* | `renderer/components/studio/audio-section.tsx:479` | [ ] | [ ] | [ ] |
-| P211 | System audio status chip | On/Off/joining state words *(as above)* | `renderer/components/studio/audio-section.tsx:505` | [ ] | [ ] | [ ] |
-| P212 | System audio meter | Level while recording/live/Clips bus runs *(as above)* | `renderer/components/studio/audio-section.tsx:511` | [ ] | [ ] | [ ] |
-| P213 | Clips-off idle line | Says level shows only with Clips/session *(as above)* | `renderer/components/studio/audio-section.tsx:220` | [ ] | [ ] | [ ] |
-| P214 | System audio "Gain" fader | System audio gain with reset readout *(as above)* | `renderer/components/audio/gain-faders.tsx:82` | [ ] | [ ] | [ ] |
-| P215 | Alert "System audio needs Screen Recording permission." + "Open Permissions" | Permission missing; opens Settings → Permissions *(macOS (permission))* | `renderer/components/studio/audio-section.tsx:464` | [ ] | n/a | n/a |
-| P216 | Issue alert + "Open Permissions" (unavailable) | System audio unavailable fix *(macOS only)* | `renderer/components/studio/audio-section.tsx:470` | [ ] | n/a | n/a |
-| P217 | Echo alert + "Resume" | Echo guard paused system audio; resume *(all where shown)* | `renderer/components/studio/audio-section.tsx:474` | [ ] | [ ] | [ ] |
-| P218 | ⌘/Ctrl+↑/↓ | Moves focus between channel strips | `renderer/components/studio/audio-section.tsx:240` | [ ] | [ ] | [ ] |
-| P219 | "Open Audio" focus target | Notifications land on mic picker | `renderer/components/studio/audio-section.tsx:82` | [ ] | [ ] | [ ] |
+| P200 | "Microphone" row title | Microphone channel strip | `renderer/components/studio/audio-section.tsx:368` | [x] | [ ] | [ ] |
+| P201 | "Muted"/takeover status badge | Says microphone is muted or held by takeover | `renderer/components/studio/audio-section.tsx:334` | [x] | [ ] | [ ] |
+| P202 | Mute shortcut keys chip | Shows bound global mic-mute key | `renderer/components/studio/audio-section.tsx:340` | [x] | [ ] | [ ] |
+| P203 | "Mute microphone" toggle | Mutes/unmutes mic; tooltip with shortcut | `renderer/components/studio/audio-section.tsx:341` | [x] | [ ] | [ ] |
+| P204 | Microphone picker ("Off", "Finding microphones…") | Switches microphone live | `renderer/components/studio/audio-section.tsx:375` | [x] | [ ] | [ ] |
+| P205 | Microphone level meter | Live level; dims when muted | `renderer/components/studio/audio-section.tsx:397` | [x] | [ ] | [ ] |
+| P206 | Takeover hold hint | Why takeover is silencing the mic | `renderer/components/studio/audio-section.tsx:408` | [x] | [ ] | [ ] |
+| P207 | Microphone "Gain" fader | −24…+24 dB, detent 0; readout resets "Reset to 0 dB" | `renderer/components/audio/gain-faders.tsx:42` | [x] | [ ] | [ ] |
+| P208 | Session level unavailable line | Says bus sends no level | `renderer/components/studio/audio-section.tsx:416` | [x] | [ ] | [ ] |
+| P209 | "System audio" row | Switch, level, gain, issues *(macOS always; Linux/older Windows hidden (apps/desktop/src/renderer/src/lib/system-audio.ts:34))* | `renderer/components/studio/audio-section.tsx:490` | [x] | [ ] | [ ] |
+| P210 | "System audio" switch | Turns system audio capture on/off; shortcut tooltip *(as above)* | `renderer/components/studio/audio-section.tsx:479` | [x] | [ ] | [ ] |
+| P211 | System audio status chip | On/Off/joining state words *(as above)* | `renderer/components/studio/audio-section.tsx:505` | [x] | [ ] | [ ] |
+| P212 | System audio meter | Level while recording/live/Clips bus runs *(as above)* | `renderer/components/studio/audio-section.tsx:511` | [x] | [ ] | [ ] |
+| P213 | Clips-off idle line | Says level shows only with Clips/session *(as above)* | `renderer/components/studio/audio-section.tsx:220` | [x] | [ ] | [ ] |
+| P214 | System audio "Gain" fader | System audio gain with reset readout *(as above)* | `renderer/components/audio/gain-faders.tsx:82` | [x] | [ ] | [ ] |
+| P215 | Alert "System audio needs Screen Recording permission." + "Open Permissions" | Permission missing; opens Settings → Permissions *(macOS (permission))* | `renderer/components/studio/audio-section.tsx:464` | [x] | n/a | n/a |
+| P216 | Issue alert + "Open Permissions" (unavailable) | System audio unavailable fix *(macOS only)* | `renderer/components/studio/audio-section.tsx:470` | [x] | n/a | n/a |
+| P217 | Echo alert + "Resume" | Echo guard paused system audio; resume *(all where shown)* | `renderer/components/studio/audio-section.tsx:474` | [x] | [ ] | [ ] |
+| P218 | ⌘/Ctrl+↑/↓ | Moves focus between channel strips | `renderer/components/studio/audio-section.tsx:240` | [x] | [ ] | [ ] |
+| P219 | "Open Audio" focus target | Notifications land on mic picker | `renderer/components/studio/audio-section.tsx:82` | [x] | [ ] | [ ] |
 
 ### Audio section, Retro LCD look (retro-lcd-studio.tsx RetroAudioSectionView)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P220 | LCD "Microphone" header | Channel title on LCD screen | `renderer/components/studio/retro-lcd-studio.tsx:336` | [ ] | [ ] | [ ] |
-| P221 | Mute key "Mute"/"Muted" | Toggles mic mute, lit when muted, shortcut text | `renderer/components/studio/retro-lcd-studio.tsx:348` | [ ] | [ ] | [ ] |
-| P222 | LCD "Device" picker | Chooses microphone in LCD popup | `renderer/components/studio/retro-lcd-studio.tsx:377` | [ ] | [ ] | [ ] |
-| P223 | Switch status line | Live mic switch progress on screen | `renderer/components/studio/retro-lcd-studio.tsx:394` | [ ] | [ ] | [ ] |
-| P224 | LCD mic meter (CLIP flag, no scale) | Level, held peak, digits, clip | `renderer/components/studio/retro-lcd-studio.tsx:406` | [ ] | [ ] | [ ] |
-| P225 | Takeover hold message | "Muted by takeover" sentence | `renderer/components/studio/retro-lcd-studio.tsx:418` | [ ] | [ ] | [ ] |
-| P226 | Session level unavailable message | No backend level | `renderer/components/studio/retro-lcd-studio.tsx:424` | [ ] | [ ] | [ ] |
-| P227 | LCD Gain fader | Microphone gain | `renderer/components/studio/retro-lcd-studio.tsx:429` | [ ] | [ ] | [ ] |
-| P228 | LCD "System audio" header + switch | Toggles system audio *(macOS; hidden Linux/older Windows)* | `renderer/components/studio/retro-lcd-studio.tsx:460` | [ ] | [ ] | [ ] |
-| P229 | "Needs permission" | Opens Settings → Permissions *(macOS)* | `renderer/components/studio/retro-lcd-studio.tsx:697` | [ ] | n/a | n/a |
-| P230 | "Resume" (echo) | Resumes after echo guard pause *(where shown)* | `renderer/components/studio/retro-lcd-studio.tsx:708` | [ ] | [ ] | [ ] |
-| P231 | Issue word with tooltip | Short system-audio issue label *(where shown)* | `renderer/components/studio/retro-lcd-studio.tsx:714` | [ ] | [ ] | [ ] |
-| P232 | LCD system audio meter + Gain | Level and gain *(where shown)* | `renderer/components/studio/retro-lcd-studio.tsx:469` | [ ] | [ ] | [ ] |
+| P220 | LCD "Microphone" header | Channel title on LCD screen | `renderer/components/studio/retro-lcd-studio.tsx:336` | [x] | [ ] | [ ] |
+| P221 | Mute key "Mute"/"Muted" | Toggles mic mute, lit when muted, shortcut text | `renderer/components/studio/retro-lcd-studio.tsx:348` | [x] | [ ] | [ ] |
+| P222 | LCD "Device" picker | Chooses microphone in LCD popup | `renderer/components/studio/retro-lcd-studio.tsx:377` | [x] | [ ] | [ ] |
+| P223 | Switch status line | Live mic switch progress on screen | `renderer/components/studio/retro-lcd-studio.tsx:394` | [x] | [ ] | [ ] |
+| P224 | LCD mic meter (CLIP flag, no scale) | Level, held peak, digits, clip | `renderer/components/studio/retro-lcd-studio.tsx:406` | [x] | [ ] | [ ] |
+| P225 | Takeover hold message | "Muted by takeover" sentence | `renderer/components/studio/retro-lcd-studio.tsx:418` | [x] | [ ] | [ ] |
+| P226 | Session level unavailable message | No backend level | `renderer/components/studio/retro-lcd-studio.tsx:424` | [x] | [ ] | [ ] |
+| P227 | LCD Gain fader | Microphone gain | `renderer/components/studio/retro-lcd-studio.tsx:429` | [x] | [ ] | [ ] |
+| P228 | LCD "System audio" header + switch | Toggles system audio *(macOS; hidden Linux/older Windows)* | `renderer/components/studio/retro-lcd-studio.tsx:460` | [x] | [ ] | [ ] |
+| P229 | "Needs permission" | Opens Settings → Permissions *(macOS)* | `renderer/components/studio/retro-lcd-studio.tsx:697` | [x] | n/a | n/a |
+| P230 | "Resume" (echo) | Resumes after echo guard pause *(where shown)* | `renderer/components/studio/retro-lcd-studio.tsx:708` | [x] | [ ] | [ ] |
+| P231 | Issue word with tooltip | Short system-audio issue label *(where shown)* | `renderer/components/studio/retro-lcd-studio.tsx:714` | [x] | [ ] | [ ] |
+| P232 | LCD system audio meter + Gain | Level and gain *(where shown)* | `renderer/components/studio/retro-lcd-studio.tsx:469` | [x] | [ ] | [ ] |
 
 ### Retro LCD transport, Session, Sources, Takeover (retro-lcd-studio.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P233 | LCD "Record" key (Space text) | Starts recording / "Stop recording" for room | `renderer/components/studio/retro-lcd-studio.tsx:132` | [ ] | [ ] | [ ] |
-| P234 | LCD "Go Live"/"Checking…"/"End livestream" key | Starts or ends livestream | `renderer/components/studio/retro-lcd-studio.tsx:151` | [ ] | [ ] | [ ] |
-| P235 | LCD stop key (stopLabel) | Stops active session | `renderer/components/studio/retro-lcd-studio.tsx:120` | [ ] | [ ] | [ ] |
-| P236 | LCD stop note / blocked line + action | Explanations and jump to fix | `renderer/components/studio/retro-lcd-studio.tsx:169` | [ ] | [ ] | [ ] |
-| P237 | Stop overrun alert | Force-stop explanation | `renderer/components/studio/retro-lcd-studio.tsx:180` | [ ] | [ ] | [ ] |
-| P238 | LCD Session rows | Livestream, Output, Destinations, Stream, Sidekick, Guests, Agents | `renderer/components/studio/retro-lcd-studio.tsx:227` | [ ] | [ ] | [ ] |
-| P239 | LCD Camera picker + "Open Sources" cog | Switches camera; cog opens Sources | `renderer/components/studio/retro-lcd-studio.tsx:518` | [ ] | [ ] | [ ] |
-| P240 | LCD "Background" row | Opens camera background picker popover | `renderer/components/studio/retro-lcd-studio.tsx:598` | [ ] | [ ] | [ ] |
-| P241 | LCD stage / system-effect lines | Background cover and OS effect notes | `renderer/components/studio/retro-lcd-studio.tsx:643` | [ ] | [ ] | [ ] |
-| P242 | LCD "Captions" row | Captions status; opens Captions panel | `renderer/components/studio/retro-lcd-studio.tsx:546` | [ ] | [ ] | [ ] |
-| P243 | LCD "Chat" row | "n new" or Stream Manager + key; opens it | `renderer/components/studio/retro-lcd-studio.tsx:562` | [ ] | [ ] | [ ] |
-| P244 | LCD "Takeover" header + "Open Images" cog | Opens Images | `renderer/components/studio/retro-lcd-studio.tsx:741` | [ ] | [ ] | [ ] |
-| P245 | LCD "None yet" / "Add in Images" | Empty takeover state; opens Images | `renderer/components/studio/retro-lcd-studio.tsx:746` | [ ] | [ ] | [ ] |
-| P246 | LCD takeover press rows | Toggle takeover covering output | `renderer/components/studio/retro-lcd-studio.tsx:758` | [ ] | [ ] | [ ] |
-| P247 | LCD takeover hint | What a click does / connection reason | `renderer/components/studio/retro-lcd-studio.tsx:773` | [ ] | [ ] | [ ] |
+| P233 | LCD "Record" key (Space text) | Starts recording / "Stop recording" for room | `renderer/components/studio/retro-lcd-studio.tsx:132` | [x] | [ ] | [ ] |
+| P234 | LCD "Go Live"/"Checking…"/"End livestream" key | Starts or ends livestream | `renderer/components/studio/retro-lcd-studio.tsx:151` | [x] | [ ] | [ ] |
+| P235 | LCD stop key (stopLabel) | Stops active session | `renderer/components/studio/retro-lcd-studio.tsx:120` | [x] | [ ] | [ ] |
+| P236 | LCD stop note / blocked line + action | Explanations and jump to fix | `renderer/components/studio/retro-lcd-studio.tsx:169` | [x] | [ ] | [ ] |
+| P237 | Stop overrun alert | Force-stop explanation | `renderer/components/studio/retro-lcd-studio.tsx:180` | [x] | [ ] | [ ] |
+| P238 | LCD Session rows | Livestream, Output, Destinations, Stream, Sidekick, Guests, Agents | `renderer/components/studio/retro-lcd-studio.tsx:227` | [x] | [ ] | [ ] |
+| P239 | LCD Camera picker + "Open Sources" cog | Switches camera; cog opens Sources | `renderer/components/studio/retro-lcd-studio.tsx:518` | [x] | [ ] | [ ] |
+| P240 | LCD "Background" row | Opens camera background picker popover | `renderer/components/studio/retro-lcd-studio.tsx:598` | [x] | [ ] | [ ] |
+| P241 | LCD stage / system-effect lines | Background cover and OS effect notes | `renderer/components/studio/retro-lcd-studio.tsx:643` | [x] | [ ] | [ ] |
+| P242 | LCD "Captions" row | Captions status; opens Captions panel | `renderer/components/studio/retro-lcd-studio.tsx:546` | [x] | [ ] | [ ] |
+| P243 | LCD "Chat" row | "n new" or Stream Manager + key; opens it | `renderer/components/studio/retro-lcd-studio.tsx:562` | [x] | [ ] | [ ] |
+| P244 | LCD "Takeover" header + "Open Images" cog | Opens Images | `renderer/components/studio/retro-lcd-studio.tsx:741` | [x] | [ ] | [ ] |
+| P245 | LCD "None yet" / "Add in Images" | Empty takeover state; opens Images | `renderer/components/studio/retro-lcd-studio.tsx:746` | [x] | [ ] | [ ] |
+| P246 | LCD takeover press rows | Toggle takeover covering output | `renderer/components/studio/retro-lcd-studio.tsx:758` | [x] | [ ] | [ ] |
+| P247 | LCD takeover hint | What a click does / connection reason | `renderer/components/studio/retro-lcd-studio.tsx:773` | [x] | [ ] | [ ] |
 
 ### Quick settings (quick-settings.tsx)
 
@@ -441,46 +441,46 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P272 | Scenes off notice | "Scenes are off while the room is open…" | `renderer/components/studio/studio-dashboard-bottom-row.tsx:24` | [ ] | [ ] | [ ] |
-| P273 | Order | Scenes, Soundboard, Vertical stream | `renderer/components/studio/studio-dashboard-bottom-row.tsx:22` | [ ] | [ ] | [ ] |
+| P272 | Scenes off notice | "Scenes are off while the room is open…" | `renderer/components/studio/studio-dashboard-bottom-row.tsx:24` | [x] | [ ] | [ ] |
+| P273 | Order | Scenes, Soundboard, Vertical stream | `renderer/components/studio/studio-dashboard-bottom-row.tsx:22` | [x] | [ ] | [ ] |
 
 ### Scenes section (scene-presets.tsx, scenes-gallery.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P274 | "Scenes" header description | Scene keys range "⌘1 to ⌘9 switch them from any app" | `renderer/components/scene/scene-entries.tsx:51` | [ ] | [ ] | [ ] |
-| P275 | "Edit scene" | Opens Scene editor page | `renderer/components/scene-presets.tsx:125` | [ ] | [ ] | [ ] |
-| P276 | "Add scene…" | Opens Add scene picker dialog | `renderer/components/scene-presets.tsx:129` | [ ] | [ ] | [ ] |
-| P277 | "Studio orientation" segmented (16:9 / 9:16) | Switches canvas orientation; locked while recording/live | `renderer/components/scene-presets.tsx:148` | [ ] | [ ] | [ ] |
-| P278 | "Follow the app in front" switch | Auto-switch to app's scene *(macOS only (scene-presets.tsx:166))* | `renderer/components/scene/follow-front-app-switch.tsx:19` | [ ] | n/a | n/a |
-| P279 | Library error line | Scene library read error | `renderer/components/scene-presets.tsx:168` | [ ] | [ ] | [ ] |
-| P280 | Scene card click | Puts scene on stream; repair dialog if sources missing | `renderer/components/scene-presets.tsx:239` | [ ] | [ ] | [ ] |
-| P281 | Drag to reorder | Moves card; position keys follow | `renderer/components/scene-presets.tsx:195` | [ ] | [ ] | [ ] |
-| P282 | ⌥← / ⌥→ | Moves focused card left/right | `renderer/components/scene-presets.tsx:197` | [ ] | [ ] | [ ] |
-| P283 | ⌘K "Add scene…" / Sources "Open Scenes" | Opens picker / scrolls Scenes into view | `renderer/components/scene-presets.tsx:98` | [ ] | [ ] | [ ] |
-| P284 | Scene switch status line | Slow switch: what it waits for | `renderer/components/scene/scene-switch-status.tsx:32` | [ ] | [ ] | [ ] |
-| P285 | Gallery reason + "Open Sources" | Why some scenes can't go on | `renderer/components/scene-presets.tsx:248` | [ ] | [ ] | [ ] |
-| P286 | Scene still pictures | Card thumbnails show screen still *(macOS only; not while recording/live)* | `renderer/components/scene-presets.tsx:67` | [ ] | n/a | n/a |
-| P287 | Loading fallback | "Scenes" skeleton | `renderer/components/studio/scenes-gallery.tsx:53` | [ ] | [ ] | [ ] |
+| P274 | "Scenes" header description | Scene keys range "⌘1 to ⌘9 switch them from any app" | `renderer/components/scene/scene-entries.tsx:51` | [x] | [ ] | [ ] |
+| P275 | "Edit scene" | Opens Scene editor page | `renderer/components/scene-presets.tsx:125` | [x] | [ ] | [ ] |
+| P276 | "Add scene…" | Opens Add scene picker dialog | `renderer/components/scene-presets.tsx:129` | [x] | [ ] | [ ] |
+| P277 | "Studio orientation" segmented (16:9 / 9:16) | Switches canvas orientation; locked while recording/live | `renderer/components/scene-presets.tsx:148` | [x] | [ ] | [ ] |
+| P278 | "Follow the app in front" switch | Auto-switch to app's scene *(macOS only (scene-presets.tsx:166))* | `renderer/components/scene/follow-front-app-switch.tsx:19` | [x] | n/a | n/a |
+| P279 | Library error line | Scene library read error | `renderer/components/scene-presets.tsx:168` | [x] | [ ] | [ ] |
+| P280 | Scene card click | Puts scene on stream; repair dialog if sources missing | `renderer/components/scene-presets.tsx:239` | [x] | [ ] | [ ] |
+| P281 | Drag to reorder | Moves card; position keys follow | `renderer/components/scene-presets.tsx:195` | [x] | [ ] | [ ] |
+| P282 | ⌥← / ⌥→ | Moves focused card left/right | `renderer/components/scene-presets.tsx:197` | [x] | [ ] | [ ] |
+| P283 | ⌘K "Add scene…" / Sources "Open Scenes" | Opens picker / scrolls Scenes into view | `renderer/components/scene-presets.tsx:98` | [x] | [ ] | [ ] |
+| P284 | Scene switch status line | Slow switch: what it waits for | `renderer/components/scene/scene-switch-status.tsx:32` | [x] | [ ] | [ ] |
+| P285 | Gallery reason + "Open Sources" | Why some scenes can't go on | `renderer/components/scene-presets.tsx:248` | [x] | [ ] | [ ] |
+| P286 | Scene still pictures | Card thumbnails show screen still *(macOS only; not while recording/live)* | `renderer/components/scene-presets.tsx:67` | [x] | n/a | n/a |
+| P287 | Loading fallback | "Scenes" skeleton | `renderer/components/studio/scenes-gallery.tsx:53` | [x] | [ ] | [ ] |
 
 ### Scene card (scene-card.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P288 | Thumbnail (layout diagram + still/glyph) | Layout geometry; never live program | `renderer/components/studio/scenes-gallery.tsx:174` | [ ] | [ ] | [ ] |
-| P289 | Name row + check | Name truncates; check marks on-stream scene | `renderer/components/studio/scene-card.tsx:160` | [ ] | [ ] | [ ] |
-| P290 | Meta line + key chips | What it shows / reason / "Applying…"; shortcut keys | `renderer/components/studio/scene-card.tsx:191` | [ ] | [ ] | [ ] |
-| P291 | Key conflict text | Shows conflict instead of key | `renderer/components/scene/scene-shortcut-keys.tsx:35` | [ ] | [ ] | [ ] |
-| P292 | Truncation tooltip | Full name/meta on hover when cut | `renderer/components/studio/scene-card.tsx:218` | [ ] | [ ] | [ ] |
-| P293 | Disabled reason tooltip | Card's own reason on hover/focus | `renderer/components/studio/scene-card.tsx:211` | [ ] | [ ] | [ ] |
-| P294 | ⋯ menu "Rename…" | Opens Rename scene dialog | `renderer/components/scene/scene-dialogs.tsx:288` | [ ] | [ ] | [ ] |
-| P295 | ⋯ "Change screen…" | Opens Change screen picker | `renderer/components/scene/scene-dialogs.tsx:295` | [ ] | [ ] | [ ] |
-| P296 | ⋯ "Set key…" | Opens Set key dialog | `renderer/components/scene/scene-dialogs.tsx:303` | [ ] | [ ] | [ ] |
-| P297 | ⋯ "Follow the app"/"Stop following" | App-scene follow toggle *(macOS (app scenes only exist on macOS))* | `renderer/components/scene/scene-dialogs.tsx:311` | [ ] | n/a | n/a |
-| P298 | ⋯ "Save audio to scene" | Saves mic + system audio into scene | `renderer/components/scene/scene-dialogs.tsx:321` | [ ] | [ ] | [ ] |
-| P299 | ⋯ "Guests in the room…" | Opens guest placement dialog | `renderer/components/scene/scene-dialogs.tsx:338` | [ ] | [ ] | [ ] |
-| P300 | ⋯ "Duplicate" | Copies scene at end | `renderer/components/scene/scene-dialogs.tsx:345` | [ ] | [ ] | [ ] |
-| P301 | ⋯ "Delete" | Opens delete confirmation (last/on-air protected) | `renderer/components/scene/scene-dialogs.tsx:358` | [ ] | [ ] | [ ] |
+| P288 | Thumbnail (layout diagram + still/glyph) | Layout geometry; never live program | `renderer/components/studio/scenes-gallery.tsx:174` | [x] | [ ] | [ ] |
+| P289 | Name row + check | Name truncates; check marks on-stream scene | `renderer/components/studio/scene-card.tsx:160` | [x] | [ ] | [ ] |
+| P290 | Meta line + key chips | What it shows / reason / "Applying…"; shortcut keys | `renderer/components/studio/scene-card.tsx:191` | [x] | [ ] | [ ] |
+| P291 | Key conflict text | Shows conflict instead of key | `renderer/components/scene/scene-shortcut-keys.tsx:35` | [x] | [ ] | [ ] |
+| P292 | Truncation tooltip | Full name/meta on hover when cut | `renderer/components/studio/scene-card.tsx:218` | [x] | [ ] | [ ] |
+| P293 | Disabled reason tooltip | Card's own reason on hover/focus | `renderer/components/studio/scene-card.tsx:211` | [x] | [ ] | [ ] |
+| P294 | ⋯ menu "Rename…" | Opens Rename scene dialog | `renderer/components/scene/scene-dialogs.tsx:288` | [x] | [ ] | [ ] |
+| P295 | ⋯ "Change screen…" | Opens Change screen picker | `renderer/components/scene/scene-dialogs.tsx:295` | [x] | [ ] | [ ] |
+| P296 | ⋯ "Set key…" | Opens Set key dialog | `renderer/components/scene/scene-dialogs.tsx:303` | [x] | [ ] | [ ] |
+| P297 | ⋯ "Follow the app"/"Stop following" | App-scene follow toggle *(macOS (app scenes only exist on macOS))* | `renderer/components/scene/scene-dialogs.tsx:311` | [x] | n/a | n/a |
+| P298 | ⋯ "Save audio to scene" | Saves mic + system audio into scene | `renderer/components/scene/scene-dialogs.tsx:321` | [x] | [ ] | [ ] |
+| P299 | ⋯ "Guests in the room…" | Opens guest placement dialog | `renderer/components/scene/scene-dialogs.tsx:338` | [x] | [ ] | [ ] |
+| P300 | ⋯ "Duplicate" | Copies scene at end | `renderer/components/scene/scene-dialogs.tsx:345` | [x] | [ ] | [ ] |
+| P301 | ⋯ "Delete" | Opens delete confirmation (last/on-air protected) | `renderer/components/scene/scene-dialogs.tsx:358` | [x] | [ ] | [ ] |
 
 ### Scene dialogs (scene-dialogs.tsx, scene-picker-dialog.tsx)
 
@@ -638,7 +638,7 @@ until the runtime, visual and accessibility checks above can run.
 | P406 | "Reopen Videorc to record your screen." | Grant needs relaunch *(macOS)* | `renderer/lib/source-permissions.ts:114` | [x] | n/a | n/a |
 | P407 | Camera / Microphone alerts | Permission required; OS-specific fix path *(macOS + Windows wording (source-permissions.ts:55))* | `renderer/lib/source-permissions.ts:63` | [x] | [ ] | [ ] |
 | P408 | Fix button (actionLabel) | Allow access / opens OS privacy settings *(per OS)* | `renderer/components/sources/source-permission-alerts.tsx:64` | [x] | [ ] | [ ] |
-| P409 | Reveal helper button | "Show helper in …" reveal target *(per OS)* | `renderer/components/sources/source-permission-alerts.tsx:72` | [ ] | [ ] | [ ] |
+| P409 | Reveal helper button | "Show helper in …" reveal target *(per OS)* | `renderer/components/sources/source-permission-alerts.tsx:72` | [x] | [ ] | [ ] |
 | P410 | "Videorc couldn't check every device." + "Open Health" | Device warnings; opens Health | `renderer/components/sources/source-permission-alerts.tsx:82` | [x] | [ ] | [ ] |
 
 ### Video column (video-sources.tsx)
@@ -671,9 +671,9 @@ until the runtime, visual and accessibility checks above can run.
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
 | P426 | "Audio" section description | After gain; or room-mic processing text | `renderer/components/sources/sources-audio-mixer.tsx:235` | [x] | [ ] | [ ] |
-| P427 | "Room microphone" alert | Processing detail for room mic | `renderer/components/sources/sources-audio-mixer.tsx:242` | [ ] | [ ] | [ ] |
-| P428 | Retro LCD meters | Meters drawn as LCD when Retro LCD on | `renderer/components/sources/sources-audio-mixer.tsx:233` | [ ] | [ ] | [ ] |
-| P429 | ⌘/Ctrl+↑/↓ | Moves focus between channel strips | `renderer/components/sources/sources-audio-mixer.tsx:148` | [ ] | [ ] | [ ] |
+| P427 | "Room microphone" alert | Processing detail for room mic | `renderer/components/sources/sources-audio-mixer.tsx:242` | [x] | [ ] | [ ] |
+| P428 | Retro LCD meters | Meters drawn as LCD when Retro LCD on | `renderer/components/sources/sources-audio-mixer.tsx:233` | [x] | [ ] | [ ] |
+| P429 | ⌘/Ctrl+↑/↓ | Moves focus between channel strips | `renderer/components/sources/sources-audio-mixer.tsx:148` | [x] | [ ] | [ ] |
 | P430 | "Microphone" status chip | Muted/silent/takeover/switching state | `renderer/components/sources/sources-audio-mixer.tsx:312` | [x] | [ ] | [ ] |
 | P431 | "Mute microphone" toggle | Mutes mic; shortcut tooltip | `renderer/components/sources/sources-audio-mixer.tsx:445` | [x] | [ ] | [ ] |
 | P432 | Microphone picker ("Off") | Switches microphone live | `renderer/components/sources/sources-audio-mixer.tsx:289` | [x] | [ ] | [ ] |
@@ -694,8 +694,8 @@ until the runtime, visual and accessibility checks above can run.
 | P447 | More: "Pause if your stream echoes back" | Echo guard switch *(as above)* | `renderer/components/sources/sources-audio-mixer.tsx:783` | [x] | [ ] | [ ] |
 | P448 | More: tips list | Tab capture, headphones; volume note *(volume bullet macOS only (:801))* | `renderer/components/sources/sources-audio-mixer.tsx:795` | [x] | [ ] | [ ] |
 | P449 | "Sounds" row meter / "Level shows while recording or live." | Soundboard mix level | `renderer/components/sources/sources-audio-mixer.tsx:919` | [x] | [ ] | [ ] |
-| P450 | "Level" fader ("Sounds level") | Trims all sounds; saves on release | `renderer/components/sources/sources-audio-mixer.tsx:928` | [ ] | [ ] | [ ] |
-| P451 | "Hear sounds yourself" switch | Local monitor of sounds | `renderer/components/sources/sources-audio-mixer.tsx:959` | [ ] | [ ] | [ ] |
+| P450 | "Level" fader ("Sounds level") | Trims all sounds; saves on release | `renderer/components/sources/sources-audio-mixer.tsx:928` | [x] | [ ] | [ ] |
+| P451 | "Hear sounds yourself" switch | Local monitor of sounds | `renderer/components/sources/sources-audio-mixer.tsx:959` | [x] | [ ] | [ ] |
 
 
 ## Scene ⌘3, Captions ⌘4 and Output ⌘5
@@ -704,22 +704,22 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P452 | "Edit scene" button | Turns the stage editor on and selects the camera | `renderer/components/scene/scene-list.tsx:66-74` | [ ] | [ ] | [ ] |
-| P453 | "Add scene…" button | Opens the Add scene picker dialog | `renderer/components/scene/scene-list.tsx:76-85` | [ ] | [ ] | [ ] |
-| P454 | Disabled reason "Update Videorc to change your scenes." | Shown when the scene library is read-only | `renderer/components/scene/scene-entries.tsx:44` | [ ] | [ ] | [ ] |
-| P455 | Scenes line (description) | Says "Each scene shows its own screen. ⌃⌥1 to ⌃⌥9 switch them…" | `renderer/components/scene/scene-entries.tsx:51-69` | [ ] | [ ] | [ ] |
-| P456 | Scene library error line | Shows a status message when the library fails | `renderer/components/scene/scene-list.tsx:92-96` | [ ] | [ ] | [ ] |
-| P457 | Scene row (name button) | Click puts the scene on stream, or opens Resolve if sources are missing | `renderer/components/scene/scene-list.tsx:186-194; scene-dialogs.tsx:168-171` | [ ] | [ ] | [ ] |
-| P458 | Row thumbnail | Small layout picture with the screen still | `renderer/components/scene/scene-list.tsx:220-249` | [ ] | [ ] | [ ] |
-| P459 | Row meta text | "Applying…", why it's blocked, "Resolve sources", or what it shows | `renderer/components/scene/scene-entries.tsx:157-165` | [ ] | [ ] | [ ] |
-| P460 | "Follows" badge | Shown when the scene follows its app | `renderer/components/scene/scene-list.tsx:201` | [ ] | [ ] | [ ] |
-| P461 | Shortcut key chips | Show the position key and custom key, or a conflict reason | `renderer/components/scene/scene-shortcut-keys.tsx:10-45` | [ ] | [ ] | [ ] |
-| P462 | On-stream check ("On stream") | Marks the scene that is live | `renderer/components/scene/scene-list.tsx:203` | [ ] | [ ] | [ ] |
-| P463 | Disabled-row tooltip | Explains why a scene can't go on (e.g. app not open) | `renderer/components/scene/scene-list.tsx:185` | [ ] | [ ] | [ ] |
-| P464 | Drag to reorder | Drag a row to move the scene; shows a drop line | `renderer/components/scene/scene-entries.tsx:258-281` | [ ] | [ ] | [ ] |
-| P465 | ⌥↑ / ⌥↓ on a row | Moves the focused scene up or down one place | `renderer/components/scene/scene-entries.tsx:282-296; renderer/lib/scene-list.ts:24-25` | [ ] | [ ] | [ ] |
-| P466 | ⋯ kebab "Actions for {name}" | Opens the scene's actions menu (shows on hover) | `renderer/components/scene/scene-list.tsx:204-209` | [ ] | [ ] | [ ] |
-| P467 | Camera-gap reason + "Open Sources" | Explains once why camera scenes are off, links to Sources | `renderer/components/scene/scene-list.tsx:125-132` | [ ] | [ ] | [ ] |
+| P452 | "Edit scene" button | Turns the stage editor on and selects the camera | `renderer/components/scene/scene-list.tsx:66-74` | [x] | [ ] | [ ] |
+| P453 | "Add scene…" button | Opens the Add scene picker dialog | `renderer/components/scene/scene-list.tsx:76-85` | [x] | [ ] | [ ] |
+| P454 | Disabled reason "Update Videorc to change your scenes." | Shown when the scene library is read-only | `renderer/components/scene/scene-entries.tsx:44` | [x] | [ ] | [ ] |
+| P455 | Scenes line (description) | Says "Each scene shows its own screen. ⌃⌥1 to ⌃⌥9 switch them…" | `renderer/components/scene/scene-entries.tsx:51-69` | [x] | [ ] | [ ] |
+| P456 | Scene library error line | Shows a status message when the library fails | `renderer/components/scene/scene-list.tsx:92-96` | [x] | [ ] | [ ] |
+| P457 | Scene row (name button) | Click puts the scene on stream, or opens Resolve if sources are missing | `renderer/components/scene/scene-list.tsx:186-194; scene-dialogs.tsx:168-171` | [x] | [ ] | [ ] |
+| P458 | Row thumbnail | Small layout picture with the screen still | `renderer/components/scene/scene-list.tsx:220-249` | [x] | [ ] | [ ] |
+| P459 | Row meta text | "Applying…", why it's blocked, "Resolve sources", or what it shows | `renderer/components/scene/scene-entries.tsx:157-165` | [x] | [ ] | [ ] |
+| P460 | "Follows" badge | Shown when the scene follows its app | `renderer/components/scene/scene-list.tsx:201` | [x] | [ ] | [ ] |
+| P461 | Shortcut key chips | Show the position key and custom key, or a conflict reason | `renderer/components/scene/scene-shortcut-keys.tsx:10-45` | [x] | [ ] | [ ] |
+| P462 | On-stream check ("On stream") | Marks the scene that is live | `renderer/components/scene/scene-list.tsx:203` | [x] | [ ] | [ ] |
+| P463 | Disabled-row tooltip | Explains why a scene can't go on (e.g. app not open) | `renderer/components/scene/scene-list.tsx:185` | [x] | [ ] | [ ] |
+| P464 | Drag to reorder | Drag a row to move the scene; shows a drop line | `renderer/components/scene/scene-entries.tsx:258-281` | [x] | [ ] | [ ] |
+| P465 | ⌥↑ / ⌥↓ on a row | Moves the focused scene up or down one place | `renderer/components/scene/scene-entries.tsx:282-296; renderer/lib/scene-list.ts:24-25` | [x] | [ ] | [ ] |
+| P466 | ⋯ kebab "Actions for {name}" | Opens the scene's actions menu (shows on hover) | `renderer/components/scene/scene-list.tsx:204-209` | [x] | [ ] | [ ] |
+| P467 | Camera-gap reason + "Open Sources" | Explains once why camera scenes are off, links to Sources | `renderer/components/scene/scene-list.tsx:125-132` | [x] | [ ] | [ ] |
 
 ### Scene ⌘3: Scene ⋯ menu and dialogs (components/scene/scene-dialogs.tsx)
 
@@ -766,19 +766,19 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P499 | Orientation segmented control "Horizontal (16:9)" / "Vertical (9:16)" | Switches the studio canvas orientation; locked while live | `renderer/components/tabs/layout-tab.tsx:244-257, 840-851` | [ ] | [ ] | [ ] |
-| P500 | Lock reason "The canvas is fixed while you're recording or live…" | Explains the orientation lock | `renderer/components/tabs/layout-tab.tsx:210-211` | [ ] | [ ] | [ ] |
-| P501 | Layout presets (horizontal) "Screen + camera", "Screen only", "Camera only", "Side by side" | Applies a layout to the scene on stream | `renderer/components/tabs/layout-tab.tsx:216-221, 862-900; renderer/lib/layout-labels.ts:10-21` | [ ] | [ ] | [ ] |
-| P502 | Layout presets (vertical) "Camera top", "Camera bottom", "Split", "Screen + camera", "Screen only", "Camera only" | Vertical layouts | `renderer/components/tabs/layout-tab.tsx:223-242` | [ ] | [ ] | [ ] |
-| P503 | Pending spinner on a preset | Shows while that switch is applying | `renderer/components/tabs/layout-tab.tsx:875-877` | [ ] | [ ] | [ ] |
-| P504 | Layout that needs a screen | Opens Change screen when the scene shows none | `renderer/components/tabs/layout-tab.tsx:805-818` | [ ] | [ ] | [ ] |
-| P505 | "Freeform" toggle | Enters freeform mode and restores the remembered arrangement | `renderer/components/tabs/layout-tab.tsx:904-916, 651-673` | [ ] | [ ] | [ ] |
-| P506 | Scene switch status line | Says what a slow switch is waiting for | `renderer/components/scene/scene-switch-status.tsx:32-69` | [ ] | [ ] | [ ] |
-| P507 | Hint "Switching applies live…" | Shown during a session | `renderer/components/tabs/layout-tab.tsx:923-926` | [ ] | [ ] | [ ] |
-| P508 | Hint "Choose a screen or window in Sources…" + "Open Sources" | Shown when no screen is chosen | `renderer/components/tabs/layout-tab.tsx:927-931` | [ ] | [ ] | [ ] |
-| P509 | Hint "Choose a camera in Sources…" + "Open Sources" | Shown when no camera is chosen | `renderer/components/tabs/layout-tab.tsx:932-938` | [ ] | [ ] | [ ] |
-| P510 | "Screen" framing control "Fill" / "Fit" (aria "Screen framing") | Sets whether the screen fills or fits (vertical, or landscape screen layouts) | `renderer/components/tabs/layout-tab.tsx:940-956; renderer/components/studio/scenes-gallery.tsx:36-39, 68-112` | [ ] | [ ] | [ ] |
-| P511 | "Animate scene changes" switch | Glides layout switches instead of cutting | `renderer/components/tabs/layout-tab.tsx:959-970` | [ ] | [ ] | [ ] |
+| P499 | Orientation segmented control "Horizontal (16:9)" / "Vertical (9:16)" | Switches the studio canvas orientation; locked while live | `renderer/components/tabs/layout-tab.tsx:244-257, 840-851` | [x] | [ ] | [ ] |
+| P500 | Lock reason "The canvas is fixed while you're recording or live…" | Explains the orientation lock | `renderer/components/tabs/layout-tab.tsx:210-211` | [x] | [ ] | [ ] |
+| P501 | Layout presets (horizontal) "Screen + camera", "Screen only", "Camera only", "Side by side" | Applies a layout to the scene on stream | `renderer/components/tabs/layout-tab.tsx:216-221, 862-900; renderer/lib/layout-labels.ts:10-21` | [x] | [ ] | [ ] |
+| P502 | Layout presets (vertical) "Camera top", "Camera bottom", "Split", "Screen + camera", "Screen only", "Camera only" | Vertical layouts | `renderer/components/tabs/layout-tab.tsx:223-242` | [x] | [ ] | [ ] |
+| P503 | Pending spinner on a preset | Shows while that switch is applying | `renderer/components/tabs/layout-tab.tsx:875-877` | [x] | [ ] | [ ] |
+| P504 | Layout that needs a screen | Opens Change screen when the scene shows none | `renderer/components/tabs/layout-tab.tsx:805-818` | [x] | [ ] | [ ] |
+| P505 | "Freeform" toggle | Enters freeform mode and restores the remembered arrangement | `renderer/components/tabs/layout-tab.tsx:904-916, 651-673` | [x] | [ ] | [ ] |
+| P506 | Scene switch status line | Says what a slow switch is waiting for | `renderer/components/scene/scene-switch-status.tsx:32-69` | [x] | [ ] | [ ] |
+| P507 | Hint "Switching applies live…" | Shown during a session | `renderer/components/tabs/layout-tab.tsx:923-926` | [x] | [ ] | [ ] |
+| P508 | Hint "Choose a screen or window in Sources…" + "Open Sources" | Shown when no screen is chosen | `renderer/components/tabs/layout-tab.tsx:927-931` | [x] | [ ] | [ ] |
+| P509 | Hint "Choose a camera in Sources…" + "Open Sources" | Shown when no camera is chosen | `renderer/components/tabs/layout-tab.tsx:932-938` | [x] | [ ] | [ ] |
+| P510 | "Screen" framing control "Fill" / "Fit" (aria "Screen framing") | Sets whether the screen fills or fits (vertical, or landscape screen layouts) | `renderer/components/tabs/layout-tab.tsx:940-956; renderer/components/studio/scenes-gallery.tsx:36-39, 68-112` | [x] | [ ] | [ ] |
+| P511 | "Animate scene changes" switch | Glides layout switches instead of cutting | `renderer/components/tabs/layout-tab.tsx:959-970` | [x] | [ ] | [ ] |
 
 ### Scene ⌘3: Canvas / freeform stage editor (components/scene/scene-stage.tsx)
 
@@ -918,12 +918,12 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P616 | "Hide screen" section description | Frosts the screen on every output | `renderer/components/scene/hide-screen-section.tsx:68-72` | [ ] | [ ] | [ ] |
-| P617 | "Shortcut" row (key or "Not set") → Settings → Shortcuts | Shows the hide key, default ⌃⌥H | `renderer/components/scene/hide-screen-section.tsx:74-82; shared/global-shortcuts.ts:3` | [ ] | [ ] | [ ] |
-| P618 | "Hide when a password manager is in front" switch | Auto-hides when a password manager is in front *(macOS only (:66, :83))* | `renderer/components/scene/hide-screen-section.tsx:90-106` | [ ] | n/a | n/a |
-| P619 | "Password managers" list + ⋯ "Remove" | Removes an app (the last one can't be removed) *(macOS only (:85))* | `renderer/components/scene/hide-screen-section.tsx:112-144` | [ ] | n/a | n/a |
-| P620 | "Add app…" popover (search "Search open apps…", status lines) | Adds an open app to the list *(macOS only)* | `renderer/components/scene/hide-screen-section.tsx:180-240` | [ ] | n/a | n/a |
-| P621 | "Restore built-in apps" | Brings back the removed defaults *(macOS only)* | `renderer/components/scene/hide-screen-section.tsx:147-154` | [ ] | n/a | n/a |
+| P616 | "Hide screen" section description | Frosts the screen on every output | `renderer/components/scene/hide-screen-section.tsx:68-72` | [x] | [ ] | [ ] |
+| P617 | "Shortcut" row (key or "Not set") → Settings → Shortcuts | Shows the hide key, default ⌃⌥H | `renderer/components/scene/hide-screen-section.tsx:74-82; shared/global-shortcuts.ts:3` | [x] | [ ] | [ ] |
+| P618 | "Hide when a password manager is in front" switch | Auto-hides when a password manager is in front *(macOS only (:66, :83))* | `renderer/components/scene/hide-screen-section.tsx:90-106` | [x] | n/a | n/a |
+| P619 | "Password managers" list + ⋯ "Remove" | Removes an app (the last one can't be removed) *(macOS only (:85))* | `renderer/components/scene/hide-screen-section.tsx:112-144` | [x] | n/a | n/a |
+| P620 | "Add app…" popover (search "Search open apps…", status lines) | Adds an open app to the list *(macOS only)* | `renderer/components/scene/hide-screen-section.tsx:180-240` | [x] | n/a | n/a |
+| P621 | "Restore built-in apps" | Brings back the removed defaults *(macOS only)* | `renderer/components/scene/hide-screen-section.tsx:147-154` | [x] | n/a | n/a |
 
 ### Scene ⌘3: Shortcuts, follow app, Studio scenes section
 
