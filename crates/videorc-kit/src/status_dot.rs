@@ -50,8 +50,6 @@ impl StatusTone {
     }
 }
 
-/// The ping's size and opacity at `delta` (0 to 1) through it: from the
-
 /// A lower-case, hyphenated machine value: `connected`, `device-missing`.
 pub fn is_raw_status_value(text: &str) -> bool {
     !text.is_empty() && text.chars().all(|c| c.is_ascii_lowercase() || c == '-')

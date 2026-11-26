@@ -409,7 +409,6 @@ impl RenderOnce for Select {
 
         let toggle = {
             let state = state.clone();
-            let searchable = searchable;
             move |window: &mut Window, cx: &mut App| {
                 let content_focus = state.read(cx).content_focus.clone();
                 let search = state.read(cx).search.clone();
@@ -574,7 +573,6 @@ impl RenderOnce for Select {
             .content_focus_handle(&content_focus)
             .on_open_change({
                 let state = state.clone();
-                let searchable = searchable;
                 move |now_open, window, cx| {
                     let search = state.read(cx).search.clone();
                     let content_focus = state.read(cx).content_focus.clone();
@@ -622,6 +620,11 @@ impl RenderOnce for Select {
     }
 }
 
+/// Chooses the option at an index.
+type ChooseHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+/// Opens or closes the list.
+type ToggleHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+
 struct PopupList<'a> {
     open: bool,
     searchable: bool,
@@ -635,8 +638,8 @@ struct PopupList<'a> {
     visible_count: usize,
     chosen: Option<usize>,
     highlighted: usize,
-    choose: Rc<dyn Fn(usize, &mut Window, &mut App)>,
-    toggle: Rc<dyn Fn(&mut Window, &mut App)>,
+    choose: ChooseHandler,
+    toggle: ToggleHandler,
     search: Entity<InputState>,
     appearance: Option<Appearance>,
     /// INLINE_POPUP: 288 px wide, aligned to the trigger's end.
@@ -675,22 +678,22 @@ fn popup_list(p: PopupList<'_>) -> AnyElement {
 
     for (filter_i, &index) in p.visible.iter().enumerate() {
         let group = p.options[index].group.clone();
-        if let Some(group) = group.as_ref() {
-            if last_group.as_ref() != Some(group) {
-                last_group = Some(group.clone());
-                rows.push(
-                    div()
-                        .flex_none()
-                        .px(px(8.0))
-                        .pt(px(6.0))
-                        .pb(px(2.0))
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(hsla(p.t.muted_foreground))
-                        .child(group.clone())
-                        .into_any_element(),
-                );
-            }
+        if let Some(group) = group.as_ref()
+            && last_group.as_ref() != Some(group)
+        {
+            last_group = Some(group.clone());
+            rows.push(
+                div()
+                    .flex_none()
+                    .px(px(8.0))
+                    .pt(px(6.0))
+                    .pb(px(2.0))
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(hsla(p.t.muted_foreground))
+                    .child(group.clone())
+                    .into_any_element(),
+            );
         }
         if p.options[index].separator {
             rows.push(

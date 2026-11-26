@@ -296,13 +296,16 @@ pub fn target_index(enabled: &[bool], current: usize, delta: Option<isize>) -> O
 /// The one option Tab reaches: the checked one when enabled, else the
 /// first enabled one.
 pub fn tab_stop(enabled: &[bool], checked_index: Option<usize>) -> Option<usize> {
-    if let Some(index) = checked_index {
-        if enabled.get(index).copied().unwrap_or(false) {
-            return Some(index);
-        }
+    if let Some(index) = checked_index
+        && enabled.get(index).copied().unwrap_or(false)
+    {
+        return Some(index);
     }
     enabled.iter().position(|on| *on)
 }
+
+/// Moves focus (and, unless manual, the value) by a step, or to the end.
+type MoveHandler = Rc<dyn Fn(Option<isize>, &mut Window, &mut App)>;
 
 impl RenderOnce for SegmentedControl {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
@@ -342,7 +345,7 @@ impl RenderOnce for SegmentedControl {
             .position(|handle| handle.is_focused(window))
             .unwrap_or(stop);
 
-        let move_to: Rc<dyn Fn(Option<isize>, &mut Window, &mut App)> = {
+        let move_to: MoveHandler = {
             let handles = handles.clone();
             let enabled = enabled.clone();
             let options: Vec<SharedString> = self
@@ -364,10 +367,10 @@ impl RenderOnce for SegmentedControl {
                     handles[target].focus(window, cx);
                     if !manual {
                         let next = &options[target];
-                        if value.as_ref() != Some(next) {
-                            if let Some(on_change) = &on_change {
-                                on_change(next.clone(), window, cx);
-                            }
+                        if value.as_ref() != Some(next)
+                            && let Some(on_change) = &on_change
+                        {
+                            on_change(next.clone(), window, cx);
                         }
                     }
                 },
