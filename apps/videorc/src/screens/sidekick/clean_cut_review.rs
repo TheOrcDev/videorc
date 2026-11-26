@@ -1656,6 +1656,7 @@ fn ready_body(
         .child(
             div().flex().child(
                 SegmentedControl::new("clean-cut-what-plays")
+                    .fit(true)
                     .accessibility_label(WHAT_PLAYS)
                     .value(Some(if review.preview { "cut" } else { "original" }))
                     .option(Segment::new("cut", PREVIEW_THE_CUT))
