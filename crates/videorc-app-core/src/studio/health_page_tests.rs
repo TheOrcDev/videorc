@@ -976,3 +976,27 @@ fn the_linux_app_window_is_its_own_preview_path_and_speed() {
         json!({"source": "camera", "proofSourceFps": 29, "firstFrameContract": "fallback"});
     assert_eq!(speed("linux", &stalled), words("Stalled", Tone::Warn));
 }
+
+#[test]
+fn the_preview_reads_the_surface_when_the_jpeg_fallback_isnt_running() {
+    // ogre, 2026-11-26: the GPUI app's Preview presented on its surface while
+    // Health said "Preview · Unavailable" (the idle JPEG fallback's state).
+    assert_eq!(preview_state(Some("unavailable"), Some("live")), "live");
+    assert_eq!(preview_state(None, Some("live")), "live");
+    assert_eq!(preview_state(None, Some("starting")), "connecting");
+    // A closed Preview's surface is down: neutral, not a warning.
+    assert_eq!(
+        preview_state(Some("unavailable"), Some("stopped")),
+        "stopped"
+    );
+    assert_eq!(preview_state(None, Some("failed")), "unavailable");
+    // No surface word: the fallback's state, as before.
+    assert_eq!(preview_state(Some("live"), None), "live");
+    assert_eq!(preview_state(Some("reconnecting"), None), "reconnecting");
+    assert_eq!(preview_state(None, None), "unavailable");
+
+    let live = preview_check(preview_state(Some("unavailable"), Some("live")), "", "");
+    assert_eq!((live.value.as_str(), live.tone), ("Running", Tone::Good));
+    let closed = preview_check(preview_state(Some("unavailable"), Some("stopped")), "", "");
+    assert!(!check_needs_attention(closed.tone));
+}
