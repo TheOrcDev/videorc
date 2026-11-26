@@ -210,6 +210,8 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "session-player-geometry",
     "session-player-open",
     "studio-dock-slot",
+    // Gallery: scroll Studio to the Vertical stream panel (GPUI window).
+    "studio-reveal-vertical-stream",
     "suspend-native-preview-surface",
     "ui-appearance",
     "ui-click",
