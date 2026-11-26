@@ -31,24 +31,14 @@ impl DestinationsPanel {
                 entity.update(cx, |this, _| this.set_page_quality(preset));
             }
         });
-        // `StreamQualityControl`: a Field (`gap-3`, 12 px) with its label,
-        // the full-size control, and the description under it.
         PanelSection::new("destinations-output-quality")
             .title(page_copy::OUTPUT_QUALITY)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(12.))
-                    .child(Label::new(STREAM_QUALITY).disabled(!enabled))
-                    .child(control.small(false))
-                    .child(
-                        div()
-                            .type_scale(text::META)
-                            .text_color(hsla(t.muted_foreground))
-                            .child(quality.description.clone()),
-                    ),
-            )
+            .child(quality_field(
+                &t,
+                control.small(false),
+                quality.description.clone(),
+                !enabled,
+            ))
             .into_any_element()
     }
 
@@ -58,6 +48,30 @@ impl DestinationsPanel {
             studio.set_stream_quality(&preset).await;
         });
     }
+}
+
+/// `StreamQualityControl`: a vertical Field (`gap-3`, 12 px) with its label,
+/// the control filling the column, and the description under it. The page's
+/// Output quality and an open destination's card (Electron's `inherit`) both
+/// show this one field.
+pub(super) fn quality_field(
+    t: &videorc_kit::tokens::Theme,
+    control: SegmentedControl,
+    description: impl IntoElement,
+    disabled: bool,
+) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(12.))
+        .child(Label::new(STREAM_QUALITY).disabled(disabled))
+        .child(control)
+        .child(
+            div()
+                .type_scale(text::META)
+                .text_color(hsla(t.muted_foreground))
+                .child(description),
+        )
 }
 
 pub(super) fn quality_control(
