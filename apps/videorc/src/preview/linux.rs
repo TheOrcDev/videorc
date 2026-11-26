@@ -74,6 +74,8 @@ pub(super) struct Native {
     pub(super) cover: Cover,
 }
 
+type CoverProbe = Rc<dyn Fn(&App) -> bool>;
+
 /// What covers the docked slot from above, as its canvas last saw it.
 #[derive(Default)]
 pub(super) struct Cover {
@@ -85,7 +87,7 @@ pub(super) struct Cover {
     focus: Option<FocusHandle>,
     /// An overlay that opens without taking focus (first run, Go Live) is
     /// showing.
-    probe: Option<Rc<dyn Fn(&App) -> bool>>,
+    probe: Option<CoverProbe>,
     /// The canvas has looked once. Its first look can come in the window's
     /// first draw, when there is no drawn frame to read a path from (GPUI
     /// asserts on the empty dispatch tree: ogre, 2026-11-26, launch panic).

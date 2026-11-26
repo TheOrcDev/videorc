@@ -38,7 +38,7 @@ pub fn register_in_background(logger: Logger) {
         return;
     };
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        logger.warn("[desktop] no HOME: videorc:// links stay off".to_string());
+        logger.warn("[desktop] no HOME: videorc:// links stay off");
         return;
     };
     let xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
@@ -63,8 +63,7 @@ pub fn register_in_background(logger: Logger) {
                     path.display()
                 )),
                 Ok(RegistrationOutcome::Unrepresentable) => logger.warn(
-                    "[desktop] the AppImage's path can't go in a desktop entry: videorc:// links stay off"
-                        .to_string(),
+                    "[desktop] the AppImage's path can't go in a desktop entry: videorc:// links stay off",
                 ),
                 Err(error) => logger.warn(format!("[desktop] registration failed: {error}")),
             }
