@@ -10,6 +10,7 @@ import {
   baselinePath,
   deckHtml,
   needsLook,
+  parseWindowSize,
   pickScreens,
   rowRanges,
   rowsFor,
@@ -22,6 +23,12 @@ const parsed = parseParity(readFileSync(join(repoRoot, 'docs', 'gpui', 'parity.m
 const manifest = JSON.parse(
   readFileSync(join(repoRoot, 'docs', 'gpui', 'baseline-manifest.json'), 'utf8')
 )
+
+test('a window size must be one the baseline was shot at', () => {
+  assert.deepEqual(parseWindowSize('960x660'), { width: 960, height: 660 })
+  assert.deepEqual(parseWindowSize('1280x800'), { width: 1280, height: 800 })
+  assert.throws(() => parseWindowSize('900x600'), /no 900x600 shots/)
+})
 
 test('every screen covers parity rows and sits in a deck', () => {
   const decks = new Set(DECKS.map((deck) => deck.id))

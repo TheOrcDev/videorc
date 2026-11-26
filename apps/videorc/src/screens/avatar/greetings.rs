@@ -489,17 +489,23 @@ pub(super) fn render_greetings(
 
     let mut welcomes_list = GroupedList::new().label("Welcomes");
     let welcome_lines = welcomes(greetings);
-    for row in welcome_rows(greetings, chat_caps) {
+    for (index, row) in welcome_rows(greetings, chat_caps).iter().enumerate() {
         let line = welcome_lines
             .iter()
             .find(|(kind, _)| *kind == row.kind)
             .map(|(_, line)| line.clone());
-        welcomes_list = welcomes_list.item(greeting_row(screen, &row, line, t, cx));
+        welcomes_list = welcomes_list.item(below_hairline(
+            index,
+            greeting_row(screen, row, line, t, cx),
+        ));
     }
 
     let mut activity_list = GroupedList::new().label("Activity");
-    for row in activity_rows(greetings, chat_caps) {
-        activity_list = activity_list.item(greeting_row(screen, &row, None, t, cx));
+    for (index, row) in activity_rows(greetings, chat_caps).iter().enumerate() {
+        activity_list = activity_list.item(below_hairline(
+            index,
+            greeting_row(screen, row, None, t, cx),
+        ));
     }
 
     let full = greetings.templates.len() >= TEMPLATES_MAX;
@@ -553,6 +559,17 @@ pub(super) fn render_greetings(
         section = section.child(Field::new("avatar-greetings-error").error(error));
     }
     Some(section.into_any_element())
+}
+
+/// Electron wraps each greeting in its own block, so the list's hairline sits
+/// above the 32 px row (a 33 px step) instead of over its top pixel; the kit
+/// paints it inside the item, so every greeting after the first gets that
+/// pixel back.
+fn below_hairline(index: usize, row: AnyElement) -> AnyElement {
+    div()
+        .when(index > 0, |wrap| wrap.pt(px(1.)))
+        .child(row)
+        .into_any_element()
 }
 
 /// One row (`GreetingRow`, `DefaultGreetingRow`, `WelcomeRow`): its title,

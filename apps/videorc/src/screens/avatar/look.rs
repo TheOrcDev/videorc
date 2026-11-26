@@ -1422,6 +1422,7 @@ fn alive_panel(screen: &AvatarScreen, t: &Theme, cx: &mut Context<AvatarScreen>)
         let create = entity.clone();
         Button::new("avatar-pack-create")
             .variant(ButtonVariant::Outline)
+            .icon(IconName::Sparkle)
             .label("Create")
             .disabled(gate.is_some())
             .on_click(move |_, _, cx| create.update(cx, |screen, cx| screen.open_alive_creator(cx)))
@@ -1430,6 +1431,7 @@ fn alive_panel(screen: &AvatarScreen, t: &Theme, cx: &mut Context<AvatarScreen>)
         let import = entity.clone();
         Button::new("avatar-pack-import")
             .variant(ButtonVariant::Outline)
+            .icon(IconName::FolderOpen)
             .label(if screen.look_ui.importing {
                 "Importing…"
             } else {
@@ -1500,6 +1502,7 @@ fn alive_panel(screen: &AvatarScreen, t: &Theme, cx: &mut Context<AvatarScreen>)
                 .child(
                     Button::new("avatar-pack-remove")
                         .variant(ButtonVariant::Ghost)
+                        .icon(IconName::Trash)
                         .label("Remove")
                         .disabled(worn_row.as_ref().is_none_or(PackRow::shipped))
                         .on_click(move |_, _, cx| {
