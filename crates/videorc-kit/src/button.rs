@@ -385,7 +385,9 @@ impl RenderOnce for Button {
         } else {
             button.h(px(height)).pl(px(pad_l)).pr(px(pad_r))
         };
-        if let Some(label) = self.accessibility_label {
+        // A button is named by its words unless told otherwise: gpui names
+        // no node from its child text, so a labelled button read as unnamed.
+        if let Some(label) = self.accessibility_label.or_else(|| self.label.clone()) {
             button = button.accessibility_label(label);
         }
         if let Some(handle) = self.track_focus.as_ref() {
