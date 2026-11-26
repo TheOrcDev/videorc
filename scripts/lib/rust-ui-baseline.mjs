@@ -131,7 +131,9 @@ export async function runBaseline({
   // (account.rs, videorc_api.rs): a release backend ignores both, so the
   // signed-in run would shoot a signed-out app, or reach the real service.
   if (signedIn && process.env.VIDEORC_DEV_BACKEND_PROFILE === 'release') {
-    throw new Error('The buddy part needs the debug backend: unset VIDEORC_DEV_BACKEND_PROFILE for it.')
+    throw new Error(
+      'The buddy part needs the debug backend: unset VIDEORC_DEV_BACKEND_PROFILE for it.'
+    )
   }
   const fakes = signedIn ? await startSignedInFakes(stateDir) : null
 
@@ -556,6 +558,11 @@ async function shootIdleStates({ ctx, tryStep, only, missing }) {
     await ctx.open('studio')
     await ctx.js(
       `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true })); await sleep(900); return true`
+    )
+    // Let go of ⌘ before the shot: a held ⌘ shows the sidebar's shortcut
+    // chips, which the GPUI gallery's palette (opened without a key) hasn't.
+    await ctx.js(
+      `document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Meta', metaKey: false, bubbles: true })); await sleep(300); return true`
     )
     await ctx.shoot('palette', 'open')
     await ctx.dismiss()

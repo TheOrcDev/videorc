@@ -91,6 +91,12 @@ const { values } = parseArgs({
     all: { type: 'boolean', default: false },
     'pages-only': { type: 'boolean', default: false },
     'electron-only': { type: 'boolean', default: false },
+    // Same state as the Electron baselines: the docked Preview closed
+    // (Electron's shooter can't capture its native Preview layer).
+    'preview-open': { type: 'boolean', default: false },
+    // Raise the window with focus, so it is shot active (a run nobody is
+    // typing next to, such as the overnight one).
+    focus: { type: 'boolean', default: false },
     sha: { type: 'string' }
   }
 })
@@ -383,10 +389,22 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
     const raised = await command('raise-window', {
       role: 'main',
       level: 'floating',
-      focus: false
+      focus: values.focus
     })
     raisedWindowId = Number.isInteger(raised?.windowId) ? raised.windowId : null
     await sleep(800)
+    // Electron's baselines launch with VIDEORC_DISABLE_AUTO_PREVIEW and shoot
+    // the page through DevTools, which can't hold the native Preview layer:
+    // their Studio says "Preview is closed". Close the docked Preview here
+    // too, so every screen shot over the Studio compares in the same state.
+    if (!values['preview-open']) {
+      await command('open-tab', { tab: 'studio' }).catch(() => {})
+      await sleep(SETTLE_MS)
+      await ui
+        .click({ name: 'Close', role: 'button' }, { timeoutMs: 3_000 })
+        .catch((error) => log(`could not close the docked Preview: ${error.message}`))
+      await sleep(600)
+    }
   }
   const stop = async () => {
     ws?.close()
