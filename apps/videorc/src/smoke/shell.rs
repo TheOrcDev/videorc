@@ -142,6 +142,15 @@ impl ShellSmoke for ShellWindows {
             .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())?
     }
 
+    fn reveal_studio_vertical_stream(&self, cx: &mut App) -> Result<(), String> {
+        self.main
+            .update(cx, |shell, window, cx| {
+                shell.reveal_studio_vertical_stream(window, cx);
+                Ok(())
+            })
+            .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())?
+    }
+
     fn preview_entity(&self) -> Option<Entity<Preview>> {
         self.preview.borrow().clone()
     }

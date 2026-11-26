@@ -623,18 +623,22 @@ impl<B: StudioBackend> Studio<B> {
 
     /// Gallery/smoke only: commit a synthetic talk-show `CloudStatus` and
     /// optional room media (plan 260 C4). No LiveKit, X or YouTube.
+    ///
+    /// Room media is written **before** the status commit so the host's
+    /// cloud watch applies tiles / camera-off on the same open pulse (a
+    /// media-after-commit race left open/screens/host-camera-off identical).
     pub async fn seed_gallery_show_stage(
         &self,
         kind: crate::studio::gallery_show_stage::GalleryShowStage,
     ) {
         let status = crate::studio::gallery_show_stage::gallery_cloud_status(kind);
         let media = crate::studio::gallery_show_stage::gallery_room_media(kind);
-        self.commit_cloud(status).await;
         self.edit_cloud(|state| {
             let changed = state.gallery_room_media != media;
             state.gallery_room_media = media;
             changed
         });
+        self.commit_cloud(status).await;
     }
 
     /// `cloud.room.invite.rotate`.
