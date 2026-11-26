@@ -33,6 +33,9 @@ let launched
 try {
   launched = await launchDevApp({
     env: {
+      // A prebuilt GPUI binary otherwise discovers its build checkout, whose
+      // workspace hash differs from the ledger this smoke inspects.
+      VIDEORC_WORKSPACE_ROOT: repoRoot,
       VIDEORC_APP_DATA_DIR: appDataDir,
       VIDEORC_USER_DATA_DIR: userDataDir,
       VIDEORC_DISABLE_AUTO_PREVIEW: '1',
