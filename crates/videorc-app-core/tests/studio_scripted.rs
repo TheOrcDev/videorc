@@ -52,6 +52,8 @@ struct Script {
     /// S2.6c: every `preview.screen.start`, in order.
     screen_starts: Vec<PreviewScreenStartParams>,
     screen_start_fails: bool,
+    /// Idle Camera picks start the picked camera, or stop it for Off.
+    camera_requests: Vec<(String, Value)>,
     /// S3.5c: the livestream RPCs' answers by method (one each, in order;
     /// a method with none left is not connected), and every call made.
     livestream: BTreeMap<String, VecDeque<Result<Value, RpcError>>>,
@@ -159,6 +161,27 @@ impl Scripted {
 }
 
 impl StudioBackend for Scripted {
+    async fn sources_request(
+        &self,
+        method: &'static str,
+        params: Value,
+    ) -> Result<Value, RpcError> {
+        self.note(method);
+        let mut script = self.script.lock().unwrap();
+        match method {
+            "preview.camera.start" | "preview.camera.stop" => {
+                let status = json!({
+                    "state": if method.ends_with("start") { "live" } else { "idle" },
+                    "cameraId": params["sources"]["cameraId"],
+                    "updatedAt": "2026-11-26T00:00:00Z",
+                });
+                script.camera_requests.push((method.to_string(), params));
+                Ok(status)
+            }
+            _ => Err(RpcError::not_connected(method)),
+        }
+    }
+
     async fn health(&self) -> Result<BackendHealth, RpcError> {
         self.note("health.ping");
         Ok(health_ok())
@@ -2598,6 +2621,113 @@ async fn an_idle_screen_pick_moves_the_screen_capture_to_the_pick() {
         .select_source_device(SourceKind::Camera, Some("camera:1"))
         .await;
     assert_eq!(backend.count("preview.screen.start"), 2);
+}
+
+/// The idle reload only commits the scene. The camera's capture must follow
+/// the pick too, just as Electron's ensureNativePreviewCamera does.
+#[tokio::test]
+async fn an_idle_camera_pick_moves_the_camera_capture_to_the_pick() {
+    use videorc_app_core::studio::source_selection::SourceKind;
+    let backend = Scripted::new();
+    backend.with(|script| {
+        script.device_ids = Some(vec![
+            "camera:1".to_string(),
+            "camera:2".to_string(),
+            "screen:screencapturekit:1".to_string(),
+        ]);
+        let mut config = capture_config_with_camera();
+        config["layout"] = json!({"layoutPreset": "camera-only"});
+        config["video"] = json!({"width": 1280, "height": 720, "fps": 30});
+        script.settings.insert(
+            keys::CAPTURE_CONFIG.to_string(),
+            Value::String(config.to_string()),
+        );
+    });
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    assert_eq!(backend.count("preview.camera.start"), 0);
+
+    studio
+        .select_source_device(SourceKind::Camera, Some("camera:2"))
+        .await
+        .expect("the camera pick lands");
+    assert_eq!(backend.count("preview.camera.start"), 1);
+    {
+        let script = backend.script.lock().unwrap();
+        let (_, params) = script.camera_requests.last().unwrap();
+        assert_eq!(params["sources"]["cameraId"], "camera:2");
+        assert_eq!(params["layout"]["layoutPreset"], "camera-only");
+        assert_eq!(params["video"]["width"], 1280);
+        assert_eq!(params["video"]["height"], 720);
+        assert_eq!(params["video"]["fps"], 30);
+    }
+    assert_eq!(
+        studio.telemetry_now().preview_camera.unwrap()["cameraId"],
+        "camera:2"
+    );
+
+    studio
+        .select_source_device(SourceKind::Camera, None)
+        .await
+        .expect("Off lands");
+    assert_eq!(backend.count("preview.camera.stop"), 1);
+    assert_eq!(
+        studio.telemetry_now().preview_camera.unwrap()["state"],
+        "idle"
+    );
+
+    studio
+        .select_source_device(SourceKind::Capture, Some("screen:screencapturekit:1"))
+        .await
+        .expect("the screen pick lands");
+    studio
+        .select_source_device(SourceKind::Microphone, None)
+        .await
+        .unwrap();
+    assert_eq!(backend.script.lock().unwrap().camera_requests.len(), 2);
+}
+
+#[tokio::test]
+async fn an_idle_camera_pick_respects_screen_only_and_unavailable_cameras() {
+    use videorc_app_core::studio::source_selection::SourceKind;
+    let mut config = capture_config_with_camera();
+    config["layout"] = json!({"layoutPreset": "screen-only"});
+    let (backend, studio) = scenes_studio(config).await;
+    studio
+        .select_source_device(SourceKind::Camera, Some("camera:1"))
+        .await
+        .unwrap();
+    assert_eq!(backend.count("preview.camera.start"), 0);
+    assert_eq!(backend.count("preview.camera.stop"), 0);
+
+    studio
+        .update_capture_config(|config| {
+            config["layout"]["layoutPreset"] = json!("camera-only");
+        })
+        .await
+        .unwrap();
+    studio
+        .switch_source_device_live(
+            SourceKind::Camera,
+            json!({
+                "cameraId": "camera:missing", "cameraName": "Missing", "cameraOff": false
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(backend.count("preview.camera.start"), 0);
+
+    studio
+        .handle_event(BackendEvent::Untyped {
+            event: "preview.camera.status".to_string(),
+            payload: json!({"state": "disconnected", "cameraId": "camera:1"}),
+        })
+        .await;
+    studio
+        .select_source_device(SourceKind::Camera, Some("camera:1"))
+        .await
+        .unwrap();
+    assert_eq!(backend.count("preview.camera.start"), 0);
 }
 
 /// S1.6b part 5b: the Studio's Sources mirror is the Camera row (plan 231

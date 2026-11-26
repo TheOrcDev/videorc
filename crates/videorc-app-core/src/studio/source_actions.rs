@@ -322,6 +322,8 @@ impl<B: StudioBackend> Studio<B> {
         // or the preview keeps the screen captured before it.
         if kind == SourceKind::Capture {
             self.start_picked_screen_capture().await;
+        } else if kind == SourceKind::Camera {
+            self.sync_picked_camera_capture().await;
         }
         // Part 5e (`switchSourceDeviceLive`): the scene editor holds the idle
         // reload, so a screen or camera pick made while it is open loads the
@@ -330,6 +332,85 @@ impl<B: StudioBackend> Studio<B> {
             self.reload_editor_scene().await;
         }
         saved
+    }
+
+    /// Electron's `ensureNativePreviewCamera` after an idle Camera pick.
+    /// Reloading the idle scene does not start capture. Off stops it;
+    /// screen-only leaves retirement to the layout transaction's grace.
+    async fn sync_picked_camera_capture(&self) {
+        let _one_at_a_time = self.camera_pick_lock.lock().await;
+        if self.session_owns_transport() {
+            return;
+        }
+        let previous = self.telemetry.borrow().preview_camera.clone();
+        let (pid, method, params) = {
+            let inner = self.lock();
+            let Connection::Connected { pid } = inner.connection else {
+                return;
+            };
+            let config = &inner.capture.config;
+            match config["sources"]["cameraId"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+            {
+                None => (pid, "preview.camera.stop", json!({})),
+                Some(camera_id) => {
+                    let available = inner.sources.devices.devices.iter().any(|device| {
+                        device.id == camera_id
+                            && device.kind == videorc_protocol::DeviceKind::Camera
+                            && device.status == videorc_protocol::DeviceStatus::Available
+                    });
+                    let disconnected = previous.as_ref().is_some_and(|status| {
+                        status["state"] == "disconnected" && status["cameraId"] == camera_id
+                    });
+                    if config["layout"]["layoutPreset"] == "screen-only"
+                        || !available
+                        || disconnected
+                    {
+                        return;
+                    }
+                    (
+                        pid,
+                        "preview.camera.start",
+                        json!({
+                            "sources": config["sources"],
+                            "layout": config["layout"],
+                            "video": config["video"],
+                        }),
+                    )
+                }
+            }
+        };
+        match self.backend.sources_request(method, params).await {
+            Ok(status) => {
+                if self.lock().connection != (Connection::Connected { pid }) {
+                    return;
+                }
+                // A live status event can overtake the start reply. Never
+                // replace that newer status with this request's answer.
+                self.telemetry.send_modify(|telemetry| {
+                    if telemetry.preview_camera == previous {
+                        telemetry.apply(
+                            super::health::PREVIEW_CAMERA_STATUS_EVENT,
+                            status,
+                            Instant::now(),
+                        );
+                    }
+                });
+            }
+            Err(error) => {
+                self.config.logger.warn(format!(
+                    "Studio: the camera capture after a pick failed: {} ({})",
+                    error.message, error.code
+                ));
+                let connected = matches!(self.lock().connection, Connection::Connected { .. });
+                if let Some(command) =
+                    user_error::backend_error_toast(&error, connected, SWITCH_THE_SOURCE)
+                {
+                    self.post(vec![command]);
+                }
+            }
+        }
     }
 
     /// The editor's `loadScene(...).catch(reportError)`.
