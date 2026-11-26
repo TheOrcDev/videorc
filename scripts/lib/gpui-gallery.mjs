@@ -359,7 +359,93 @@ export const SCREENS = Object.freeze([
     reduceMotion: true,
     baseline: { screen: 'first-run', state: step },
     sections: ['First run (']
-  }))
+  })),
+  // Coverage (overnight 11-26): the states Electron's shooter has, opened
+  // the way it opens them. `clicks` press the first name that exists, in
+  // order; `window` shoots one of the app's other windows at the
+  // baseline's size.
+  ...['info', 'warning'].map((kind) => ({
+    id: `toast-${kind}`,
+    title: `Toast: ${kind}`,
+    deck: 'shell-studio',
+    toast: kind,
+    baseline: { screen: 'toasts', state: kind },
+    sections: ['Notification centre']
+  })),
+  {
+    id: 'account-menu',
+    title: 'Account menu (signed out)',
+    deck: 'shell-studio',
+    open: page('studio'),
+    clicks: [{ names: ['Sign in'], role: 'button' }],
+    close: 'Escape',
+    baseline: { screen: 'account-menu', state: 'open' },
+    sections: ['Shell: account row and menu']
+  },
+  {
+    id: 'scene-item-selected',
+    title: 'Scene ⌘3, Test pattern selected',
+    deck: 'shell-studio',
+    open: page('layout'),
+    clicks: [
+      { names: ['Select Test pattern', 'Select Test pattern, on', 'Select Test pattern, off'] }
+    ],
+    close: 'Escape',
+    baseline: { screen: 'scene', state: 'item-selected' },
+    sections: ['Scene ⌘3: Layout section']
+  },
+  {
+    id: 'scene-new-scene',
+    title: 'Scene ⌘3, Add scene…',
+    deck: 'shell-studio',
+    open: page('layout'),
+    clicks: [{ names: ['Add scene…'], role: 'button' }],
+    close: 'Escape',
+    baseline: { screen: 'scene', state: 'new-scene' },
+    sections: ['Scene ⌘3: Add scene / Change screen picker']
+  },
+  {
+    id: 'library-kebab',
+    title: 'Library ⌘0, a session ⋯ menu',
+    deck: 'pages',
+    open: page('library'),
+    clicks: [{ names: ['Session actions'], role: 'button' }],
+    close: 'Escape',
+    baseline: { screen: 'library', state: 'kebab-menu' },
+    sections: ['Library page']
+  },
+  {
+    id: 'notes-window',
+    title: 'Notes window ⇧⌘N',
+    deck: 'shell-studio',
+    open: page('studio'),
+    window: {
+      role: 'notes',
+      open: 'notes-window-open',
+      bounds: 'notes-window-set-bounds',
+      close: 'notes-window-close',
+      width: 640,
+      height: 420
+    },
+    baseline: { screen: 'notes', state: 'default', size: { width: 640, height: 420 } },
+    sections: ['Notes window (notes-window.tsx)']
+  },
+  {
+    id: 'stream-manager-window',
+    title: 'Stream Manager window ⇧⌘J, 1100 px band',
+    deck: 'livestream',
+    open: page('studio'),
+    window: {
+      role: 'comments',
+      open: 'comments-window-open',
+      bounds: 'comments-window-set-bounds',
+      close: 'comments-window-close',
+      width: 1100,
+      height: 700
+    },
+    baseline: { screen: 'stream-manager', state: 'band-1100', size: { width: 1100, height: 700 } },
+    sections: ['Stream Manager — window and tiers']
+  }
 ])
 
 /** Screens in the order the runner shoots them: first run last. */
@@ -391,8 +477,8 @@ export function shotName(screenId, look, app) {
 /** The baseline PNG a screen pairs with in `look`, relative to the baseline folder. */
 export function baselinePath(screen, look) {
   if (!screen.baseline) return null
-  const { screen: folder, state } = screen.baseline
-  return `${folder}/${state}-${WINDOW.width}x${WINDOW.height}-${look}.png`
+  const { screen: folder, state, size = WINDOW } = screen.baseline
+  return `${folder}/${state}-${size.width}x${size.height}-${look}.png`
 }
 
 /**

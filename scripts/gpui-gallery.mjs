@@ -503,9 +503,18 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
               await command('ui-scroll', { ...at, dy: screen.scroll.dy })
               await sleep(SETTLE_MS)
             }
+            // A menu or dialog Electron's shooter opens with a click.
+            for (const step of screen.clicks ?? []) await clickFirst(ui, step)
+            if (screen.clicks) await sleep(SETTLE_MS)
           }
+          // One of the app's other windows, at the baseline's size, raised
+          // over the main one (GPUI stops drawing a covered window).
+          let otherWindowId = null
+          if (screen.window) otherWindowId = await openOtherWindow(command, screen.window)
           const png = join(gpuiDir, `${name}.png`)
-          const windowId = String(raisedWindowId ?? mainWindowId(app.process.pid, jxa))
+          const windowId = String(
+            otherWindowId ?? raisedWindowId ?? mainWindowId(app.process.pid, jxa)
+          )
           execFileSync('screencapture', ['-x', '-o', '-l', windowId, png])
           await sleep(WAKE_MS)
           execFileSync('screencapture', ['-x', '-o', '-l', windowId, png])
@@ -514,7 +523,9 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
           toJpeg(png, jpg)
           shot.gpui = { png: `gpui/${name}.png`, image: `img/${name}.jpg`, digest: digest(bytes) }
           if (screen.close) await closeScreen(ui, screen.close)
+          if (screen.window) await command(screen.window.close).catch(() => {})
         } catch (error) {
+          if (screen.window) await command(screen.window.close).catch(() => {})
           shot.gpui = { error: String(error?.message ?? error).slice(0, 300) }
           log(`${name}: ${shot.gpui.error}`)
         }
@@ -541,6 +552,35 @@ async function shoot({ bins, stateDir, screens, runDir, sha, baselineDir, parsed
     await stop()
   }
   return { sha, date: new Date().toISOString().slice(0, 10), window: WINDOW, screens: entries }
+}
+
+/** `clicks`: presses the first of `names` the window has (by role, when
+ * given); throws when none is there. */
+async function clickFirst(ui, { names, role = null }) {
+  let last = null
+  for (const name of names) {
+    try {
+      await ui.click(role ? { name, role } : { name }, { timeoutMs: 2_500 })
+      return
+    } catch (error) {
+      last = error
+    }
+  }
+  throw new Error(`none of ${names.join(' / ')} to click: ${last?.message ?? ''}`)
+}
+
+/** `window`: opens one of the app's other windows at `width` x `height`
+ * (as Electron's shooter does, at 120, 60), raises it floating and answers
+ * its window id for the capture. */
+async function openOtherWindow(command, { role, open, bounds, width, height }) {
+  await command(open)
+  await sleep(SETTLE_MS)
+  if (bounds) await command(bounds, { x: 120, y: 60, width, height })
+  await sleep(800)
+  const raised = await command('raise-window', { role, level: 'floating', focus: false })
+  if (!Number.isInteger(raised?.windowId)) throw new Error(`no window id for ${role}`)
+  await sleep(SETTLE_MS)
+  return raised.windowId
 }
 
 /** Closes what a screen opened: a key, or a button to click (Escape if it
