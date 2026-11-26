@@ -109,6 +109,7 @@ pub mod preview_startup;
 pub mod recordings_folder;
 mod recordings_folder_actions;
 pub mod remote;
+mod remote_actions;
 pub mod room_background;
 pub mod room_frames;
 pub mod room_media;

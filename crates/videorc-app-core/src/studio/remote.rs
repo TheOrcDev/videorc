@@ -21,6 +21,11 @@
 //!
 //! An admitted `remote.intent` runs here too, beside the event receiver,
 //! and is answered with `remote.intent.ack` (`{intentId, ok, message?}`).
+//! The session's, the microphone's and System audio's intents run below;
+//! the picture's, the banners', the sounds', Hide screen's, the clip's and
+//! the comment's in `remote_actions.rs`. The app's windows, the
+//! Stream Manager's screen and Sidekick Live still answer "Update
+//! Videorc" from here.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +37,7 @@ use serde_json::Value;
 use videorc_protocol::{DeviceKind, DeviceStatus, RecordingState};
 
 use super::audio_mixer;
+use super::remote_actions::{BannerVerb, PrivacyMode, SoundVerb};
 use super::session::{SessionActivity, SessionStartIntent};
 use super::{Connection, MicrophoneMode, StartOutcome, Studio, StudioBackend, StudioSnapshot};
 use crate::client::RemoteIntentEnvelope;
@@ -62,7 +68,37 @@ pub mod copy {
     pub const STREAM_NOT_SET_UP: &str = "Use Go Live on your computer first.";
     pub const MICROPHONE: &str = "Couldn't change the microphone.";
     pub const SYSTEM_AUDIO: &str = "System audio isn't available.";
+    pub const SCENE_MISSING: &str = "That scene isn't available anymore.";
+    pub const SCENE_FAILED: &str = "Couldn't switch the scene.";
+    pub const TAKEOVER_MISSING: &str = "That takeover isn't available anymore.";
+    pub const TAKEOVER_SHOW: &str = "Couldn't show the takeover.";
+    pub const TAKEOVER_HIDE: &str = "Couldn't hide the takeover.";
+    pub const BANNER_MISSING: &str = crate::studio::scene_editor::BANNER_ACTION_MISSING;
+    pub const BANNER_SHOW: &str = crate::studio::scene_editor::BANNER_ACTION_SHOW;
+    pub const BANNER_HIDE: &str = crate::studio::scene_editor::BANNER_ACTION_HIDE;
+    pub const BANNERS_HIDE: &str = crate::studio::scene_editor::BANNER_ACTION_HIDE_ALL;
+    pub const SOUND_MISSING: &str = crate::soundboard::SOUND_ACTION_MISSING;
+    pub const SCREEN_MISSING: &str = "That screen isn't connected. Pick your screens again.";
+    pub const MESSAGE_MISSING: &str = "Choose a message to put on stream.";
+    pub const CLIPS_OFF: &str = crate::studio::clips::copy::CLIPS_OFF_INTENT;
     pub const UNSUPPORTED: &str = "This version of Videorc can't do that. Update Videorc.";
+    /// What a key reads when its executor failed in a way it has no words
+    /// for (Electron's `catch`); the raw error is for the log only.
+    pub const FAILED: &str = "Something went wrong. Check Studio on your computer.";
+}
+
+/// An intent's answer: whether Videorc did it, and the words the remote
+/// shows when it didn't (a refusal's own sentence where one exists).
+pub(super) type IntentOutcome = (bool, Option<String>);
+
+/// Done: the remote reads the result from `remote.state`.
+pub(super) fn accepted() -> IntentOutcome {
+    (true, None)
+}
+
+/// Refused, with the words the remote shows.
+pub(super) fn refused(message: impl Into<String>) -> IntentOutcome {
+    (false, Some(message.into()))
 }
 
 /// `RemoteSurfaceSnapshot`: what `remote.surface.publish` sends.
@@ -185,6 +221,12 @@ pub struct RemoteExtras {
     pub stream_manager: RemoteStreamManager,
     pub screens: Vec<RemoteNamed>,
     pub screen_moves: ScreenMoves,
+}
+
+/// An intent's string field (`typeof fields.x === 'string' ? fields.x :
+/// undefined`).
+fn text_field<'a>(intent: &'a Value, key: &str) -> Option<&'a str> {
+    intent.get(key).and_then(Value::as_str)
 }
 
 /// The wire word of a session state.
@@ -511,38 +553,38 @@ impl<B: StudioBackend> Studio<B> {
     /// `executeRemoteIntent`: one intent, then its ack. A lost ack is not
     /// news: the remote also reads the state.
     #[doc(hidden)]
-    pub async fn run_remote_intent(&self, envelope: RemoteIntentEnvelope) {
+    pub async fn run_remote_intent(self: &Arc<Self>, envelope: RemoteIntentEnvelope) {
         let (ok, message) = self.execute_remote_intent(&envelope).await;
         let _ = self
             .backend
             .remote_intent_ack(RemoteIntentAckParams {
                 intent_id: envelope.intent_id,
                 ok,
-                message: message.map(str::to_string),
+                message,
             })
             .await;
     }
 
     async fn execute_remote_intent(
-        &self,
+        self: &Arc<Self>,
         envelope: &RemoteIntentEnvelope,
-    ) -> (bool, Option<&'static str>) {
-        let refused = |message| (false, Some(message));
+    ) -> IntentOutcome {
         let Some(kind) = envelope.kind() else {
             return refused(copy::UNSUPPORTED);
         };
+        let intent = &envelope.intent;
         let active = session_active(&self.snapshot());
         match kind {
             "recordStart" if active => refused(copy::ALREADY_RUNNING),
             "recordStart" => match self.start_recording().await {
-                StartOutcome::Started => (true, None),
+                StartOutcome::Started => accepted(),
                 StartOutcome::Busy => refused(copy::ALREADY_RUNNING),
                 StartOutcome::Refused { .. } => refused(copy::RECORD_DID_NOT_START),
             },
             "recordStop" | "streamStop" if !active => refused(copy::NOT_RUNNING),
             "recordStop" | "streamStop" => {
                 if self.stop().await {
-                    (true, None)
+                    accepted()
                 } else {
                     refused(copy::DID_NOT_STOP)
                 }
@@ -554,7 +596,7 @@ impl<B: StudioBackend> Studio<B> {
                     self.start_recording().await == StartOutcome::Started
                 };
                 if committed {
-                    (true, None)
+                    accepted()
                 } else {
                     refused(copy::TOGGLE_FAILED)
                 }
@@ -569,7 +611,7 @@ impl<B: StudioBackend> Studio<B> {
                     _ => MicrophoneMode::Toggle,
                 };
                 if self.set_microphone_muted(mode).await {
-                    (true, None)
+                    accepted()
                 } else {
                     refused(copy::MICROPHONE)
                 }
@@ -586,11 +628,51 @@ impl<B: StudioBackend> Studio<B> {
                     // mix from `remote.state` once the session reports it.
                     Some(target) => {
                         self.set_system_audio_enabled(target).await;
-                        (true, None)
+                        accepted()
                     }
                     None => refused(copy::SYSTEM_AUDIO),
                 }
             }
+            "sceneApply" => self.remote_scene_apply(intent).await,
+            "takeoverShow" => {
+                self.remote_takeover_show(text_field(intent, "assetId"))
+                    .await
+            }
+            "takeoverHide" => self.remote_takeover_hide().await,
+            "bannerShow" => {
+                self.remote_banner(BannerVerb::Show, text_field(intent, "bannerId"))
+                    .await
+            }
+            "bannerHide" => {
+                self.remote_banner(BannerVerb::Hide, text_field(intent, "bannerId"))
+                    .await
+            }
+            "bannerToggle" => {
+                self.remote_banner(BannerVerb::Toggle, text_field(intent, "bannerId"))
+                    .await
+            }
+            "soundPlay" => {
+                self.remote_sound(SoundVerb::Press, text_field(intent, "soundId"))
+                    .await
+            }
+            "soundStop" => {
+                self.remote_sound(SoundVerb::Stop, text_field(intent, "soundId"))
+                    .await
+            }
+            "screenHide" => self.remote_screen_privacy(PrivacyMode::Hide).await,
+            "screenShow" => self.remote_screen_privacy(PrivacyMode::Show).await,
+            "screenHideToggle" => self.remote_screen_privacy(PrivacyMode::Toggle).await,
+            // Electron hands the intent id in as the clip's `requestId`; only
+            // a talk show room's clip carries it, and app-core has none yet.
+            "clipMark" => self.remote_clip_mark(intent.get("seconds")).await,
+            "commentHighlight" => match text_field(intent, "messageId").filter(|id| !id.is_empty())
+            {
+                Some(message_id) => self.remote_comment_highlight(message_id).await,
+                None => refused(copy::MESSAGE_MISSING),
+            },
+            "commentHighlightClear" => self.remote_comment_highlight_clear().await,
+            // The app's windows, the Stream Manager's screen and Sidekick
+            // Live are the GPUI app's to drive: they answer from there.
             _ => refused(copy::UNSUPPORTED),
         }
     }

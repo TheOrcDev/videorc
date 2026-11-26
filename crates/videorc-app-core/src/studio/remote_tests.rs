@@ -225,29 +225,41 @@ fn intent(kind: &str) -> RemoteIntentEnvelope {
     }
 }
 
+fn intent_with(fields: Value) -> RemoteIntentEnvelope {
+    RemoteIntentEnvelope {
+        intent_id: "i1".to_string(),
+        intent: fields,
+    }
+}
+
+/// A refusal in the remote's words.
+fn no(message: &str) -> IntentOutcome {
+    (false, Some(message.to_string()))
+}
+
+fn silent_studio() -> Arc<Studio<Silent>> {
+    Arc::new(Studio::new(Arc::new(Silent), StudioConfig::default()))
+}
+
 #[tokio::test]
 async fn refused_intents_say_why_in_the_remotes_words() {
-    let studio = Studio::new(Arc::new(Silent), StudioConfig::default());
+    let studio = silent_studio();
     assert_eq!(
         studio.execute_remote_intent(&intent("recordStop")).await,
-        (false, Some(copy::NOT_RUNNING))
+        no(copy::NOT_RUNNING)
     );
     assert_eq!(
         studio.execute_remote_intent(&intent("streamStop")).await,
-        (false, Some(copy::NOT_RUNNING))
+        no(copy::NOT_RUNNING)
     );
     assert_eq!(
         studio.execute_remote_intent(&intent("streamStart")).await,
-        (false, Some(copy::STREAM_NOT_SET_UP))
+        no(copy::STREAM_NOT_SET_UP)
     );
     // No devices read: System audio isn't available.
     assert_eq!(
         studio.execute_remote_intent(&intent("systemAudioOn")).await,
-        (false, Some(copy::SYSTEM_AUDIO))
-    );
-    assert_eq!(
-        studio.execute_remote_intent(&intent("bannerShow")).await,
-        (false, Some(copy::UNSUPPORTED))
+        no(copy::SYSTEM_AUDIO)
     );
     let no_kind = RemoteIntentEnvelope {
         intent_id: "i2".to_string(),
@@ -255,8 +267,216 @@ async fn refused_intents_say_why_in_the_remotes_words() {
     };
     assert_eq!(
         studio.execute_remote_intent(&no_kind).await,
-        (false, Some(copy::UNSUPPORTED))
+        no(copy::UNSUPPORTED)
     );
+}
+
+#[tokio::test]
+async fn the_apps_own_intents_still_ask_for_an_update() {
+    // The windows, the Stream Manager's screen and Sidekick Live are the
+    // GPUI app's to drive (a follow-up).
+    let studio = silent_studio();
+    for kind in [
+        "windowFront",
+        "streamManagerScreenSwap",
+        "streamManagerFrontOrClose",
+        "buddyLiveOn",
+        "buddyLiveOff",
+        "buddyLiveToggle",
+        "somethingNew",
+    ] {
+        assert_eq!(
+            studio.execute_remote_intent(&intent(kind)).await,
+            no(copy::UNSUPPORTED),
+            "{kind}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_scene_key_without_a_known_scene_layout_or_screen_is_refused() {
+    let studio = silent_studio();
+    let refused_with = |fields: Value, message: &'static str| {
+        let studio = studio.clone();
+        async move {
+            assert_eq!(
+                studio
+                    .execute_remote_intent(&intent_with(fields.clone()))
+                    .await,
+                no(message),
+                "{fields}"
+            );
+        }
+    };
+    refused_with(json!({"kind": "sceneApply"}), copy::SCENE_MISSING).await;
+    refused_with(
+        json!({"kind": "sceneApply", "sceneId": "   "}),
+        copy::SCENE_MISSING,
+    )
+    .await;
+    refused_with(
+        json!({"kind": "sceneApply", "sceneId": "x".repeat(129)}),
+        copy::SCENE_MISSING,
+    )
+    .await;
+    refused_with(
+        json!({"kind": "sceneApply", "layoutPreset": "no-such-layout"}),
+        copy::SCENE_MISSING,
+    )
+    .await;
+    // A scene id that isn't a string reads as none: the layout decides.
+    refused_with(
+        json!({"kind": "sceneApply", "sceneId": 7}),
+        copy::SCENE_MISSING,
+    )
+    .await;
+    // A scene the library doesn't hold.
+    refused_with(
+        json!({"kind": "sceneApply", "sceneId": "gone"}),
+        copy::SCENE_FAILED,
+    )
+    .await;
+    // No device list: no screen by that id.
+    refused_with(
+        json!({"kind": "sceneApply", "screenId": "screen:1"}),
+        copy::SCREEN_MISSING,
+    )
+    .await;
+    refused_with(
+        json!({"kind": "sceneApply", "sceneId": "default-screen-only", "screenId": "screen:1"}),
+        copy::SCREEN_MISSING,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn takeover_banner_and_sound_keys_need_an_id_and_a_backend() {
+    let studio = silent_studio();
+    let run = |fields: Value| {
+        let studio = studio.clone();
+        async move { studio.execute_remote_intent(&intent_with(fields)).await }
+    };
+    assert_eq!(
+        run(json!({"kind": "takeoverShow"})).await,
+        no(copy::TAKEOVER_MISSING)
+    );
+    assert_eq!(
+        run(json!({"kind": "takeoverShow", "assetId": ""})).await,
+        no(copy::TAKEOVER_MISSING)
+    );
+    // The takeovers don't read: the plain failure, never "missing".
+    assert_eq!(
+        run(json!({"kind": "takeoverShow", "assetId": "brb"})).await,
+        no(copy::FAILED)
+    );
+    assert_eq!(
+        run(json!({"kind": "takeoverHide"})).await,
+        no(copy::TAKEOVER_HIDE)
+    );
+
+    assert_eq!(
+        run(json!({"kind": "bannerShow"})).await,
+        no(copy::BANNER_MISSING)
+    );
+    assert_eq!(
+        run(json!({"kind": "bannerToggle"})).await,
+        no(copy::BANNER_MISSING)
+    );
+    // A hide without an id hides them all.
+    assert_eq!(
+        run(json!({"kind": "bannerHide"})).await,
+        no(copy::BANNERS_HIDE)
+    );
+    assert_eq!(
+        run(json!({"kind": "bannerShow", "bannerId": "b1"})).await,
+        no(copy::FAILED)
+    );
+
+    assert_eq!(
+        run(json!({"kind": "soundPlay"})).await,
+        no(copy::SOUND_MISSING)
+    );
+    assert_eq!(
+        run(json!({"kind": "soundPlay", "soundId": 3})).await,
+        no(copy::SOUND_MISSING)
+    );
+    // A stop without an id stops every sound.
+    assert_eq!(
+        run(json!({"kind": "soundStop"})).await,
+        no(crate::soundboard::SOUND_ACTION_STOP_ALL)
+    );
+    assert_eq!(
+        run(json!({"kind": "soundPlay", "soundId": "airhorn"})).await,
+        no(copy::FAILED)
+    );
+}
+
+#[tokio::test]
+async fn hide_screen_keys_say_the_plain_failure_without_a_backend() {
+    let studio = silent_studio();
+    for kind in ["screenHide", "screenShow", "screenHideToggle"] {
+        assert_eq!(
+            studio.execute_remote_intent(&intent(kind)).await,
+            no(copy::FAILED),
+            "{kind}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_clip_key_checks_the_length_then_that_something_runs() {
+    let studio = silent_studio();
+    let run = |fields: Value| {
+        let studio = studio.clone();
+        async move { studio.execute_remote_intent(&intent_with(fields)).await }
+    };
+    let invalid = no(crate::studio::clips::INVALID_CLIP_LENGTH_MESSAGE);
+    assert_eq!(
+        run(json!({"kind": "clipMark", "seconds": 45})).await,
+        invalid
+    );
+    assert_eq!(
+        run(json!({"kind": "clipMark", "seconds": "30"})).await,
+        invalid
+    );
+    // No session and the Clips ring off: nothing to clip.
+    assert_eq!(run(json!({"kind": "clipMark"})).await, no(copy::CLIPS_OFF));
+    assert_eq!(
+        run(json!({"kind": "clipMark", "seconds": 60})).await,
+        no(copy::CLIPS_OFF)
+    );
+    assert_eq!(
+        run(json!({"kind": "clipMark", "seconds": null})).await,
+        no(copy::CLIPS_OFF)
+    );
+    assert_eq!(
+        copy::CLIPS_OFF,
+        "Clips are off, and you're not recording or live."
+    );
+}
+
+#[tokio::test]
+async fn a_comment_key_needs_a_message_the_chat_holds() {
+    let studio = silent_studio();
+    let run = |fields: Value| {
+        let studio = studio.clone();
+        async move { studio.execute_remote_intent(&intent_with(fields)).await }
+    };
+    assert_eq!(
+        run(json!({"kind": "commentHighlight"})).await,
+        no(copy::MESSAGE_MISSING)
+    );
+    assert_eq!(
+        run(json!({"kind": "commentHighlight", "messageId": ""})).await,
+        no(copy::MESSAGE_MISSING)
+    );
+    assert_eq!(
+        run(json!({"kind": "commentHighlight", "messageId": "m1"})).await,
+        no(crate::chat::highlight::copy::COMMENT_UNAVAILABLE)
+    );
+    let (ok, message) = run(json!({"kind": "commentHighlightClear"})).await;
+    assert!(!ok);
+    assert!(message.is_some_and(|message| !message.is_empty()));
 }
 
 #[test]

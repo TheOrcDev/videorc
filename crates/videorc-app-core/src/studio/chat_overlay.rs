@@ -193,6 +193,16 @@ impl<B: StudioBackend> Studio<B> {
         self.chat_overlay_kick.notify_one();
     }
 
+    /// The overlay layout as last read or pushed on this connection, else
+    /// read now (`overlayLayoutRef.current`, for a remote's comment card).
+    pub(super) async fn current_overlay_layout(&self) -> Option<Value> {
+        let held = self.chat_overlay_lock().layout.clone();
+        if held.is_some() {
+            return held;
+        }
+        self.overlay_layout().await.ok()
+    }
+
     /// Follows the session, chat and the layout, one pass at most every
     /// [`overlay::REPAINT`]: the first change at once, the rest folded into
     /// one pass at the interval's end. [`Self::drive`] runs it.

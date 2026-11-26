@@ -127,6 +127,13 @@ pub const BANNER_REFUSALS: [&str; 13] = [
     "HTML banners can't join this recording. Hide it, or record at 30 fps.",
 ];
 
+/// `BANNER_ACTION_COPY` (`lib/banners.ts`): what a show or hide away from
+/// Studio (a remote, the Stream Manager) says when it can't run.
+pub const BANNER_ACTION_MISSING: &str = "That banner isn't available anymore.";
+pub const BANNER_ACTION_SHOW: &str = "Couldn't show the banner.";
+pub const BANNER_ACTION_HIDE: &str = "Couldn't hide the banner.";
+pub const BANNER_ACTION_HIDE_ALL: &str = "Couldn't hide the banners.";
+
 /// `bannerRefusalError`: the refusal a backend message carries, if any.
 pub fn banner_refusal(message: &str) -> Option<&'static str> {
     BANNER_REFUSALS

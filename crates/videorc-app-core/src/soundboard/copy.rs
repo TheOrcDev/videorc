@@ -39,6 +39,33 @@ pub const SOUND_TOTAL_LIMIT_REASON: &str =
 pub const WAIT_FOR_IMPORT: &str = "Wait for this import to finish.";
 pub const OFFLINE_LOCK: &str = "Videorc is reconnecting. These controls come back in a moment.";
 
+/// `SOUND_REFUSALS` (`lib/sounds.ts`): the backend's refusals, said as they
+/// are, never as a generic failure.
+pub const SOUND_REFUSALS: [&str; 6] = [
+    "This file has no sound Videorc can play.",
+    "Sounds can be up to 30 seconds. Trim this one and try again.",
+    "This file is silent.",
+    "This file is too large. Use one under 50 MB.",
+    SOUND_COUNT_LIMIT_REASON,
+    SOUND_TOTAL_LIMIT_REASON,
+];
+
+/// `soundRefusal`: the refusal a failed `sounds.*` call's message carries,
+/// if any.
+pub fn sound_refusal(message: &str) -> Option<&'static str> {
+    SOUND_REFUSALS
+        .iter()
+        .copied()
+        .find(|sentence| message.contains(sentence))
+}
+
+/// `SOUND_ACTION_COPY` (`lib/sounds.ts`): what a play or stop away from
+/// Studio (a remote, the Stream Manager) says when it can't run.
+pub const SOUND_ACTION_MISSING: &str = "That sound isn't available anymore.";
+pub const SOUND_ACTION_PLAY: &str = "Couldn't play the sound.";
+pub const SOUND_ACTION_STOP: &str = "Couldn't stop the sound.";
+pub const SOUND_ACTION_STOP_ALL: &str = "Couldn't stop the sounds.";
+
 pub const SOUND_MAX_COUNT: usize = 24;
 pub const SOUND_VOLUME_DB_MIN: i32 = -24;
 pub const SOUND_VOLUME_DB_MAX: i32 = 6;
@@ -89,5 +116,18 @@ mod tests {
         assert_eq!(RESTORE_STARTERS, "Restore starter sounds");
         assert_eq!(MODE_ONE_SHOT, "Play once");
         assert_eq!(MODE_HOLD, "While held");
+    }
+
+    #[test]
+    fn a_refusal_is_found_in_the_backends_message() {
+        assert_eq!(
+            sound_refusal("sounds.press failed: This file is silent."),
+            Some("This file is silent.")
+        );
+        assert_eq!(
+            sound_refusal(SOUND_TOTAL_LIMIT_REASON),
+            Some(SOUND_TOTAL_LIMIT_REASON)
+        );
+        assert_eq!(sound_refusal("Sound not found."), None);
     }
 }
