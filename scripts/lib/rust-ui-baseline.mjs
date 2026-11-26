@@ -687,6 +687,16 @@ async function shootIdleStates({ ctx, tryStep, only, missing }) {
       await seedShowStage(ctx, null)
     })
   }
+  // Plan 260 C4: Guests ⌘7 with the same entitled/max CloudStatus as Show
+  // stage open (no LiveKit), so the gallery can pair against Electron.
+  await tryStep('guests', 'default', async () => {
+    await ctx.dismiss()
+    await seedShowStage(ctx, 'open')
+    await ctx.open('guests')
+    await sleep(800)
+    await ctx.shoot('guests', 'default')
+    await seedShowStage(ctx, null)
+  })
   await tryStep('assets', 'kebab-menu', async () => {
     await ctx.open('assets')
     await ctx.click('^Actions for ', {
