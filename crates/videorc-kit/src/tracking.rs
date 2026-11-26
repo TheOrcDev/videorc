@@ -8,9 +8,9 @@
 //! ellipsis` does.
 
 use gpui::{
-    App, Bounds, ElementId, Entity, IntoElement, Pixels, SharedString, Window, div, prelude::*, px,
+    App, ElementId, Font, Hsla, IntoElement, Pixels, ShapedLine, SharedString, TextAlign, TextRun,
+    Window, canvas, div, point, prelude::*, px,
 };
-use gpui_base::ElementExt as _;
 
 /// One line with CSS letter spacing.
 #[derive(IntoElement)]
@@ -41,9 +41,8 @@ impl TrackedText {
     /// Cut the line with a tracked `…` where it would overflow its column,
     /// as Electron's `truncate` on letter-spaced text (`min-w-0`,
     /// `text-overflow: ellipsis`): the line shrinks in a flex row and grows
-    /// back when there's room. `id` keys the measured fit; give each
-    /// truncating line its own. The cut is measured in the frame before, so
-    /// the very first frame is clipped without the `…`.
+    /// back when there's room, and the cut is painted in the same frame, for
+    /// its final width. `id` names the line's element; give each its own.
     pub fn truncate(mut self, id: impl Into<ElementId>) -> Self {
         self.truncate = Some(id.into());
         self
@@ -84,67 +83,53 @@ pub fn tracked_cut(xs: &[f32], gap: f32, ellipsis: f32, available: f32) -> Optio
     )
 }
 
-/// A truncating line's last measurement.
-#[derive(Clone, Default, PartialEq)]
-struct Fit {
-    text: SharedString,
-    /// The whole line's tracked width.
-    natural: f32,
-    cut: Option<usize>,
+/// The glow's eight copies, 1 px off each side and corner.
+const GLOW_OFFSETS: [(f32, f32); 8] = [
+    (-1.0, 0.0),
+    (1.0, 0.0),
+    (0.0, -1.0),
+    (0.0, 1.0),
+    (-1.0, -1.0),
+    (1.0, -1.0),
+    (-1.0, 1.0),
+    (1.0, 1.0),
+];
+
+/// One glyph shaped on its own (as the glyph-by-glyph row lays it out): its
+/// ink, and its glow copy in the ink at the glow's strength.
+struct Glyph {
+    ink: ShapedLine,
+    glow: Option<ShapedLine>,
 }
 
-fn fit_state(id: &ElementId, window: &mut Window, cx: &mut App) -> Entity<Fit> {
-    window.use_keyed_state(
-        SharedString::from(format!("{id}/tracked-fit")),
-        cx,
-        |_, _| Fit::default(),
-    )
-}
-
-/// Shapes the line in the face it inherits and records where it must cut
-/// for `bounds`, redrawing once when that changes.
-fn measure(
-    state: &Entity<Fit>,
-    text: &SharedString,
-    size: f32,
-    gap: f32,
-    bounds: Bounds<Pixels>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let style = window.text_style();
-    let shape = |words: SharedString, window: &Window| {
-        let run = style.to_run(words.len());
+fn shape_glyph(
+    window: &Window,
+    glyph: char,
+    font: &Font,
+    size: Pixels,
+    color: Hsla,
+    glow: Option<f32>,
+) -> Glyph {
+    // A lone space would shape to nothing: draw it unbreakable.
+    let text = SharedString::from((if glyph == ' ' { '\u{a0}' } else { glyph }).to_string());
+    let shape = |color: Hsla| {
+        let run = TextRun {
+            len: text.len(),
+            font: font.clone(),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
         window
             .text_system()
-            .shape_line(words, px(size), std::slice::from_ref(&run), None)
+            .shape_line(text.clone(), size, std::slice::from_ref(&run), None)
     };
-    let line = shape(text.clone(), window);
-    let mut xs: Vec<f32> = text
-        .char_indices()
-        .map(|(index, _)| f32::from(line.x_for_index(index)))
-        .collect();
-    xs.push(f32::from(line.width()));
-    let ellipsis = f32::from(shape(SharedString::from("\u{2026}"), window).width());
-    let glyphs = xs.len() - 1;
-    let natural = xs[glyphs] + glyphs as f32 * gap;
-    let chars: Vec<char> = text.chars().collect();
-    // CSS drops the spaces before the ellipsis ("3 DESTINATIO…").
-    let cut = tracked_cut(&xs, gap, ellipsis, f32::from(bounds.size.width)).map(|mut kept| {
-        while kept > 0 && chars[kept - 1] == ' ' {
-            kept -= 1;
-        }
-        kept
-    });
-    let next = Fit {
-        text: text.clone(),
-        natural,
-        cut,
-    };
-    if *state.read(cx) != next {
-        state.update(cx, |fit, _| *fit = next);
-        cx.notify(window.current_view());
-        window.on_next_frame(|window, _| window.refresh());
+    Glyph {
+        ink: shape(color),
+        glow: glow
+            .filter(|_| glyph != ' ')
+            .map(|strength| shape(color.opacity(strength))),
     }
 }
 
@@ -161,37 +146,15 @@ impl RenderOnce for TrackedText {
             // light glow barely shows on the pale screen.
             if crate::theme::is_dark(t) { 0.2 } else { 0.12 }
         });
-        let fit = self.truncate.as_ref().map(|id| fit_state(id, window, cx));
-        let (natural, cut) = fit
-            .as_ref()
-            .map(|state| state.read(cx))
-            .filter(|fit| fit.text == self.text)
-            .map_or((0.0, None), |fit| (fit.natural, fit.cut));
-        let shown: Vec<char> = match cut {
-            Some(kept) => self
-                .text
-                .chars()
-                .take(kept)
-                .chain(std::iter::once('\u{2026}'))
-                .collect(),
-            None => self.text.chars().collect(),
-        };
-        let glyphs = shown.into_iter().map(|glyph| {
+        if let Some(id) = self.truncate {
+            return truncated(id, self.text, self.size, gap, glow, window);
+        }
+        let glyphs = self.text.chars().map(|glyph| {
             // A lone space would shape to nothing: draw it unbreakable.
             let shown =
                 SharedString::from((if glyph == ' ' { '\u{a0}' } else { glyph }).to_string());
             let halo = glow.filter(|_| glyph != ' ').map(|strength| {
-                [
-                    (-1.0, 0.0),
-                    (1.0, 0.0),
-                    (0.0, -1.0),
-                    (0.0, 1.0),
-                    (-1.0, -1.0),
-                    (1.0, -1.0),
-                    (-1.0, 1.0),
-                    (1.0, 1.0),
-                ]
-                .map(|(x, y)| {
+                GLOW_OFFSETS.map(|(x, y)| {
                     div()
                         .absolute()
                         .left(px(x))
@@ -217,30 +180,86 @@ impl RenderOnce for TrackedText {
             .id(SharedString::from(format!("tracked/{}", self.text)))
             .text_size(px(self.size))
             .aria_label(name);
-        let Some(state) = fit else {
-            return root.flex().flex_none().child(row).into_any_element();
-        };
-        let (text, size) = (self.text.clone(), self.size);
-        // GPUI items shrink by default (flex-shrink 1); `min-w-0` lets it.
-        root.relative()
-            .min_w(px(0.0))
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .on_prepaint(move |bounds, window, cx| {
-                measure(&state, &text, size, gap, bounds, window, cx)
-            })
-            .map(|root| {
-                if natural > 0.0 {
-                    // The whole line's width sizes the box, so it shrinks
-                    // and grows like CSS text; the cut line paints over it.
-                    root.child(div().w(px(natural)).child("\u{a0}"))
-                        .child(row.absolute().top(px(0.0)).left(px(0.0)))
-                } else {
-                    root.child(row)
-                }
-            })
-            .into_any_element()
+        root.flex().flex_none().child(row).into_any_element()
     }
+}
+
+/// The truncating line, cut in the frame it's laid out in: its box is the
+/// whole tracked width (so it shrinks in a flex row, `min-w-0`, and grows
+/// back), and a canvas paints the glyphs that fit its final width, then the
+/// tracked `…`. The glyphs are shaped here, in the face, size and ink the line
+/// inherits (a component renders inside its parent's text style).
+fn truncated(
+    id: ElementId,
+    text: SharedString,
+    size: f32,
+    gap: f32,
+    glow: Option<f32>,
+    window: &mut Window,
+) -> gpui::AnyElement {
+    let mut style = window.text_style();
+    style.font_size = px(size).into();
+    let font = style.font();
+    let line_height = style.line_height_in_pixels(window.rem_size());
+    let chars: Vec<char> = text.chars().collect();
+    let shape = |glyph: char| shape_glyph(window, glyph, &font, px(size), style.color, glow);
+    let glyphs: Vec<Glyph> = chars.iter().map(|&glyph| shape(glyph)).collect();
+    let ellipsis = shape('\u{2026}');
+    // Untracked x at each glyph boundary.
+    let mut xs = Vec::with_capacity(glyphs.len() + 1);
+    xs.push(0.0_f32);
+    for glyph in &glyphs {
+        xs.push(xs[xs.len() - 1] + f32::from(glyph.ink.width()));
+    }
+    let natural = xs[glyphs.len()] + glyphs.len() as f32 * gap;
+    let ellipsis_width = f32::from(ellipsis.ink.width());
+    div()
+        .id(id)
+        .w(px(natural))
+        .h(line_height)
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .aria_label(text)
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, (), window, cx| {
+                    let available = f32::from(bounds.size.width);
+                    // CSS drops the spaces before the ellipsis ("3 DESTINATIO…").
+                    let cut = tracked_cut(&xs, gap, ellipsis_width, available).map(|mut kept| {
+                        while kept > 0 && chars[kept - 1] == ' ' {
+                            kept -= 1;
+                        }
+                        kept
+                    });
+                    let shown: Vec<&Glyph> = match cut {
+                        Some(kept) => glyphs[..kept]
+                            .iter()
+                            .chain(std::iter::once(&ellipsis))
+                            .collect(),
+                        None => glyphs.iter().collect(),
+                    };
+                    let mut x = bounds.origin.x;
+                    for glyph in shown {
+                        let origin = point(x, bounds.origin.y);
+                        if let Some(halo) = &glyph.glow {
+                            for (dx, dy) in GLOW_OFFSETS {
+                                let at = origin + point(px(dx), px(dy));
+                                let _ =
+                                    halo.paint(at, line_height, TextAlign::Left, None, window, cx);
+                            }
+                        }
+                        let _ =
+                            glyph
+                                .ink
+                                .paint(origin, line_height, TextAlign::Left, None, window, cx);
+                        x += glyph.ink.width() + px(gap);
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
 }
 
 #[cfg(test)]
