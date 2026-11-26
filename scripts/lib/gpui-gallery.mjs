@@ -248,7 +248,7 @@ export const SCREENS = Object.freeze([
     open: page('guests'),
     // Same entitled/max CloudStatus seed as Show stage open (no LiveKit).
     seed: { command: 'gallery-seed-show-stage', params: { kind: 'open' } },
-    after: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
+    after: { command: 'gallery-seed-show-stage', params: { kind: 'none' } },
     // Electron `guests/default` from the supplemental rust-ui-baseline pass.
     baseline: { screen: 'guests', state: 'default' },
     sections: ['Guests']
@@ -262,6 +262,9 @@ export const SCREENS = Object.freeze([
     deck: 'shell-studio',
     open: page('studio'),
     seed: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
+    // Clear the seeded cloud after the looks: later screens (Destinations)
+    // start from no cloud status, as a signed-out Basic app does.
+    after: { command: 'gallery-seed-show-stage', params: { kind: 'none' } },
     // Electron PNGs from the sentinel fresh show-stage overlay
     // (`~/videorc-gpui-baseline/2026-11-26-final/show-stage/`).
     baseline: { screen: 'show-stage', state: 'closed' },
@@ -277,7 +280,7 @@ export const SCREENS = Object.freeze([
     // kinds differ on screen (open vs screens vs host-camera-off).
     scroll: { dy: 420 },
     // Clear the seed after the looks so later Studio shots stay Preview.
-    after: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
+    after: { command: 'gallery-seed-show-stage', params: { kind: 'none' } },
     baseline: { screen: 'show-stage', state: 'open' },
     sections: ['Show stage']
   },
@@ -288,7 +291,7 @@ export const SCREENS = Object.freeze([
     open: page('studio'),
     seed: { command: 'gallery-seed-show-stage', params: { kind: 'screens' } },
     scroll: { dy: 420 },
-    after: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
+    after: { command: 'gallery-seed-show-stage', params: { kind: 'none' } },
     baseline: { screen: 'show-stage', state: 'screens' },
     sections: ['Show stage']
   },
@@ -299,7 +302,7 @@ export const SCREENS = Object.freeze([
     open: page('studio'),
     seed: { command: 'gallery-seed-show-stage', params: { kind: 'host-camera-off' } },
     scroll: { dy: 420 },
-    after: { command: 'gallery-seed-show-stage', params: { kind: 'closed' } },
+    after: { command: 'gallery-seed-show-stage', params: { kind: 'none' } },
     baseline: { screen: 'show-stage', state: 'host-camera-off' },
     sections: ['Show stage', 'Talk-show room host']
   },

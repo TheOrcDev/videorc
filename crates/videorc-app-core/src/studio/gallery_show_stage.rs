@@ -11,6 +11,9 @@ use crate::studio::room_media::{RoomMedia, RoomPerson, RoomScreen};
 /// Which Show stage look the gallery wants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GalleryShowStage {
+    /// No cloud at all: the status a signed-out Basic app starts with, so the
+    /// gallery's later screens (Destinations) show no cloud show or section.
+    None,
     /// Room closed: Preview stays; Show stage is not on screen.
     Closed,
     /// Room open: host + two guests, side-by-side; Screen + people is disabled
@@ -26,6 +29,7 @@ pub enum GalleryShowStage {
 impl GalleryShowStage {
     pub fn parse(id: &str) -> Option<Self> {
         match id {
+            "none" => Some(Self::None),
             "closed" => Some(Self::Closed),
             "open" => Some(Self::Open),
             "screens" => Some(Self::Screens),
@@ -36,6 +40,7 @@ impl GalleryShowStage {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::None => "none",
             Self::Closed => "closed",
             Self::Open => "open",
             Self::Screens => "screens",
@@ -50,6 +55,9 @@ const HOST: &str = "host:sh_gallery_show_stage";
 /// A `CloudStatus` for the gallery's Show stage seed. No network; the room
 /// facts are enough for Show stage, Guests strip and talk-show transport.
 pub fn gallery_cloud_status(kind: GalleryShowStage) -> CloudStatus {
+    if kind == GalleryShowStage::None {
+        return CloudStatus::default();
+    }
     let mut status = CloudStatus {
         phase: "live".into(),
         entitled: true,
@@ -64,7 +72,7 @@ pub fn gallery_cloud_status(kind: GalleryShowStage) -> CloudStatus {
         ..CloudStatus::default()
     };
     status.room = Some(match kind {
-        GalleryShowStage::Closed => room_closed(),
+        GalleryShowStage::None | GalleryShowStage::Closed => room_closed(),
         GalleryShowStage::Open => room_open(),
         GalleryShowStage::Screens => room_screens(),
         GalleryShowStage::HostCameraOff => room_host_camera_off(),
@@ -238,7 +246,7 @@ fn room_screens() -> Value {
 /// seeds: host camera on/off, Ada camera on / Grace camera off, optional screens.
 pub fn gallery_room_media(kind: GalleryShowStage) -> Option<RoomMedia> {
     match kind {
-        GalleryShowStage::Closed => None,
+        GalleryShowStage::None | GalleryShowStage::Closed => None,
         GalleryShowStage::Open => Some(RoomMedia {
             camera: true,
             microphone: true,
@@ -293,6 +301,18 @@ mod tests {
     use super::*;
     use crate::guests::wire::RoomStatus;
     use crate::studio::screen_views::talk_show_room;
+
+    #[test]
+    fn none_clears_the_cloud() {
+        let status = gallery_cloud_status(GalleryShowStage::None);
+        assert_eq!(status, CloudStatus::default());
+        assert!(status.show.is_none() && !status.entitled);
+        assert!(gallery_room_media(GalleryShowStage::None).is_none());
+        assert_eq!(
+            GalleryShowStage::parse("none"),
+            Some(GalleryShowStage::None)
+        );
+    }
 
     #[test]
     fn closed_keeps_the_preview() {
