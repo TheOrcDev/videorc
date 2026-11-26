@@ -607,7 +607,8 @@ impl DestinationsPanel {
                 }),
         );
 
-        let mut detail = div().flex().flex_col().gap(px(4.)).px(px(12.)).pb(px(8.));
+        // Electron: `flex flex-col gap-3 px-3 pb-3` under the row.
+        let mut detail = div().flex().flex_col().gap(px(12.)).px(px(12.)).pb(px(12.));
         let mut has_detail = false;
         if let Some(message) = &dest.status_message {
             has_detail = true;
