@@ -143,29 +143,29 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P062 | Section "Checks" ("Is anything wrong right now?") | Verdict alert, warnings, check chips | `renderer/components/tabs/diagnostics-tab.tsx:223` | [ ] | [ ] | [ ] |
-| P063 | Verdict alert | Overall health in words | `renderer/components/tabs/diagnostics-tab.tsx:224` | [ ] | [ ] | [ ] |
-| P064 | Permission warning "{Name} needs permission" | Names a missing grant and when it was last asked | `renderer/components/tabs/diagnostics-tab.tsx:229` | [ ] | [ ] | [ ] |
-| P065 | Fix button ("Allow…", "Reopen Videorc", "Open System Settings…" / "Open Windows Settings…") | Runs the permission fix *(macOS and Windows)* | `renderer/components/tabs/diagnostics-tab.tsx:514; renderer/lib/system-access-view.ts:50` | [ ] | [ ] | n/a |
-| P066 | "Dismiss" (×) on a permission warning | Hides that warning | `renderer/components/tabs/diagnostics-tab.tsx:521` | [ ] | [ ] | [ ] |
+| P062 | Section "Checks" ("Is anything wrong right now?") | Verdict alert, warnings, check chips | `renderer/components/tabs/diagnostics-tab.tsx:223` | [x] | [ ] | [ ] |
+| P063 | Verdict alert | Overall health in words | `renderer/components/tabs/diagnostics-tab.tsx:224` | [x] | [ ] | [ ] |
+| P064 | Permission warning "{Name} needs permission" | Names a missing grant and when it was last asked | `renderer/components/tabs/diagnostics-tab.tsx:229` | [x] | [ ] | [ ] |
+| P065 | Fix button ("Allow…", "Reopen Videorc", "Open System Settings…" / "Open Windows Settings…") | Runs the permission fix *(macOS and Windows)* | `renderer/components/tabs/diagnostics-tab.tsx:514; renderer/lib/system-access-view.ts:50` | [x] | [ ] | n/a |
+| P066 | "Dismiss" (×) on a permission warning | Hides that warning | `renderer/components/tabs/diagnostics-tab.tsx:521` | [x] | [ ] | [ ] |
 | P067 | Linux setup alerts (keyring / device groups / screen portal) | Says what to install; command text can be copied *(Linux only (hooks/use-linux-desktop-check.ts:22))* | `renderer/components/tabs/diagnostics-tab.tsx:239; renderer/components/linux-setup-alert.tsx:11` | n/a | n/a | [ ] |
-| P068 | "Videorc's recorder isn't available" | Alert when FFmpeg is missing | `renderer/components/tabs/diagnostics-tab.tsx:243` | [ ] | [ ] | [ ] |
-| P069 | Check chips + "Show all checks (N)" / "Show fewer checks" | Expands the full check list | `renderer/components/tabs/diagnostics-tab.tsx:477` | [ ] | [ ] | [ ] |
-| P070 | Section "Cloud room" (In the room / Program pages / Outputs / Videorc Cloud) | Per-layer health while a cloud room is open | `renderer/components/tabs/cloud-program-health.tsx:80` | [ ] | [ ] | [ ] |
-| P071 | Section "Support bundle" + "Export support bundle" | Exports redacted logs and checks | `renderer/components/tabs/diagnostics-tab.tsx:261; support-bundle-button.tsx:19` | [ ] | [ ] | [ ] |
-| P072 | Collapsible "Technical details" | Expands the metric groups | `renderer/components/tabs/diagnostics-tab.tsx:541` | [ ] | [ ] | [ ] |
-| P073 | Group "Overview" | Recording and stream summary metrics | `renderer/components/tabs/diagnostics-tab.tsx:265` | [ ] | [ ] | [ ] |
-| P074 | Group "Start and stop" | Click→recording, timelines, slowest phases | `renderer/components/tabs/diagnostics-tab.tsx:268` | [ ] | [ ] | [ ] |
-| P075 | Group "App connection" | WebSocket transport metrics | `renderer/components/tabs/diagnostics-tab.tsx:302` | [ ] | [ ] | [ ] |
-| P076 | Group "Preview" | Preview path, FPS and latency metrics *("Metal p95" macOS only (diagnostics-tab.tsx:310); some rows hidden on Linux)* | `renderer/components/tabs/diagnostics-tab.tsx:307` | [ ] | [ ] | [ ] |
-| P077 | Group "Recording and encoder" | Encoder, bitrates, writer timings *(VT/Metal rows macOS only (diagnostics-tab.tsx:318))* | `renderer/components/tabs/diagnostics-tab.tsx:316` | [ ] | [ ] | [ ] |
-| P078 | Group "System and sources" + device warnings | Memory, processes, sources, device warnings | `renderer/components/tabs/diagnostics-tab.tsx:322` | [ ] | [ ] | [ ] |
-| P079 | Group "Videorc Camera" | Virtual-camera state, apps using it, frames *(hidden where the camera is hidden)* *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/tabs/diagnostics-tab.tsx:348` | [ ] | n/a | [ ] |
-| P080 | "Remove Videorc Camera" + confirm "Remove Videorc Camera?" | Turns the camera off and deactivates the system extension *(macOS only (diagnostics-tab.tsx:743))* | `renderer/components/tabs/diagnostics-tab.tsx:746` | [ ] | n/a | n/a |
-| P081 | Group "Pipeline" | Each recording stage's state, or "Nothing is recording." | `renderer/components/tabs/diagnostics-tab.tsx:354` | [ ] | [ ] | [ ] |
-| P082 | Group "Alerts" | Watchdog alert history for the session | `renderer/components/tabs/diagnostics-tab.tsx:382` | [ ] | [ ] | [ ] |
-| P083 | Group "Log of this recording" / "Log of the last recording" | Session log lines | `renderer/components/tabs/diagnostics-tab.tsx:398` | [ ] | [ ] | [ ] |
-| P084 | Group "App log" + last engine crash | App log tail and the last backend crash | `renderer/components/tabs/diagnostics-tab.tsx:424` | [ ] | [ ] | [ ] |
+| P068 | "Videorc's recorder isn't available" | Alert when FFmpeg is missing | `renderer/components/tabs/diagnostics-tab.tsx:243` | [x] | [ ] | [ ] |
+| P069 | Check chips + "Show all checks (N)" / "Show fewer checks" | Expands the full check list | `renderer/components/tabs/diagnostics-tab.tsx:477` | [x] | [ ] | [ ] |
+| P070 | Section "Cloud room" (In the room / Program pages / Outputs / Videorc Cloud) | Per-layer health while a cloud room is open | `renderer/components/tabs/cloud-program-health.tsx:80` | [x] | [ ] | [ ] |
+| P071 | Section "Support bundle" + "Export support bundle" | Exports redacted logs and checks | `renderer/components/tabs/diagnostics-tab.tsx:261; support-bundle-button.tsx:19` | [x] | [ ] | [ ] |
+| P072 | Collapsible "Technical details" | Expands the metric groups | `renderer/components/tabs/diagnostics-tab.tsx:541` | [x] | [ ] | [ ] |
+| P073 | Group "Overview" | Recording and stream summary metrics | `renderer/components/tabs/diagnostics-tab.tsx:265` | [x] | [ ] | [ ] |
+| P074 | Group "Start and stop" | Click→recording, timelines, slowest phases | `renderer/components/tabs/diagnostics-tab.tsx:268` | [x] | [ ] | [ ] |
+| P075 | Group "App connection" | WebSocket transport metrics | `renderer/components/tabs/diagnostics-tab.tsx:302` | [x] | [ ] | [ ] |
+| P076 | Group "Preview" | Preview path, FPS and latency metrics *("Metal p95" macOS only (diagnostics-tab.tsx:310); some rows hidden on Linux)* | `renderer/components/tabs/diagnostics-tab.tsx:307` | [x] | [ ] | [ ] |
+| P077 | Group "Recording and encoder" | Encoder, bitrates, writer timings *(VT/Metal rows macOS only (diagnostics-tab.tsx:318))* | `renderer/components/tabs/diagnostics-tab.tsx:316` | [x] | [ ] | [ ] |
+| P078 | Group "System and sources" + device warnings | Memory, processes, sources, device warnings | `renderer/components/tabs/diagnostics-tab.tsx:322` | [x] | [ ] | [ ] |
+| P079 | Group "Videorc Camera" | Virtual-camera state, apps using it, frames *(hidden where the camera is hidden)* *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/tabs/diagnostics-tab.tsx:348` | [x] | n/a | [ ] |
+| P080 | "Remove Videorc Camera" + confirm "Remove Videorc Camera?" | Turns the camera off and deactivates the system extension *(macOS only (diagnostics-tab.tsx:743))* | `renderer/components/tabs/diagnostics-tab.tsx:746` | [x] | n/a | n/a |
+| P081 | Group "Pipeline" | Each recording stage's state, or "Nothing is recording." | `renderer/components/tabs/diagnostics-tab.tsx:354` | [x] | [ ] | [ ] |
+| P082 | Group "Alerts" | Watchdog alert history for the session | `renderer/components/tabs/diagnostics-tab.tsx:382` | [x] | [ ] | [ ] |
+| P083 | Group "Log of this recording" / "Log of the last recording" | Session log lines | `renderer/components/tabs/diagnostics-tab.tsx:398` | [x] | [ ] | [ ] |
+| P084 | Group "App log" + last engine crash | App log tail and the last backend crash | `renderer/components/tabs/diagnostics-tab.tsx:424` | [x] | [ ] | [ ] |
 
 ### ⌘K command palette
 
@@ -963,11 +963,11 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P646 | Header "Captions reader" + status dot | Window title and caption state | `renderer/components/captions-reader.tsx:62-65` | [ ] | [ ] | [ ] |
-| P647 | "Keep on top" pin | Toggles always-on-top | `renderer/components/captions-reader.tsx:66-68; renderer/components/pin-window-button.tsx:10` | [ ] | [ ] | [ ] |
-| P648 | Notice line ("Starting captions…", "Live captions are off…", errors) | Status or empty states; errors use role alert | `renderer/components/captions-reader.tsx:78-96; renderer/lib/captions-page-view.ts:78-116` | [ ] | [ ] | [ ] |
-| P649 | Caption feed (last 8 lines, auto-scroll) | Latest line styled, larger | `renderer/components/captions-reader.tsx:42-47, 97-118` | [ ] | [ ] | [ ] |
-| P650 | Top / bottom alignment and text size | Follows the caption position and size settings | `renderer/components/captions-reader.tsx:55, 74` | [ ] | [ ] | [ ] |
+| P646 | Header "Captions reader" + status dot | Window title and caption state | `renderer/components/captions-reader.tsx:62-65` | [x] | [ ] | [ ] |
+| P647 | "Keep on top" pin | Toggles always-on-top | `renderer/components/captions-reader.tsx:66-68; renderer/components/pin-window-button.tsx:10` | [x] | [ ] | [ ] |
+| P648 | Notice line ("Starting captions…", "Live captions are off…", errors) | Status or empty states; errors use role alert | `renderer/components/captions-reader.tsx:78-96; renderer/lib/captions-page-view.ts:78-116` | [x] | [ ] | [ ] |
+| P649 | Caption feed (last 8 lines, auto-scroll) | Latest line styled, larger | `renderer/components/captions-reader.tsx:42-47, 97-118` | [x] | [ ] | [ ] |
+| P650 | Top / bottom alignment and text size | Follows the caption position and size settings | `renderer/components/captions-reader.tsx:55, 74` | [x] | [ ] | [ ] |
 
 ### Output ⌘5: Local recording (components/tabs/recording-tab.tsx)
 
@@ -977,11 +977,11 @@ until the runtime, visual and accessibility checks above can run.
 | P652 | "Save a local recording" switch | Saves an MP4, or stream only | `renderer/components/tabs/recording-tab.tsx:266-284` | [x] | [ ] | [ ] |
 | P653 | "Separate source recordings" switch + warnings | Also saves Screen and Camera files *(macOS only (lib/capture.ts:255-257))* | `renderer/components/tabs/recording-tab.tsx:290-343` | [x] | n/a | n/a |
 | P654 | "Recording preset" select | Quality preset ("Editing a value below switches the preset to Custom.") | `renderer/components/tabs/recording-tab.tsx:346-368` | [x] | [ ] | [ ] |
-| P655 | Performance check line + "Use {preset}" + "Check this computer" / "Check again" | Verifies that the quality holds on this machine | `renderer/components/tabs/recording-tab.tsx:369-415; renderer/lib/performance-check-line.ts` | [ ] | [ ] | [ ] |
-| P656 | Entitlement lock alert | The quality needs a plan | `renderer/components/tabs/recording-tab.tsx:416-421` | [ ] | [ ] | [ ] |
-| P657 | Compatibility alert (destructive or warning) | The profile can't run or is risky *(per platform (lib/capture.ts:1075))* | `renderer/components/tabs/recording-tab.tsx:422-426` | [ ] | [ ] | [ ] |
+| P655 | Performance check line + "Use {preset}" + "Check this computer" / "Check again" | Verifies that the quality holds on this machine | `renderer/components/tabs/recording-tab.tsx:369-415; renderer/lib/performance-check-line.ts` | [x] | [ ] | [ ] |
+| P656 | Entitlement lock alert | The quality needs a plan | `renderer/components/tabs/recording-tab.tsx:416-421` | [x] | [ ] | [ ] |
+| P657 | Compatibility alert (destructive or warning) | The profile can't run or is risky *(per platform (lib/capture.ts:1075))* | `renderer/components/tabs/recording-tab.tsx:422-426` | [x] | [ ] | [ ] |
 | P658 | "Resolution" "4K" / "1440p" / "1080p" / "720p" | One-click canvas size per orientation | `renderer/components/tabs/recording-tab.tsx:429-448; renderer/lib/capture.ts:542-554` | [x] | [ ] | [ ] |
-| P659 | "Width" / "Height" / "FPS" / "Bitrate kbps" inputs | Exact values; Enter commits, Escape reverts, shows a refusal error | `renderer/components/tabs/recording-tab.tsx:601-681` | [ ] | [ ] | [ ] |
+| P659 | "Width" / "Height" / "FPS" / "Bitrate kbps" inputs | Exact values; Enter commits, Escape reverts, shows a refusal error | `renderer/components/tabs/recording-tab.tsx:601-681` | [x] | [ ] | [ ] |
 | P660 | "Fallback video encoder" (Beta): "Automatic" / "Intel Quick Sync" / "Software only" | Backup H.264 encoder *(Windows with Intel Quick Sync only)* | `renderer/components/settings/encoder-preference-field.tsx:14-73; recording-tab.tsx:468-479` | n/a | [ ] | n/a |
 
 ### Output ⌘5: Clips (recording-tab.tsx, cloud-clips-section.tsx)
@@ -990,12 +990,12 @@ until the runtime, visual and accessibility checks above can run.
 | --- | --- | --- | --- | :-: | :-: | :-: |
 | P661 | "Keep the last seconds" switch + state line | Keeps a one-minute buffer while open; shows a blocked reason | `renderer/components/tabs/recording-tab.tsx:133-153` | [x] | [ ] | [ ] |
 | P662 | "Disk use" "about {size}" | Estimated buffer size on disk | `renderer/components/tabs/recording-tab.tsx:154-160` | [x] | [ ] | [ ] |
-| P663 | "Save a 30-second clip" key recorder | Global clip key, conflict check | `renderer/components/tabs/recording-tab.tsx:161-185; renderer/lib/global-shortcuts.ts:123` | [ ] | [ ] | [ ] |
-| P664 | "Save a 1-minute clip" key recorder | Global long-clip key | `renderer/components/tabs/recording-tab.tsx:161-185; renderer/lib/global-shortcuts.ts:124` | [ ] | [ ] | [ ] |
+| P663 | "Save a 30-second clip" key recorder | Global clip key, conflict check | `renderer/components/tabs/recording-tab.tsx:161-185; renderer/lib/global-shortcuts.ts:123` | [x] | [ ] | [ ] |
+| P664 | "Save a 1-minute clip" key recorder | Global long-clip key | `renderer/components/tabs/recording-tab.tsx:161-185; renderer/lib/global-shortcuts.ts:124` | [x] | [ ] | [ ] |
 | P665 | "Where clips go" row | Says clips go to a Clips subfolder | `renderer/components/tabs/recording-tab.tsx:186-190` | [x] | [ ] | [ ] |
-| P666 | Cloud "Clips" (room open): "Clip program orientation" Horizontal / Vertical | Replaces the native section while a room is open | `renderer/components/tabs/cloud-clips-section.tsx:60-81; recording-tab.tsx:103-108` | [ ] | [ ] | [ ] |
-| P667 | Cloud "Enable cloud Clips" / "Disable Clips" | Opt into the cloud buffer | `renderer/components/tabs/cloud-clips-section.tsx:84-127` | [ ] | [ ] | [ ] |
-| P668 | Cloud jobs "Cancel clip" / "Retry clip" / "Dismiss job" / "Discard staging files" + error alert | Manages clip jobs | `renderer/components/tabs/cloud-clips-section.tsx:140-191` | [ ] | [ ] | [ ] |
+| P666 | Cloud "Clips" (room open): "Clip program orientation" Horizontal / Vertical | Replaces the native section while a room is open | `renderer/components/tabs/cloud-clips-section.tsx:60-81; recording-tab.tsx:103-108` | [x] | [ ] | [ ] |
+| P667 | Cloud "Enable cloud Clips" / "Disable Clips" | Opt into the cloud buffer | `renderer/components/tabs/cloud-clips-section.tsx:84-127` | [x] | [ ] | [ ] |
+| P668 | Cloud jobs "Cancel clip" / "Retry clip" / "Dismiss job" / "Discard staging files" + error alert | Manages clip jobs | `renderer/components/tabs/cloud-clips-section.tsx:140-191` | [x] | [ ] | [ ] |
 
 ### Output ⌘5: Videorc Camera (components/tabs/videorc-camera-section.tsx)
 
@@ -1889,87 +1889,87 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1281 | Page key ⇧⌘G ("Images") | Opens Images | `shared/sidebar-pages.ts:105` | [ ] | [ ] | [ ] |
-| P1282 | Header "Images" | Page header | `renderer/components/tabs/assets-tab.tsx:207` | [ ] | [ ] | [ ] |
-| P1283 | Section "Backgrounds" + "Import image…" | Imports a background image | `renderer/components/tabs/assets-tab.tsx:212` | [ ] | [ ] | [ ] |
-| P1284 | Current-scene background row: style control + "Use no background" | Tunes or removes the current background | `renderer/components/tabs/assets-tab.tsx:222` | [ ] | [ ] | [ ] |
-| P1285 | Live backgrounds tiles (click applies or removes) | Animated backgrounds | `renderer/components/live-backgrounds-group.tsx:122` | [ ] | [ ] | [ ] |
-| P1286 | Live "Adjust style": "Look" select, "Motion" segmented, sliders | Tunes a live background | `renderer/components/live-backgrounds-group.tsx:208` | [ ] | [ ] | [ ] |
-| P1287 | Image tiles (click applies, removes or imports; double-click renames) | Toggles a background on the scene | `renderer/components/tabs/assets-tab.tsx:400` | [ ] | [ ] | [ ] |
-| P1288 | Status badges (Empty / Ready / In use / File missing / Unsupported) | Tile status | `renderer/components/tabs/assets-tab.tsx:77` | [ ] | [ ] | [ ] |
-| P1289 | Empty slot "Add image…" / "Restore default" | Fills or restores a slot | `renderer/components/tabs/assets-tab.tsx:442` | [ ] | [ ] | [ ] |
-| P1290 | Inline rename input (Enter / Esc) | Renames a background | `renderer/components/tabs/assets-tab.tsx:455` | [ ] | [ ] | [ ] |
-| P1291 | "Actions for {name}" menu: "Rename…", "Replace image…", Show in Finder/Explorer, "Reset style to defaults", "Remove" | Tile actions *(Reveal label varies by OS (lib/platform.ts:114))* | `renderer/components/tabs/assets-tab.tsx:485` | [ ] | [ ] | [ ] |
-| P1292 | "Adjust style" popover: "Fit" (Fill / Fit / Stretch) + Visibility, Scale, Pan X, Pan Y, Blur, Dim, Saturation | Tunes image placement and look | `renderer/components/tabs/assets-tab.tsx:551` | [ ] | [ ] | [ ] |
-| P1293 | Confirm "Remove applied background?" / "Remove {name}?" | Confirms removing a background | `renderer/components/tabs/assets-tab.tsx:310` | [ ] | [ ] | [ ] |
-| P1294 | Dialog "Replace which background?" + "Replace {slot}" | Chooses the slot when all slots are full | `renderer/components/background-replace-dialog.tsx:107` | [ ] | [ ] | [ ] |
-| P1295 | Section "Banners": "Import image…" / "Import HTML…" | Imports a banner | `renderer/components/banners-section.tsx:106` | [ ] | [ ] | [ ] |
-| P1296 | Banner tiles (drag to reorder, "Showing" chip, timing chip) | Banner gallery | `renderer/components/banners-section.tsx:150` | [ ] | [ ] | [ ] |
-| P1297 | Banner menu: "Show"/"Hide", "Place on Scene", "Rename…", "Move earlier" (Alt+←), "Move later" (Alt+→), "Delete…" | Banner actions | `renderer/components/banners-section.tsx:305` | [ ] | [ ] | [ ] |
-| P1298 | Banner rename input (Enter / Esc) | Renames a banner | `renderer/components/banners-section.tsx:382` | [ ] | [ ] | [ ] |
-| P1299 | Banner empty "No banners yet" / "Loading banners…" / offline alert | Empty and offline states | `renderer/components/banners-section.tsx:204` | [ ] | [ ] | [ ] |
-| P1300 | Confirm "Delete banner?" | Deletes a banner | `renderer/components/banners-section.tsx:215` | [ ] | [ ] | [ ] |
-| P1301 | Section "Takeovers" + "Import images…" (also drag-drop files) | Imports full-frame takeover images | `renderer/components/takeover-screens-section.tsx:112` | [ ] | [ ] | [ ] |
-| P1302 | Quiet alert (editing blocked while recording or live) | Explains the lock | `renderer/components/takeover-screens-section.tsx:152` | [ ] | [ ] | [ ] |
-| P1303 | Takeover tile: "Takeover name" input + "Save takeover name" | Renames a takeover | `renderer/components/takeover-screens-section.tsx:426` | [ ] | [ ] | [ ] |
-| P1304 | "Move earlier" / "Move later" (Alt+←/→, drag) | Reorders takeovers | `renderer/components/takeover-screens-section.tsx:452` | [ ] | [ ] | [ ] |
-| P1305 | "Delete takeover" + confirm "Delete {name}?" | Deletes a takeover | `renderer/components/takeover-screens-section.tsx:490` | [ ] | [ ] | [ ] |
-| P1306 | Takeover empty "No takeovers yet" / "Loading takeovers…" | Empty states | `renderer/components/takeover-screens-section.tsx:210` | [ ] | [ ] | [ ] |
+| P1281 | Page key ⇧⌘G ("Images") | Opens Images | `shared/sidebar-pages.ts:105` | [x] | [ ] | [ ] |
+| P1282 | Header "Images" | Page header | `renderer/components/tabs/assets-tab.tsx:207` | [x] | [ ] | [ ] |
+| P1283 | Section "Backgrounds" + "Import image…" | Imports a background image | `renderer/components/tabs/assets-tab.tsx:212` | [x] | [ ] | [ ] |
+| P1284 | Current-scene background row: style control + "Use no background" | Tunes or removes the current background | `renderer/components/tabs/assets-tab.tsx:222` | [x] | [ ] | [ ] |
+| P1285 | Live backgrounds tiles (click applies or removes) | Animated backgrounds | `renderer/components/live-backgrounds-group.tsx:122` | [x] | [ ] | [ ] |
+| P1286 | Live "Adjust style": "Look" select, "Motion" segmented, sliders | Tunes a live background | `renderer/components/live-backgrounds-group.tsx:208` | [x] | [ ] | [ ] |
+| P1287 | Image tiles (click applies, removes or imports; double-click renames) | Toggles a background on the scene | `renderer/components/tabs/assets-tab.tsx:400` | [x] | [ ] | [ ] |
+| P1288 | Status badges (Empty / Ready / In use / File missing / Unsupported) | Tile status | `renderer/components/tabs/assets-tab.tsx:77` | [x] | [ ] | [ ] |
+| P1289 | Empty slot "Add image…" / "Restore default" | Fills or restores a slot | `renderer/components/tabs/assets-tab.tsx:442` | [x] | [ ] | [ ] |
+| P1290 | Inline rename input (Enter / Esc) | Renames a background | `renderer/components/tabs/assets-tab.tsx:455` | [x] | [ ] | [ ] |
+| P1291 | "Actions for {name}" menu: "Rename…", "Replace image…", Show in Finder/Explorer, "Reset style to defaults", "Remove" | Tile actions *(Reveal label varies by OS (lib/platform.ts:114))* | `renderer/components/tabs/assets-tab.tsx:485` | [x] | [ ] | [ ] |
+| P1292 | "Adjust style" popover: "Fit" (Fill / Fit / Stretch) + Visibility, Scale, Pan X, Pan Y, Blur, Dim, Saturation | Tunes image placement and look | `renderer/components/tabs/assets-tab.tsx:551` | [x] | [ ] | [ ] |
+| P1293 | Confirm "Remove applied background?" / "Remove {name}?" | Confirms removing a background | `renderer/components/tabs/assets-tab.tsx:310` | [x] | [ ] | [ ] |
+| P1294 | Dialog "Replace which background?" + "Replace {slot}" | Chooses the slot when all slots are full | `renderer/components/background-replace-dialog.tsx:107` | [x] | [ ] | [ ] |
+| P1295 | Section "Banners": "Import image…" / "Import HTML…" | Imports a banner | `renderer/components/banners-section.tsx:106` | [x] | [ ] | [ ] |
+| P1296 | Banner tiles (drag to reorder, "Showing" chip, timing chip) | Banner gallery | `renderer/components/banners-section.tsx:150` | [x] | [ ] | [ ] |
+| P1297 | Banner menu: "Show"/"Hide", "Place on Scene", "Rename…", "Move earlier" (Alt+←), "Move later" (Alt+→), "Delete…" | Banner actions | `renderer/components/banners-section.tsx:305` | [x] | [ ] | [ ] |
+| P1298 | Banner rename input (Enter / Esc) | Renames a banner | `renderer/components/banners-section.tsx:382` | [x] | [ ] | [ ] |
+| P1299 | Banner empty "No banners yet" / "Loading banners…" / offline alert | Empty and offline states | `renderer/components/banners-section.tsx:204` | [x] | [ ] | [ ] |
+| P1300 | Confirm "Delete banner?" | Deletes a banner | `renderer/components/banners-section.tsx:215` | [x] | [ ] | [ ] |
+| P1301 | Section "Takeovers" + "Import images…" (also drag-drop files) | Imports full-frame takeover images | `renderer/components/takeover-screens-section.tsx:112` | [x] | [ ] | [ ] |
+| P1302 | Quiet alert (editing blocked while recording or live) | Explains the lock | `renderer/components/takeover-screens-section.tsx:152` | [x] | [ ] | [ ] |
+| P1303 | Takeover tile: "Takeover name" input + "Save takeover name" | Renames a takeover | `renderer/components/takeover-screens-section.tsx:426` | [x] | [ ] | [ ] |
+| P1304 | "Move earlier" / "Move later" (Alt+←/→, drag) | Reorders takeovers | `renderer/components/takeover-screens-section.tsx:452` | [x] | [ ] | [ ] |
+| P1305 | "Delete takeover" + confirm "Delete {name}?" | Deletes a takeover | `renderer/components/takeover-screens-section.tsx:490` | [x] | [ ] | [ ] |
+| P1306 | Takeover empty "No takeovers yet" / "Loading takeovers…" | Empty states | `renderer/components/takeover-screens-section.tsx:210` | [x] | [ ] | [ ] |
 
 ### Sounds page (⇧⌘S; tabs/sounds-tab.tsx, sounds-section.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1307 | Page key ⇧⌘S + header "Sounds" | Opens the Sounds page | `renderer/components/tabs/sounds-tab.tsx:15` | [ ] | [ ] | [ ] |
-| P1308 | "Import sounds…" / "Choosing sounds…" | Imports audio files | `renderer/components/sounds-section.tsx:90` | [ ] | [ ] | [ ] |
-| P1309 | Offline alert | Backend offline | `renderer/components/sounds-section.tsx:115` | [ ] | [ ] | [ ] |
-| P1310 | Row "Play/Stop {name}" | Previews the sound | `renderer/components/sounds-section.tsx:242` | [ ] | [ ] | [ ] |
-| P1311 | "How {name} plays" select (Play once / Play/stop / Loop / While held) | Sets the pad's play mode | `renderer/components/sounds-section.tsx:262` | [ ] | [ ] | [ ] |
-| P1312 | "{name} volume" fader | Sets this sound's volume | `renderer/components/sounds-section.tsx:277` | [ ] | [ ] | [ ] |
-| P1313 | "{name} key" select (None, 1–9) | Assigns a pad hotkey | `renderer/components/sounds-section.tsx:314` | [ ] | [ ] | [ ] |
-| P1314 | "Actions for {name}": "Rename…", "Move up", "Move down", "Remove" | Row actions | `renderer/components/sounds-section.tsx:213` | [ ] | [ ] | [ ] |
-| P1315 | Dialog "Rename sound" ("Name", "Cancel" / "Save") | Renames a sound | `renderer/components/sounds-section.tsx:352` | [ ] | [ ] | [ ] |
-| P1316 | Empty "No sounds yet" + import | Shown with no sounds | `renderer/components/sounds-section.tsx:142` | [ ] | [ ] | [ ] |
-| P1317 | "Restore starter sounds" | Re-adds the bundled sounds | `renderer/components/sounds-section.tsx:149` | [ ] | [ ] | [ ] |
-| P1318 | Loading / "Couldn't load sounds" + "Retry" | Load states | `renderer/components/sounds-load-state.tsx:72` | [ ] | [ ] | [ ] |
+| P1307 | Page key ⇧⌘S + header "Sounds" | Opens the Sounds page | `renderer/components/tabs/sounds-tab.tsx:15` | [x] | [ ] | [ ] |
+| P1308 | "Import sounds…" / "Choosing sounds…" | Imports audio files | `renderer/components/sounds-section.tsx:90` | [x] | [ ] | [ ] |
+| P1309 | Offline alert | Backend offline | `renderer/components/sounds-section.tsx:115` | [x] | [ ] | [ ] |
+| P1310 | Row "Play/Stop {name}" | Previews the sound | `renderer/components/sounds-section.tsx:242` | [x] | [ ] | [ ] |
+| P1311 | "How {name} plays" select (Play once / Play/stop / Loop / While held) | Sets the pad's play mode | `renderer/components/sounds-section.tsx:262` | [x] | [ ] | [ ] |
+| P1312 | "{name} volume" fader | Sets this sound's volume | `renderer/components/sounds-section.tsx:277` | [x] | [ ] | [ ] |
+| P1313 | "{name} key" select (None, 1–9) | Assigns a pad hotkey | `renderer/components/sounds-section.tsx:314` | [x] | [ ] | [ ] |
+| P1314 | "Actions for {name}": "Rename…", "Move up", "Move down", "Remove" | Row actions | `renderer/components/sounds-section.tsx:213` | [x] | [ ] | [ ] |
+| P1315 | Dialog "Rename sound" ("Name", "Cancel" / "Save") | Renames a sound | `renderer/components/sounds-section.tsx:352` | [x] | [ ] | [ ] |
+| P1316 | Empty "No sounds yet" + import | Shown with no sounds | `renderer/components/sounds-section.tsx:142` | [x] | [ ] | [ ] |
+| P1317 | "Restore starter sounds" | Re-adds the bundled sounds | `renderer/components/sounds-section.tsx:149` | [x] | [ ] | [ ] |
+| P1318 | Loading / "Couldn't load sounds" + "Retry" | Load states | `renderer/components/sounds-load-state.tsx:72` | [x] | [ ] | [ ] |
 
 ### Library page (⌘0): Local (tabs/library-tab.tsx, session-poster.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1319 | Page key ⌘0 | Opens Library | `shared/sidebar-pages.ts:107` | [ ] | [ ] | [ ] |
-| P1320 | Tabs "Local" / "Cloud" | Switches between local and cloud recordings | `renderer/components/tabs/library-tab.tsx:167` | [ ] | [ ] | [ ] |
-| P1321 | Header "Library" | Page header | `renderer/components/tabs/library-tab.tsx:523` | [ ] | [ ] | [ ] |
-| P1322 | "Filter" select (All recordings / Recorded / Livestreamed) | Filters rows | `renderer/components/tabs/library-tab.tsx:537` | [ ] | [ ] | [ ] |
-| P1323 | "Sort" select (Newest first / Oldest first) | Sorts rows | `renderer/components/tabs/library-tab.tsx:557` | [ ] | [ ] | [ ] |
-| P1324 | "Search recordings…" | Text filter | `renderer/components/tabs/library-tab.tsx:572` | [ ] | [ ] | [ ] |
-| P1325 | "Import…" | Imports a video file | `renderer/components/tabs/library-tab.tsx:580` | [ ] | [ ] | [ ] |
-| P1326 | "Open Studio" | Goes to Studio | `renderer/components/tabs/library-tab.tsx:584` | [ ] | [ ] | [ ] |
-| P1327 | Selection bar "Delete" / "Clear selection" | Bulk delete | `renderer/components/tabs/library-tab.tsx:594` | [ ] | [ ] | [ ] |
-| P1328 | Partial notice + "Load all" | Loads every session | `renderer/components/tabs/library-tab.tsx:618` | [ ] | [ ] | [ ] |
-| P1329 | Empty "No recordings yet" / "No recordings match" + clear button / loading | Empty states | `renderer/components/tabs/library-tab.tsx:635` | [ ] | [ ] | [ ] |
-| P1330 | Grid header "Select all recordings in view" checkbox + Name/Scene/Duration/Size/File/Actions | Table header | `renderer/components/tabs/library-tab.tsx:676` | [ ] | [ ] | [ ] |
-| P1331 | Row checkbox "Select {title}" | Selects one row | `renderer/components/tabs/library-tab.tsx:1011` | [ ] | [ ] | [ ] |
-| P1332 | Row poster | Thumbnail, backfilled lazily | `renderer/components/session-poster.tsx:18` | [ ] | [ ] | [ ] |
-| P1333 | Row badges: clean-cut chip, quality warning, role, "Noise cleaned", status | Row status info with tooltips | `renderer/components/tabs/library-tab.tsx:1030` | [ ] | [ ] | [ ] |
-| P1334 | Row click / ⌘- or Shift-click / double-click plays | Selects rows; double-click opens the file externally | `renderer/components/tabs/library-tab.tsx:999` | [ ] | [ ] | [ ] |
-| P1335 | Keys ↑/↓/Home/End (+Shift), Space, Esc, Enter rename, ⌘/Ctrl+Backspace or Delete delete, ⌘/Ctrl+A select all | Grid keyboard control | `renderer/lib/library-view.ts:299` | [ ] | [ ] | [ ] |
-| P1336 | "Play recording" (tooltip "Play in the default player") | Opens the file in the OS player | `renderer/components/tabs/library-tab.tsx:1180` | [ ] | [ ] | [ ] |
-| P1337 | Footer "{n} recordings loaded"/storage + "Load more" | Pagination | `renderer/components/tabs/library-tab.tsx:761` | [ ] | [ ] | [ ] |
-| P1338 | "Session actions" menu (also right-click context menu) | Row actions | `renderer/components/tabs/library-tab.tsx:1215` | [ ] | [ ] | [ ] |
-| P1339 | Menu "Play" | Plays the recording | `renderer/components/tabs/library-tab.tsx:1466` | [ ] | [ ] | [ ] |
-| P1340 | Menu "Sidekick report" | Opens Sidekick → Reports | `renderer/components/tabs/library-tab.tsx:1477` | [ ] | [ ] | [ ] |
-| P1341 | Menu "Make a clean cut…" / "Review clean cut" | Opens Clean cut | `renderer/components/tabs/library-tab.tsx:1491` | [ ] | [ ] | [ ] |
-| P1342 | Menu "Markers" | Opens the markers dialog | `renderer/components/tabs/library-tab.tsx:1514` | [ ] | [ ] | [ ] |
-| P1343 | Menu "Show in Finder"/"Show in Explorer" (or "Show original · MP4 is saving") | Reveals the file *(Label varies by OS (lib/platform.ts:114))* | `renderer/components/tabs/library-tab.tsx:1520` | [ ] | [ ] | [ ] |
-| P1344 | Menu noise cleanup | Cleans the audio | `renderer/components/tabs/library-tab.tsx:1530` | [ ] | [ ] | [ ] |
-| P1345 | Menu "Export MP4" / "Retry MP4 export" | Finalizes the MP4 | `renderer/components/tabs/library-tab.tsx:1540` | [ ] | [ ] | [ ] |
-| P1346 | Menu "Open in Stream Manager" | Opens the session's chat window | `renderer/components/tabs/library-tab.tsx:1556` | [ ] | [ ] | [ ] |
-| P1347 | Menu "Rename…" (Enter) + dialog "Rename recording" ("Cancel" / "Rename") | Renames a session | `renderer/components/tabs/library-tab.tsx:1564` | [ ] | [ ] | [ ] |
-| P1348 | Menu "Duplicate" | Copies the recording | `renderer/components/tabs/library-tab.tsx:1575` | [ ] | [ ] | [ ] |
-| P1349 | Menu "Check quality" / "Repair & fix" / "Restore original" | Quality check and repair | `renderer/components/tabs/library-tab.tsx:1585` | [ ] | [ ] | [ ] |
-| P1350 | Menu "Delete" (⌘/Ctrl+Backspace) | Asks before deleting | `renderer/components/tabs/library-tab.tsx:1617` | [ ] | [ ] | [ ] |
-| P1351 | Confirm "Move this recording to the Trash/Recycle Bin?" | Moves the file to the OS trash *(Windows says "Recycle Bin", others "Trash" (lib/platform.ts:129))* | `renderer/components/tabs/library-tab.tsx:845` | [ ] | [ ] | [ ] |
+| P1319 | Page key ⌘0 | Opens Library | `shared/sidebar-pages.ts:107` | [x] | [ ] | [ ] |
+| P1320 | Tabs "Local" / "Cloud" | Switches between local and cloud recordings | `renderer/components/tabs/library-tab.tsx:167` | [x] | [ ] | [ ] |
+| P1321 | Header "Library" | Page header | `renderer/components/tabs/library-tab.tsx:523` | [x] | [ ] | [ ] |
+| P1322 | "Filter" select (All recordings / Recorded / Livestreamed) | Filters rows | `renderer/components/tabs/library-tab.tsx:537` | [x] | [ ] | [ ] |
+| P1323 | "Sort" select (Newest first / Oldest first) | Sorts rows | `renderer/components/tabs/library-tab.tsx:557` | [x] | [ ] | [ ] |
+| P1324 | "Search recordings…" | Text filter | `renderer/components/tabs/library-tab.tsx:572` | [x] | [ ] | [ ] |
+| P1325 | "Import…" | Imports a video file | `renderer/components/tabs/library-tab.tsx:580` | [x] | [ ] | [ ] |
+| P1326 | "Open Studio" | Goes to Studio | `renderer/components/tabs/library-tab.tsx:584` | [x] | [ ] | [ ] |
+| P1327 | Selection bar "Delete" / "Clear selection" | Bulk delete | `renderer/components/tabs/library-tab.tsx:594` | [x] | [ ] | [ ] |
+| P1328 | Partial notice + "Load all" | Loads every session | `renderer/components/tabs/library-tab.tsx:618` | [x] | [ ] | [ ] |
+| P1329 | Empty "No recordings yet" / "No recordings match" + clear button / loading | Empty states | `renderer/components/tabs/library-tab.tsx:635` | [x] | [ ] | [ ] |
+| P1330 | Grid header "Select all recordings in view" checkbox + Name/Scene/Duration/Size/File/Actions | Table header | `renderer/components/tabs/library-tab.tsx:676` | [x] | [ ] | [ ] |
+| P1331 | Row checkbox "Select {title}" | Selects one row | `renderer/components/tabs/library-tab.tsx:1011` | [x] | [ ] | [ ] |
+| P1332 | Row poster | Thumbnail, backfilled lazily | `renderer/components/session-poster.tsx:18` | [x] | [ ] | [ ] |
+| P1333 | Row badges: clean-cut chip, quality warning, role, "Noise cleaned", status | Row status info with tooltips | `renderer/components/tabs/library-tab.tsx:1030` | [x] | [ ] | [ ] |
+| P1334 | Row click / ⌘- or Shift-click / double-click plays | Selects rows; double-click opens the file externally | `renderer/components/tabs/library-tab.tsx:999` | [x] | [ ] | [ ] |
+| P1335 | Keys ↑/↓/Home/End (+Shift), Space, Esc, Enter rename, ⌘/Ctrl+Backspace or Delete delete, ⌘/Ctrl+A select all | Grid keyboard control | `renderer/lib/library-view.ts:299` | [x] | [ ] | [ ] |
+| P1336 | "Play recording" (tooltip "Play in the default player") | Opens the file in the OS player | `renderer/components/tabs/library-tab.tsx:1180` | [x] | [ ] | [ ] |
+| P1337 | Footer "{n} recordings loaded"/storage + "Load more" | Pagination | `renderer/components/tabs/library-tab.tsx:761` | [x] | [ ] | [ ] |
+| P1338 | "Session actions" menu (also right-click context menu) | Row actions | `renderer/components/tabs/library-tab.tsx:1215` | [x] | [ ] | [ ] |
+| P1339 | Menu "Play" | Plays the recording | `renderer/components/tabs/library-tab.tsx:1466` | [x] | [ ] | [ ] |
+| P1340 | Menu "Sidekick report" | Opens Sidekick → Reports | `renderer/components/tabs/library-tab.tsx:1477` | [x] | [ ] | [ ] |
+| P1341 | Menu "Make a clean cut…" / "Review clean cut" | Opens Clean cut | `renderer/components/tabs/library-tab.tsx:1491` | [x] | [ ] | [ ] |
+| P1342 | Menu "Markers" | Opens the markers dialog | `renderer/components/tabs/library-tab.tsx:1514` | [x] | [ ] | [ ] |
+| P1343 | Menu "Show in Finder"/"Show in Explorer" (or "Show original · MP4 is saving") | Reveals the file *(Label varies by OS (lib/platform.ts:114))* | `renderer/components/tabs/library-tab.tsx:1520` | [x] | [ ] | [ ] |
+| P1344 | Menu noise cleanup | Cleans the audio | `renderer/components/tabs/library-tab.tsx:1530` | [x] | [ ] | [ ] |
+| P1345 | Menu "Export MP4" / "Retry MP4 export" | Finalizes the MP4 | `renderer/components/tabs/library-tab.tsx:1540` | [x] | [ ] | [ ] |
+| P1346 | Menu "Open in Stream Manager" | Opens the session's chat window | `renderer/components/tabs/library-tab.tsx:1556` | [x] | [ ] | [ ] |
+| P1347 | Menu "Rename…" (Enter) + dialog "Rename recording" ("Cancel" / "Rename") | Renames a session | `renderer/components/tabs/library-tab.tsx:1564` | [x] | [ ] | [ ] |
+| P1348 | Menu "Duplicate" | Copies the recording | `renderer/components/tabs/library-tab.tsx:1575` | [x] | [ ] | [ ] |
+| P1349 | Menu "Check quality" / "Repair & fix" / "Restore original" | Quality check and repair | `renderer/components/tabs/library-tab.tsx:1585` | [x] | [ ] | [ ] |
+| P1350 | Menu "Delete" (⌘/Ctrl+Backspace) | Asks before deleting | `renderer/components/tabs/library-tab.tsx:1617` | [x] | [ ] | [ ] |
+| P1351 | Confirm "Move this recording to the Trash/Recycle Bin?" | Moves the file to the OS trash *(Windows says "Recycle Bin", others "Trash" (lib/platform.ts:129))* | `renderer/components/tabs/library-tab.tsx:845` | [x] | [ ] | [ ] |
 
 ### Library: player, markers and cloud markers (media/*, session-markers-dialog.tsx, cloud-markers-dialog.tsx)
 
