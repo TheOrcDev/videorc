@@ -122,14 +122,6 @@ struct Shaped {
     align: TextAlign,
 }
 
-impl IntoElement for BalancedLines {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for BalancedLines {
     type RequestLayoutState = ();
     type PrepaintState = ();
