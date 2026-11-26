@@ -533,12 +533,12 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P334 | "Vertical stream" panel | Shows when simulcast armed | `renderer/components/studio/vertical-leg-monitor.tsx:27` | [ ] | [ ] | [ ] |
-| P335 | "On air" / "Ready" badge | Session state | `renderer/components/studio/vertical-leg-monitor.tsx:29` | [ ] | [ ] | [ ] |
-| P336 | Description | Live edits affect vertical stream only | `renderer/components/studio/vertical-leg-monitor.tsx:35` | [ ] | [ ] | [ ] |
-| P337 | "Vertical stream layout" select | Six 9:16 layouts; gaps disabled | `renderer/components/studio/vertical-stream-layout-control.tsx:185` | [ ] | [ ] | [ ] |
-| P338 | Gap reason line | Why layouts unavailable | `renderer/components/studio/vertical-stream-layout-control.tsx:226` | [ ] | [ ] | [ ] |
-| P339 | Fill / Fit | Vertical framing | `renderer/components/studio/vertical-stream-layout-control.tsx:228` | [ ] | [ ] | [ ] |
+| P334 | "Vertical stream" panel | Shows when simulcast armed | `renderer/components/studio/vertical-leg-monitor.tsx:27` | [x] | [ ] | [ ] |
+| P335 | "On air" / "Ready" badge | Session state | `renderer/components/studio/vertical-leg-monitor.tsx:29` | [x] | [ ] | [ ] |
+| P336 | Description | Live edits affect vertical stream only | `renderer/components/studio/vertical-leg-monitor.tsx:35` | [x] | [ ] | [ ] |
+| P337 | "Vertical stream layout" select | Six 9:16 layouts; gaps disabled | `renderer/components/studio/vertical-stream-layout-control.tsx:185` | [x] | [ ] | [ ] |
+| P338 | Gap reason line | Why layouts unavailable | `renderer/components/studio/vertical-stream-layout-control.tsx:226` | [x] | [ ] | [ ] |
+| P339 | Fill / Fit | Vertical framing | `renderer/components/studio/vertical-stream-layout-control.tsx:228` | [x] | [ ] | [ ] |
 
 ### Soundboard (soundboard-section.tsx)
 
@@ -571,55 +571,55 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P357 | "Show stage" section + description | Replaces Preview while room open | `renderer/components/studio/show-stage.tsx:186` | [ ] | [ ] | [ ] |
-| P358 | "Close the room" + confirm "Close the room?" | Closes room; guests leave, recording finalizes | `renderer/components/guests/close-room-button.tsx:45` | [ ] | [ ] | [ ] |
-| P359 | "Room view" well | Room tracks at room latency, program geometry | `renderer/components/studio/show-stage.tsx:228` | [ ] | [ ] | [ ] |
-| P360 | "Nobody is on stage." | Empty stage | `renderer/components/studio/show-stage.tsx:246` | [ ] | [ ] | [ ] |
-| P361 | "Room" label tooltip | Explains room view vs Program | `renderer/components/studio/show-stage.tsx:248` | [ ] | [ ] | [ ] |
-| P362 | "Joining the room…"/"Reconnecting…" | Connection status pill | `renderer/components/studio/show-stage.tsx:259` | [ ] | [ ] | [ ] |
-| P363 | Tile states | "Waiting for the screen", "No picture yet", "Back in a moment" | `renderer/components/studio/show-stage.tsx:371` | [ ] | [ ] | [ ] |
-| P364 | Name plates (Muted / Talking) | Voice state on picture | `renderer/components/studio/show-stage.tsx:383` | [ ] | [ ] | [ ] |
-| P365 | Host circle / portrait fill | Circle host shape; portrait blurred fill | `renderer/components/studio/show-stage.tsx:331` | [ ] | [ ] | [ ] |
-| P366 | Local problem alert | Host media problem warning | `renderer/components/studio/show-stage.tsx:196` | [ ] | [ ] | [ ] |
-| P367 | "Wants to join" list, "Let in"/"Decline" | Admit or refuse join requests (max 3) | `renderer/components/guests/room-person.tsx:293` | [ ] | [ ] | [ ] |
-| P368 | "n more want to join" | Opens Guests page | `renderer/components/studio/show-stage.tsx:1406` | [ ] | [ ] | [ ] |
-| P369 | "Layout" cards | Choose stage layout (incl. "Two screens") | `renderer/components/studio/show-stage.tsx:598` | [ ] | [ ] | [ ] |
-| P370 | Layout reasons line | Why layouts are disabled | `renderer/components/studio/show-stage.tsx:617` | [ ] | [ ] | [ ] |
-| P371 | "Screens" cards ("On stage"/"Put on stage") | Put shared screen on/off stage | `renderer/components/studio/show-stage.tsx:737` | [ ] | [ ] | [ ] |
-| P372 | Screens empty text | No screens yet + guest hint | `renderer/components/studio/show-stage.tsx:733` | [ ] | [ ] | [ ] |
-| P373 | "Share screen…" | Lists display sources; opens "Share a screen" dialog | `renderer/components/studio/show-stage.tsx:714` | [ ] | [ ] | [ ] |
-| P374 | "Stop sharing" | Stops host screen share | `renderer/components/studio/show-stage.tsx:703` | [ ] | [ ] | [ ] |
-| P375 | Dialog "Share a screen" | Thumbnail grid of screens/windows to share | `renderer/components/studio/show-stage.tsx:764` | [ ] | [ ] | [ ] |
-| P376 | Empty "Nothing to share. Check Screen Recording in System Settings." | No sources listed *(all (macOS wording))* | `renderer/components/studio/show-stage.tsx:774` | [ ] | [ ] | [ ] |
-| P377 | "Hide screen"/"Show screen" + key + chip | Same privacy state on stage | `renderer/components/studio/show-stage.tsx:819` | [ ] | [ ] | [ ] |
-| P378 | "On stage n" / "Backstage n" lists | Everyone in room | `renderer/components/studio/show-stage.tsx:1457` | [ ] | [ ] | [ ] |
-| P379 | "Bring on" / "Send backstage" | Moves guest on or off stage | `renderer/components/studio/show-stage.tsx:1564` | [ ] | [ ] | [ ] |
-| P380 | Person mic toggle / screen-share toggle | Mute guest/host; stop guest share | `renderer/components/guests/room-person.tsx:395` | [ ] | [ ] | [ ] |
-| P381 | Person ⋯ "Spotlight"/"End spotlight" | Spotlight layout for person | `renderer/components/studio/show-stage.tsx:1522` | [ ] | [ ] | [ ] |
-| P382 | Host ⋯ "Turn camera off"/"Turn camera on" | Host camera in room | `renderer/components/studio/show-stage.tsx:1541` | [ ] | [ ] | [ ] |
-| P383 | Guest ⋯ "Rename…", "Remove…", "Ban…" | Moderation dialogs ("Rename guest", confirms) | `renderer/components/guests/guest-moderation.tsx:93` | [ ] | [ ] | [ ] |
-| P384 | Backstage empty + "Invite link" | Opens Guests page | `renderer/components/studio/show-stage.tsx:1475` | [ ] | [ ] | [ ] |
-| P385 | "Program" / "Program preview" monitor | Cloud return or managed-stage preview | `renderer/components/studio/show-stage.tsx:1069` | [ ] | [ ] | [ ] |
-| P386 | Program state badge (tooltip) | Applied/warning page report | `renderer/components/studio/show-stage.tsx:1072` | [ ] | [ ] | [ ] |
-| P387 | Takeover muted badge | Takeover silences voices on program | `renderer/components/studio/show-stage.tsx:1084` | [ ] | [ ] | [ ] |
-| P388 | "Listen to the program"/"Mute the program" | Plays return audio | `renderer/components/studio/show-stage.tsx:1107` | [ ] | [ ] | [ ] |
-| P389 | "More for the Program" ⋯ "Send to Videorc Camera"/"Stop sending…" | Sends program preview to virtual camera *(where virtual camera supported (show-stage.tsx:1015))* *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/studio/show-stage.tsx:1043` | [ ] | n/a | [ ] |
-| P390 | Program waiting text | "Waiting for the program…" / empty | `renderer/components/studio/show-stage.tsx:1146` | [ ] | [ ] | [ ] |
-| P391 | Graphics/avatar overlays + failure text | Banners, captions, chat, avatar preview | `renderer/components/studio/show-stage.tsx:872` | [ ] | [ ] | [ ] |
-| P392 | Reason/status lines | Avatar, animation, graphics, scene, Videorc Camera status | `renderer/components/studio/show-stage.tsx:1178` | [ ] | [ ] | [ ] |
-| P393 | Opt-in chips → Guests | Program opt-ins; opens Guests | `renderer/components/studio/show-stage.tsx:1212` | [ ] | [ ] | [ ] |
-| P394 | Output profile chips (tooltip) | What each cloud output sends | `renderer/components/studio/show-stage.tsx:1234` | [ ] | [ ] | [ ] |
+| P357 | "Show stage" section + description | Replaces Preview while room open | `renderer/components/studio/show-stage.tsx:186` | [x] | [ ] | [ ] |
+| P358 | "Close the room" + confirm "Close the room?" | Closes room; guests leave, recording finalizes | `renderer/components/guests/close-room-button.tsx:45` | [x] | [ ] | [ ] |
+| P359 | "Room view" well | Room tracks at room latency, program geometry | `renderer/components/studio/show-stage.tsx:228` | [x] | [ ] | [ ] |
+| P360 | "Nobody is on stage." | Empty stage | `renderer/components/studio/show-stage.tsx:246` | [x] | [ ] | [ ] |
+| P361 | "Room" label tooltip | Explains room view vs Program | `renderer/components/studio/show-stage.tsx:248` | [x] | [ ] | [ ] |
+| P362 | "Joining the room…"/"Reconnecting…" | Connection status pill | `renderer/components/studio/show-stage.tsx:259` | [x] | [ ] | [ ] |
+| P363 | Tile states | "Waiting for the screen", "No picture yet", "Back in a moment" | `renderer/components/studio/show-stage.tsx:371` | [x] | [ ] | [ ] |
+| P364 | Name plates (Muted / Talking) | Voice state on picture | `renderer/components/studio/show-stage.tsx:383` | [x] | [ ] | [ ] |
+| P365 | Host circle / portrait fill | Circle host shape; portrait blurred fill | `renderer/components/studio/show-stage.tsx:331` | [x] | [ ] | [ ] |
+| P366 | Local problem alert | Host media problem warning | `renderer/components/studio/show-stage.tsx:196` | [x] | [ ] | [ ] |
+| P367 | "Wants to join" list, "Let in"/"Decline" | Admit or refuse join requests (max 3) | `renderer/components/guests/room-person.tsx:293` | [x] | [ ] | [ ] |
+| P368 | "n more want to join" | Opens Guests page | `renderer/components/studio/show-stage.tsx:1406` | [x] | [ ] | [ ] |
+| P369 | "Layout" cards | Choose stage layout (incl. "Two screens") | `renderer/components/studio/show-stage.tsx:598` | [x] | [ ] | [ ] |
+| P370 | Layout reasons line | Why layouts are disabled | `renderer/components/studio/show-stage.tsx:617` | [x] | [ ] | [ ] |
+| P371 | "Screens" cards ("On stage"/"Put on stage") | Put shared screen on/off stage | `renderer/components/studio/show-stage.tsx:737` | [x] | [ ] | [ ] |
+| P372 | Screens empty text | No screens yet + guest hint | `renderer/components/studio/show-stage.tsx:733` | [x] | [ ] | [ ] |
+| P373 | "Share screen…" | Lists display sources; opens "Share a screen" dialog | `renderer/components/studio/show-stage.tsx:714` | [x] | [ ] | [ ] |
+| P374 | "Stop sharing" | Stops host screen share | `renderer/components/studio/show-stage.tsx:703` | [x] | [ ] | [ ] |
+| P375 | Dialog "Share a screen" | Thumbnail grid of screens/windows to share | `renderer/components/studio/show-stage.tsx:764` | [x] | [ ] | [ ] |
+| P376 | Empty "Nothing to share. Check Screen Recording in System Settings." | No sources listed *(all (macOS wording))* | `renderer/components/studio/show-stage.tsx:774` | [x] | [ ] | [ ] |
+| P377 | "Hide screen"/"Show screen" + key + chip | Same privacy state on stage | `renderer/components/studio/show-stage.tsx:819` | [x] | [ ] | [ ] |
+| P378 | "On stage n" / "Backstage n" lists | Everyone in room | `renderer/components/studio/show-stage.tsx:1457` | [x] | [ ] | [ ] |
+| P379 | "Bring on" / "Send backstage" | Moves guest on or off stage | `renderer/components/studio/show-stage.tsx:1564` | [x] | [ ] | [ ] |
+| P380 | Person mic toggle / screen-share toggle | Mute guest/host; stop guest share | `renderer/components/guests/room-person.tsx:395` | [x] | [ ] | [ ] |
+| P381 | Person ⋯ "Spotlight"/"End spotlight" | Spotlight layout for person | `renderer/components/studio/show-stage.tsx:1522` | [x] | [ ] | [ ] |
+| P382 | Host ⋯ "Turn camera off"/"Turn camera on" | Host camera in room | `renderer/components/studio/show-stage.tsx:1541` | [x] | [ ] | [ ] |
+| P383 | Guest ⋯ "Rename…", "Remove…", "Ban…" | Moderation dialogs ("Rename guest", confirms) | `renderer/components/guests/guest-moderation.tsx:93` | [x] | [ ] | [ ] |
+| P384 | Backstage empty + "Invite link" | Opens Guests page | `renderer/components/studio/show-stage.tsx:1475` | [x] | [ ] | [ ] |
+| P385 | "Program" / "Program preview" monitor | Cloud return or managed-stage preview | `renderer/components/studio/show-stage.tsx:1069` | [x] | [ ] | [ ] |
+| P386 | Program state badge (tooltip) | Applied/warning page report | `renderer/components/studio/show-stage.tsx:1072` | [x] | [ ] | [ ] |
+| P387 | Takeover muted badge | Takeover silences voices on program | `renderer/components/studio/show-stage.tsx:1084` | [x] | [ ] | [ ] |
+| P388 | "Listen to the program"/"Mute the program" | Plays return audio | `renderer/components/studio/show-stage.tsx:1107` | [x] | [ ] | [ ] |
+| P389 | "More for the Program" ⋯ "Send to Videorc Camera"/"Stop sending…" | Sends program preview to virtual camera *(where virtual camera supported (show-stage.tsx:1015))* *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/studio/show-stage.tsx:1043` | [x] | n/a | [ ] |
+| P390 | Program waiting text | "Waiting for the program…" / empty | `renderer/components/studio/show-stage.tsx:1146` | [x] | [ ] | [ ] |
+| P391 | Graphics/avatar overlays + failure text | Banners, captions, chat, avatar preview | `renderer/components/studio/show-stage.tsx:872` | [x] | [ ] | [ ] |
+| P392 | Reason/status lines | Avatar, animation, graphics, scene, Videorc Camera status | `renderer/components/studio/show-stage.tsx:1178` | [x] | [ ] | [ ] |
+| P393 | Opt-in chips → Guests | Program opt-ins; opens Guests | `renderer/components/studio/show-stage.tsx:1212` | [x] | [ ] | [ ] |
+| P394 | Output profile chips (tooltip) | What each cloud output sends | `renderer/components/studio/show-stage.tsx:1234` | [x] | [ ] | [ ] |
 
 ### Talk-show room host and camera-off avatar
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P395 | Room controller (no UI) | Runs room, hands value to cloud context | `renderer/components/studio/talk-show-room-host.tsx:31` | [ ] | [ ] | [ ] |
-| P396 | Join request chime | Local chime when someone asks to join | `renderer/components/studio/talk-show-room-host.tsx:41` | [ ] | [ ] | [ ] |
-| P397 | Cloud recording watch | Reports stopped cloud recording to Library | `renderer/components/studio/talk-show-room-host.tsx:47` | [ ] | [ ] | [ ] |
+| P395 | Room controller (no UI) | Runs room, hands value to cloud context | `renderer/components/studio/talk-show-room-host.tsx:31` | [x] | [ ] | [ ] |
+| P396 | Join request chime | Local chime when someone asks to join | `renderer/components/studio/talk-show-room-host.tsx:41` | [x] | [ ] | [ ] |
+| P397 | Cloud recording watch | Reports stopped cloud recording to Library | `renderer/components/studio/talk-show-room-host.tsx:47` | [x] | [ ] | [ ] |
 | P398 | Scripted room hook | Smoke-test scripted room *(dev builds only)* | `renderer/components/studio/talk-show-room-host.tsx:55` | dev | dev | dev |
-| P399 | Videorc Camera retire | Room program camera ends with room *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/studio/talk-show-room-host.tsx:89` | [ ] | n/a | [ ] |
-| P400 | Camera-off avatar | Circle with initial; "Camera off" for screen readers | `renderer/components/studio/camera-off-avatar.tsx:12` | [ ] | [ ] | [ ] |
+| P399 | Videorc Camera retire | Room program camera ends with room *(Windows: hidden until proven, plan 260 "What parity means")* | `renderer/components/studio/talk-show-room-host.tsx:89` | [x] | n/a | [ ] |
+| P400 | Camera-off avatar | Circle with initial; "Camera off" for screen readers | `renderer/components/studio/camera-off-avatar.tsx:12` | [x] | [ ] | [ ] |
 
 ### Sources page header (sources-tab.tsx)
 
@@ -938,26 +938,26 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P626 | "Caption preview" panel + "Sample" / "Latest caption" badge | Renders the chosen style at the canvas aspect | `renderer/components/captions/caption-preview.tsx:52-82` | [ ] | [ ] | [ ] |
-| P627 | Preview info line (resolution · "Top"/"Bottom") | Shows size and position | `renderer/components/captions/caption-preview.tsx:84-91` | [ ] | [ ] | [ ] |
-| P628 | "Preview background" "Dark" / "Light" / "Mixed" | Preview backdrop only | `renderer/components/captions/caption-preview.tsx:92-108` | [ ] | [ ] | [ ] |
-| P629 | Upload lock alert (entitlement) + unlock action | Captions locked by plan | `renderer/components/captions/captions-controls.tsx:213-215` | [ ] | [ ] | [ ] |
-| P630 | "Live captions" switch + status dot / off hint | Turns captions on or off *(disabled on Linux (lib/captions-preflight.ts:141-143))* | `renderer/components/captions/captions-controls.tsx:219-254` | [ ] | [ ] | [ ] |
-| P631 | "Retry" | Restarts captions after a block or error | `renderer/components/captions/captions-controls.tsx:237-247` | [ ] | [ ] | [ ] |
-| P632 | Alert "Host microphone only" | Shown while a cloud room is open | `renderer/components/captions/captions-controls.tsx:256-265` | [ ] | [ ] | [ ] |
+| P626 | "Caption preview" panel + "Sample" / "Latest caption" badge | Renders the chosen style at the canvas aspect | `renderer/components/captions/caption-preview.tsx:52-82` | [x] | [ ] | [ ] |
+| P627 | Preview info line (resolution · "Top"/"Bottom") | Shows size and position | `renderer/components/captions/caption-preview.tsx:84-91` | [x] | [ ] | [ ] |
+| P628 | "Preview background" "Dark" / "Light" / "Mixed" | Preview backdrop only | `renderer/components/captions/caption-preview.tsx:92-108` | [x] | [ ] | [ ] |
+| P629 | Upload lock alert (entitlement) + unlock action | Captions locked by plan | `renderer/components/captions/captions-controls.tsx:213-215` | [x] | [ ] | [ ] |
+| P630 | "Live captions" switch + status dot / off hint | Turns captions on or off *(disabled on Linux (lib/captions-preflight.ts:141-143))* | `renderer/components/captions/captions-controls.tsx:219-254` | [x] | [ ] | [ ] |
+| P631 | "Retry" | Restarts captions after a block or error | `renderer/components/captions/captions-controls.tsx:237-247` | [x] | [ ] | [ ] |
+| P632 | Alert "Host microphone only" | Shown while a cloud room is open | `renderer/components/captions/captions-controls.tsx:256-265` | [x] | [ ] | [ ] |
 | P633 | Alert "Live captions aren't available on Linux yet" | Explains the Linux limit *(Linux only)* | `renderer/components/captions/captions-controls.tsx:266-271` | n/a | n/a | [ ] |
-| P634 | Alert "Captions can't go out on your next livestream" | Livestream blocker (fps, quality) | `renderer/components/captions/captions-controls.tsx:272-277` | [ ] | [ ] | [ ] |
-| P635 | "Show captions on" "Live stream only" / "Live stream and recording" | Captions output; locked during a session | `renderer/components/captions/captions-controls.tsx:282-296; renderer/lib/captions-page-view.ts:20-23` | [ ] | [ ] | [ ] |
-| P636 | "Microphone" row → Sources | Shows the mic captions hear | `renderer/components/captions/captions-controls.tsx:301-306` | [ ] | [ ] | [ ] |
-| P637 | "Placement" row → Scene | Shows the bar position, opens Scene | `renderer/components/captions/captions-controls.tsx:307-315` | [ ] | [ ] | [ ] |
-| P638 | "Allowance" row | Remaining caption minutes | `renderer/components/captions/captions-controls.tsx:316-318` | [ ] | [ ] | [ ] |
-| P639 | "Style" "Classic" / "Glass" / "Lower third" / "High contrast" | Caption look, applied live | `renderer/components/captions/captions-controls.tsx:320-359; renderer/lib/caption-overlay.ts:78-128` | [ ] | [ ] | [ ] |
-| P640 | "Text size" "Small" / "Medium" / "Large" | Caption size | `renderer/components/captions/captions-controls.tsx:365-375` | [ ] | [ ] | [ ] |
-| P641 | "Spoken language" select | Language or Auto-detect; locked during a session | `renderer/components/captions/captions-controls.tsx:378-408` | [ ] | [ ] | [ ] |
-| P642 | Live strip ("Listening…" / lines) | Recent partial and final captions | `renderer/components/captions/captions-controls.tsx:410-431` | [ ] | [ ] | [ ] |
-| P643 | "Open/Close Captions reader" (⌘⇧C / Ctrl+Shift+C) | Toggles the reader window | `renderer/components/captions/captions-controls.tsx:438-452; renderer/lib/shortcuts.ts:96-99` | [ ] | [ ] | [ ] |
-| P644 | "Host transcript" + "Refresh transcript" + list | Loads the saved host transcript | `renderer/components/captions/host-transcript.tsx:8-61` | [ ] | [ ] | [ ] |
-| P645 | Alert "The host transcript is unavailable for this room." | Transcript load failed | `renderer/components/captions/host-transcript.tsx:44-48` | [ ] | [ ] | [ ] |
+| P634 | Alert "Captions can't go out on your next livestream" | Livestream blocker (fps, quality) | `renderer/components/captions/captions-controls.tsx:272-277` | [x] | [ ] | [ ] |
+| P635 | "Show captions on" "Live stream only" / "Live stream and recording" | Captions output; locked during a session | `renderer/components/captions/captions-controls.tsx:282-296; renderer/lib/captions-page-view.ts:20-23` | [x] | [ ] | [ ] |
+| P636 | "Microphone" row → Sources | Shows the mic captions hear | `renderer/components/captions/captions-controls.tsx:301-306` | [x] | [ ] | [ ] |
+| P637 | "Placement" row → Scene | Shows the bar position, opens Scene | `renderer/components/captions/captions-controls.tsx:307-315` | [x] | [ ] | [ ] |
+| P638 | "Allowance" row | Remaining caption minutes | `renderer/components/captions/captions-controls.tsx:316-318` | [x] | [ ] | [ ] |
+| P639 | "Style" "Classic" / "Glass" / "Lower third" / "High contrast" | Caption look, applied live | `renderer/components/captions/captions-controls.tsx:320-359; renderer/lib/caption-overlay.ts:78-128` | [x] | [ ] | [ ] |
+| P640 | "Text size" "Small" / "Medium" / "Large" | Caption size | `renderer/components/captions/captions-controls.tsx:365-375` | [x] | [ ] | [ ] |
+| P641 | "Spoken language" select | Language or Auto-detect; locked during a session | `renderer/components/captions/captions-controls.tsx:378-408` | [x] | [ ] | [ ] |
+| P642 | Live strip ("Listening…" / lines) | Recent partial and final captions | `renderer/components/captions/captions-controls.tsx:410-431` | [x] | [ ] | [ ] |
+| P643 | "Open/Close Captions reader" (⌘⇧C / Ctrl+Shift+C) | Toggles the reader window | `renderer/components/captions/captions-controls.tsx:438-452; renderer/lib/shortcuts.ts:96-99` | [x] | [ ] | [ ] |
+| P644 | "Host transcript" + "Refresh transcript" + list | Loads the saved host transcript | `renderer/components/captions/host-transcript.tsx:8-61` | [x] | [ ] | [ ] |
+| P645 | Alert "The host transcript is unavailable for this room." | Transcript load failed | `renderer/components/captions/host-transcript.tsx:44-48` | [x] | [ ] | [ ] |
 
 ### Captions reader window (components/captions-reader.tsx)
 
@@ -1415,11 +1415,11 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P940 | Window header "Stream Manager" | Title-only row | `renderer/components/stream-manager/stream-manager.tsx:1317` | [ ] | [ ] | [ ] |
+| P940 | Window header "Stream Manager" | Title-only row | `renderer/components/stream-manager/stream-manager.tsx:1317` | [x] | [ ] | [ ] |
 | P941 | Default size 1120×720; legacy 420×640 frame migrated once; min width 320 | Window sizing | `main/stream-manager-frame.ts:7-8; main/index.ts:4728` | [x] | [ ] | [ ] |
-| P942 | Layout tiers: Wide ≥1040, Medium 640–1039, Narrow <640, labels hide <800 | Container-query layout | `renderer/lib/stream-manager-layout.ts:1-37` | [ ] | [ ] | [ ] |
-| P943 | History bar + "Back to live" | Session history view; return to live | `renderer/components/stream-manager/stream-manager.tsx:1319,1328` | [ ] | [ ] | [ ] |
-| P944 | Sidekick toasts (question, promise reminder, dead air) | Private live nudges | `renderer/components/stream-manager/stream-manager.tsx:675-695` | [ ] | [ ] | [ ] |
+| P942 | Layout tiers: Wide ≥1040, Medium 640–1039, Narrow <640, labels hide <800 | Container-query layout | `renderer/lib/stream-manager-layout.ts:1-37` | [x] | [ ] | [ ] |
+| P943 | History bar + "Back to live" | Session history view; return to live | `renderer/components/stream-manager/stream-manager.tsx:1319,1328` | [x] | [ ] | [ ] |
+| P944 | Sidekick toasts (question, promise reminder, dead air) | Private live nudges | `renderer/components/stream-manager/stream-manager.tsx:675-695` | [x] | [ ] | [ ] |
 
 ### Stream Manager — stats bar (stats-bar.tsx)
 
