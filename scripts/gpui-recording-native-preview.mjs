@@ -27,6 +27,7 @@ import {
   sleep,
   waitUntil
 } from './lib/gpui-preview-probe.mjs'
+import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { continuity, continuityFailures } from './gpui-preview-interaction-stress.mjs'
@@ -198,7 +199,12 @@ export async function runGpuiRecordingNativePreview() {
         )
       }
     }
-    const output = stopped.value?.outputPath ?? started.value?.outputPath
+    // The MKV is finalized into an MP4 after the stop.
+    const output = await resolveFinalRecordingPath({
+      started: started.value,
+      stopped: stopped.value,
+      timeoutMs: 60000
+    }).catch(() => stopped.value?.outputPath ?? started.value?.outputPath)
     if (!output || !existsSync(output)) {
       failures.push(`the take's file is missing: ${output}`)
     } else if (relative(stateDir, output).startsWith('..')) {

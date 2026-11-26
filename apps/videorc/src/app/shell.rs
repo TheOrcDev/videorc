@@ -791,8 +791,12 @@ impl Shell {
                     .opacity(if self.command_held { 1. } else { 0. })
                     .child(ShortcutKeys::for_action(action.as_ref()))
             });
+        // A named button node, so the tree (and the UI driver) can find
+        // and click the page row.
         let row = div()
             .id(page.id())
+            .role(gpui::Role::Button)
+            .aria_label(page.label())
             .flex_none()
             .h(px(size::ROW_COMPACT))
             .flex()
@@ -849,6 +853,8 @@ impl Shell {
             });
         div()
             .id("sidebar-studio-slab")
+            .role(gpui::Role::Button)
+            .aria_label(PageId::Studio.label())
             .group(SLAB_GROUP)
             .relative()
             .flex_none()

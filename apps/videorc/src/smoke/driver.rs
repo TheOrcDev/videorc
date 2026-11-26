@@ -243,6 +243,16 @@ fn look(
             tree.visible_text(SHOWN_TEXT_LIMIT)
         ))
     };
+    // The window's node alone: the tree is activating but the frame that
+    // builds its content has not been drawn yet (seen on X11 right after
+    // launch). Wait for it, as the other commands do.
+    if tree.children.is_empty() {
+        window.refresh();
+        return Ok(Attempt::Wait(format!(
+            "The {} window's accessibility tree has only the window so far.",
+            which.as_str()
+        )));
+    }
     match request {
         UiDriverRequest::Tree { within, depth, .. } => {
             let scope = match within {
@@ -503,7 +513,26 @@ fn click_node(
     window: &mut Window,
     cx: &mut App,
 ) -> Result<(), String> {
-    pointer_click(centre(node)?, modifiers, window, cx);
+    let at = centre(node)?;
+    // A pointer press outside the window lands on nothing: refuse it rather
+    // than answer clicked (ogre, XWayland: a row at y 1843 in a 1030-tall
+    // window). Scroll it into view first.
+    let viewport = window.viewport_size();
+    if at.x < px(0.) || at.y < px(0.) || at.x >= viewport.width || at.y >= viewport.height {
+        return Err(format!(
+            "{} is outside the window ({:.0}, {:.0} in {:.0}×{:.0}); scroll it into view first.",
+            if node.label.is_empty() {
+                "The element"
+            } else {
+                node.label.as_str()
+            },
+            f32::from(at.x),
+            f32::from(at.y),
+            f32::from(viewport.width),
+            f32::from(viewport.height),
+        ));
+    }
+    pointer_click(at, modifiers, window, cx);
     Ok(())
 }
 
