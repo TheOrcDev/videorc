@@ -111,6 +111,10 @@ pub struct Preview {
     /// shell hands it over ([`Preview::remember_window`]).
     #[cfg(target_os = "macos")]
     frame: Option<frame::PreviewFrame>,
+    /// The output's size (`captureConfig.video`): the floating window keeps
+    /// its aspect, so a vertical preset makes it portrait.
+    #[cfg(target_os = "macos")]
+    output: (u32, u32),
     /// Close Preview, or its window closed by hand (P131): no window and no
     /// docked video; the Studio says so and offers both places to open it.
     /// Every platform keeps it (P530, P541: Windows has no preview yet, and
@@ -228,7 +232,23 @@ impl Preview {
         }
         let mut status = element.status_watch();
         let phase = status.borrow().phase;
+        let mut settings = studio.watch();
+        let output = output_size(&settings.borrow());
         cx.new(|cx: &mut Context<Self>| {
+            // The floating window follows the output's aspect
+            // (`setPreviewWindowAspectRatio`, `use-studio.tsx`).
+            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                while settings.changed().await.is_ok() {
+                    let next = output_size(&settings.borrow_and_update());
+                    if this
+                        .update(cx, |preview, cx| preview.set_output(next, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
             // The slot's words follow the element's phase; nothing else of
             // the status (its frame counter moves every second) redraws.
             cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -272,6 +292,7 @@ impl Preview {
                 floating: None,
                 opening: false,
                 frame: None,
+                output,
                 closed: false,
                 closed_from: WindowMode::Docked,
                 smoke_slots: [None, None],
@@ -291,6 +312,7 @@ impl Preview {
             floating: None,
             opening: false,
             frame: None,
+            output: (1920, 1080),
             closed: false,
             closed_from: WindowMode::Docked,
             smoke_slots: [None, None],
@@ -1099,6 +1121,9 @@ impl Preview {
             ),
         }
         self.floating = Some(handle);
+        // `applyPreviewWindowAspect` on open: the window takes the output's
+        // aspect before it shows.
+        self.conform_floating(cx);
         let attached = self.attach_to(Host::Floating);
         if attached {
             self.mode = WindowMode::Floating;
@@ -1124,6 +1149,87 @@ impl Preview {
         let _ = handle.update(cx, |_, window, _| window.refresh());
         self.reveal_floating(handle, attached, cx);
         cx.notify();
+    }
+
+    /// The output's size changed (a vertical preset, a new profile): the
+    /// floating window takes its aspect, as Electron's
+    /// `preview-window:set-aspect-ratio` does.
+    #[cfg(target_os = "macos")]
+    fn set_output(&mut self, output: (u32, u32), cx: &mut Context<Self>) {
+        if self.output == output {
+            return;
+        }
+        self.output = output;
+        self.conform_floating(cx);
+    }
+
+    /// `applyPreviewWindowAspect`: the floating window's drag-resizes lock
+    /// to the output's aspect, and its content conforms to it now
+    /// (`conformPreviewWindowToAspect`): the width kept, the height derived,
+    /// or the display's height taken and the width derived (a vertical
+    /// preset makes a portrait window). GPUI's window has its title bar
+    /// above the content, so no strip is inside the video's region.
+    #[cfg(target_os = "macos")]
+    fn conform_floating(&self, cx: &mut Context<Self>) {
+        use videorc_app_core::desktop::window_frames::{
+            conform_content_to_aspect, preview_min_content_size,
+        };
+        let Some(handle) = self.floating else {
+            return;
+        };
+        let (width, height) = self.output;
+        if width == 0 || height == 0 {
+            return;
+        }
+        let ratio = f64::from(width) / f64::from(height);
+        let platform = crate::platform::current();
+        let planned = handle.update(cx, |_, window, _| {
+            let min = preview_min_content_size(ratio, 0.0);
+            let locked =
+                platform.lock_content_aspect(window, (f64::from(width), f64::from(height)), min);
+            let viewport = window.viewport_size();
+            let content = (
+                f64::from(f32::from(viewport.width)),
+                f64::from(f32::from(viewport.height)),
+            );
+            let resize = platform.content_room(window).and_then(|room| {
+                conform_content_to_aspect(content, ratio, 0.0, room)
+                    .map(|size| platform.content_resize(window, size).map(|run| (size, run)))
+                    .transpose()
+            });
+            (locked, content, resize)
+        });
+        let Ok((locked, content, resize)) = planned else {
+            return;
+        };
+        if let Err(error) = locked {
+            self.logger.log(
+                Level::Warn,
+                &format!("[preview] the Preview window's aspect lock didn't apply: {error}"),
+            );
+        }
+        match resize {
+            Ok(Some((size, run))) => {
+                self.logger.log(
+                    Level::Info,
+                    &format!(
+                        "[preview] the Preview window takes the output's {width}x{height}: \
+                         {:.0}x{:.0} -> {:.0}x{:.0}",
+                        content.0, content.1, size.0, size.1
+                    ),
+                );
+                // Outside this update: AppKit tells GPUI the new size at
+                // once, which GPUI can't take while it is borrowed.
+                cx.foreground_executor()
+                    .spawn(async move { run() })
+                    .detach();
+            }
+            Ok(None) => {}
+            Err(error) => self.logger.log(
+                Level::Warn,
+                &format!("[preview] the Preview window can't take the output's aspect: {error}"),
+            ),
+        }
     }
 
     /// The Preview window shows once the layer has presented a frame in it,
@@ -1301,6 +1407,13 @@ fn open_floating(preview: WeakEntity<Preview>, cx: &mut App) {
         // nothing would dock or close it.
         let _ = window.update(cx, |_, window, _| window.remove_window());
     }
+}
+
+/// The output's size (`captureConfig.video`'s width and height).
+#[cfg(target_os = "macos")]
+fn output_size(snapshot: &videorc_app_core::StudioSnapshot) -> (u32, u32) {
+    let video = videorc_app_core::livestream::plan::recording_video(&snapshot.settings.capture_doc);
+    (video.width, video.height)
 }
 
 /// A slot's words: the title, and the detail when there is one.

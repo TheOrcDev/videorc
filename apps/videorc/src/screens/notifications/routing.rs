@@ -196,7 +196,10 @@ impl Hub {
             }
             return;
         }
-        if id == n::ids::END_LIVESTREAM_ARMED || id == n::ids::CLIP_MARKED {
+        if id == n::ids::END_LIVESTREAM_ARMED
+            || id == n::ids::CLIP_MARKED
+            || refused_layout_answer(id)
+        {
             cx.emit(Delivery::Press(notice));
             return;
         }
@@ -270,6 +273,17 @@ impl Hub {
     }
 }
 
+/// A layout change refused before it was asked of the backend: the answer
+/// to the layout the user chose, a warning toast in Electron
+/// (`requestCameraPresetTransaction`, `use-studio.tsx`: `toast.warning(…,
+/// { id: 'layout-source-unavailable' })` when a source it needs is missing,
+/// `'scene-layout-no-screen'` when the scene shows no screen). Behind the
+/// bell only, the refused press said nothing (L6, 2026-11-26).
+fn refused_layout_answer(id: &str) -> bool {
+    use videorc_app_core::studio::scene_switch::copy;
+    id == copy::SOURCE_UNAVAILABLE_ID || id == copy::NO_SCREEN_ID
+}
+
 /// These old producers are replaced above (or by the microphone snapshot).
 /// Filtering is by their stable ids, never timing or a last-click guess.
 fn typed_legacy(notice: &Notice) -> bool {
@@ -310,4 +324,17 @@ fn typed_legacy(notice: &Notice) -> bool {
                 | n::copy::NO_SOUND
                 | n::copy::MICROPHONE_SILENT
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::refused_layout_answer;
+
+    #[test]
+    fn a_refused_layout_is_the_press_answer_electron_toasts() {
+        assert!(refused_layout_answer("layout-source-unavailable"));
+        assert!(refused_layout_answer("scene-layout-no-screen"));
+        assert!(!refused_layout_answer("scene-delete-refused"));
+        assert!(!refused_layout_answer(""));
+    }
 }

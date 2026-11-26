@@ -65,6 +65,43 @@ pub trait Platform: Send + Sync {
         ))
     }
 
+    /// Electron's `setAspectRatio` and `setMinimumSize` for the floating
+    /// Preview: the user's drag-resizes keep the content at `aspect`
+    /// (width, height), never smaller than `min` (points).
+    fn lock_content_aspect(
+        &self,
+        _window: &Window,
+        _aspect: (f64, f64),
+        _min: (f64, f64),
+    ) -> OsResult<()> {
+        Err(format!(
+            "Locking a window's aspect isn't written for {} yet",
+            std::env::consts::OS
+        ))
+    }
+
+    /// The most content height the window can have on its display: the
+    /// display's work area less the window's own title bar.
+    fn content_room(&self, _window: &Window) -> OsResult<f64> {
+        Err(format!(
+            "Measuring a window's display isn't written for {} yet",
+            std::env::consts::OS
+        ))
+    }
+
+    /// A resize of the window's content to `size` (points), its top-left
+    /// corner kept and the window kept inside its display's work area, as
+    /// Electron's `setContentSize`. The caller runs it from a task, never
+    /// inside a GPUI update: the OS tells GPUI about the new size at once,
+    /// and GPUI can't take it while it is borrowed (the window would keep
+    /// its old viewport).
+    fn content_resize(&self, _window: &Window, _size: (f64, f64)) -> OsResult<Box<dyn FnOnce()>> {
+        Err(format!(
+            "Resizing a window's content isn't written for {} yet",
+            std::env::consts::OS
+        ))
+    }
+
     /// The smokes' `preview-window-os-close`: the window closes as a click
     /// on its close button closes it, so the app's own should-close path
     /// runs (never `remove_window`, which skips it).

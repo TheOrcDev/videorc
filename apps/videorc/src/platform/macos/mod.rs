@@ -101,6 +101,29 @@ fn primary_screen_height() -> OsResult<f64> {
     }
 }
 
+/// The work area (`visibleFrame`, without the menu bar and the Dock) of the
+/// display the window is on (the main display while it has none: a window
+/// that has not shown yet), in AppKit's bottom-left coordinates.
+fn visible_frame(window: &NSWindow) -> Option<NSRect> {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    // SAFETY: AppKit calls on the main thread (every GPUI window call runs
+    // there); `visibleFrame` returns an NSRect by value.
+    unsafe {
+        let screen: Option<Retained<AnyObject>> = msg_send![window, screen];
+        let screen = match screen {
+            Some(screen) => screen,
+            None => {
+                let class = AnyClass::get(c"NSScreen")?;
+                let main: Option<Retained<AnyObject>> = msg_send![class, mainScreen];
+                main?
+            }
+        };
+        let frame: NSRect = msg_send![&*screen, visibleFrame];
+        Some(frame)
+    }
+}
+
 /// The window's `NSWindow`, from the content view GPUI hands out.
 fn ns_window(window: &Window) -> OsResult<Retained<NSWindow>> {
     let handle = HasWindowHandle::window_handle(window)
@@ -192,6 +215,59 @@ impl Platform for MacOs {
         ns.setFrame_display(rect, true);
         ns.orderFrontRegardless();
         Ok(())
+    }
+
+    /// `contentAspectRatio` and `contentMinSize`: AppKit keeps the user's
+    /// drag-resizes at the ratio (GPUI's window delegate doesn't answer
+    /// `windowWillResize:toSize:`, which would override it).
+    fn lock_content_aspect(
+        &self,
+        window: &Window,
+        aspect: (f64, f64),
+        min: (f64, f64),
+    ) -> OsResult<()> {
+        let ns = ns_window(window)?;
+        if aspect.0 > 0.0 && aspect.1 > 0.0 {
+            ns.setContentAspectRatio(NSSize::new(aspect.0, aspect.1));
+        }
+        ns.setContentMinSize(NSSize::new(min.0, min.1));
+        Ok(())
+    }
+
+    fn content_room(&self, window: &Window) -> OsResult<f64> {
+        let ns = ns_window(window)?;
+        let visible = visible_frame(&ns).ok_or("the window is on no display")?;
+        let frame = ns.frame();
+        let content = ns.contentRectForFrameRect(frame);
+        Ok(visible.size.height - (frame.size.height - content.size.height))
+    }
+
+    fn content_resize(&self, window: &Window, size: (f64, f64)) -> OsResult<Box<dyn FnOnce()>> {
+        let ns = ns_window(window)?;
+        Ok(Box::new(move || {
+            let frame = ns.frame();
+            let content = ns.contentRectForFrameRect(frame);
+            let mut next = ns
+                .frameRectForContentRect(NSRect::new(content.origin, NSSize::new(size.0, size.1)));
+            // AppKit's origin is the bottom-left corner: keep the top edge.
+            next.origin.x = frame.origin.x;
+            next.origin.y = frame.origin.y + frame.size.height - next.size.height;
+            if let Some(visible) = visible_frame(&ns) {
+                let right = visible.origin.x + visible.size.width;
+                let top = visible.origin.y + visible.size.height;
+                next.origin.x = next
+                    .origin
+                    .x
+                    .min(right - next.size.width)
+                    .max(visible.origin.x);
+                next.origin.y = next
+                    .origin
+                    .y
+                    .min(top - next.size.height)
+                    .max(visible.origin.y);
+            }
+            ns.setFrame_display(next, true);
+        }))
     }
 
     /// `performClose:`: what the close button does, `windowShouldClose:`

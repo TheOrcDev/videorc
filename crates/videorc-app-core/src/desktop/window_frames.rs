@@ -15,6 +15,9 @@
 //!   ([`persistence_enabled`]).
 //! - [`PreviewWindowPrefs`] and [`close_prefs`]: the detached Preview's
 //!   remembered state, for its window (L1).
+//! - [`conform_content_to_aspect`] and [`preview_min_content_size`]: the
+//!   floating Preview follows the output's aspect (a vertical preset makes
+//!   it portrait), as Electron's `applyPreviewWindowAspect` does.
 //!
 //! Hide from stream is `desktop::capture_protection`'s; Keep on top's
 //! levels are the platform's (`apps/videorc/src/platform/`). Pure data and
@@ -145,6 +148,47 @@ pub fn clamp_frame_to_work_area(frame: Rect, displays: &[Display]) -> Rect {
         x: frame.x.max(area.x).min(area.right() - width),
         y: frame.y.max(area.y).min(area.bottom() - height),
     }
+}
+
+/// `conformPreviewWindowToAspect`: the floating Preview's content size for
+/// the output's `ratio` (width / height). It keeps the width and derives
+/// the video's height (plus `bar`, the strip above the video inside the
+/// content); when that is taller than `room` (the most content height the
+/// display's work area leaves), it takes `room` and derives the width.
+/// `None` when the content already fits the ratio within a point, so an
+/// unchanged aspect never resizes the window.
+pub fn conform_content_to_aspect(
+    content: (f64, f64),
+    ratio: f64,
+    bar: f64,
+    room: f64,
+) -> Option<(f64, f64)> {
+    if !ratio.is_finite() || ratio <= 0.0 {
+        return None;
+    }
+    let (content_width, content_height) = content;
+    let mut width = content_width;
+    let mut height = (width / ratio).round() + bar;
+    if room > bar && height > room {
+        height = room;
+        width = ((height - bar) * ratio).round();
+    }
+    if (height - content_height).abs() <= 1.0 && (width - content_width).abs() <= 1.0 {
+        return None;
+    }
+    Some((width, height))
+}
+
+/// The floating Preview's least content size for the output's `ratio`
+/// (Electron's `setMinimumSize(320, round(320 / ratio) + bar)`).
+pub fn preview_min_content_size(ratio: f64, bar: f64) -> (f64, f64) {
+    const MIN_WIDTH: f64 = 320.0;
+    let ratio = if ratio.is_finite() && ratio > 0.0 {
+        ratio
+    } else {
+        16.0 / 9.0
+    };
+    (MIN_WIDTH, (MIN_WIDTH / ratio).round() + bar)
 }
 
 // --- the saved preferences ---
@@ -279,6 +323,51 @@ mod tests {
             bounds: Rect::new(x, y, width, height),
             work_area: Rect::new(x, y + menu, width, height - menu),
         }
+    }
+
+    #[test]
+    fn the_preview_conforms_to_the_output_aspect_as_electron_does() {
+        let landscape = 1920.0 / 1080.0;
+        let portrait = 1080.0 / 1920.0;
+        // The default 960x540 video at 16:9: already conformed.
+        assert_eq!(
+            conform_content_to_aspect((960.0, 540.0), landscape, 0.0, 900.0),
+            None
+        );
+        // A vertical preset: the width would need a 1707 pt tall video, more
+        // than the work area leaves, so the height takes the room and the
+        // width follows it (a portrait window).
+        assert_eq!(
+            conform_content_to_aspect((960.0, 540.0), portrait, 0.0, 900.0),
+            Some((506.0, 900.0))
+        );
+        // Back to landscape: the narrow width stays, the height follows.
+        assert_eq!(
+            conform_content_to_aspect((506.0, 900.0), landscape, 0.0, 900.0),
+            Some((506.0, 285.0))
+        );
+        // Electron's in-content bar counts in the height and not the video.
+        assert_eq!(
+            conform_content_to_aspect((960.0, 540.0), landscape, 28.0, 900.0),
+            Some((960.0, 568.0))
+        );
+        // A tall enough display keeps the width.
+        assert_eq!(
+            conform_content_to_aspect((400.0, 225.0), portrait, 0.0, 2000.0),
+            Some((400.0, 711.0))
+        );
+        // No ratio: nothing to conform to.
+        assert_eq!(
+            conform_content_to_aspect((960.0, 540.0), 0.0, 0.0, 900.0),
+            None
+        );
+    }
+
+    #[test]
+    fn the_preview_min_size_follows_the_output_aspect() {
+        assert_eq!(preview_min_content_size(16.0 / 9.0, 28.0), (320.0, 208.0));
+        assert_eq!(preview_min_content_size(9.0 / 16.0, 0.0), (320.0, 569.0));
+        assert_eq!(preview_min_content_size(f64::NAN, 0.0), (320.0, 180.0));
     }
 
     #[test]
