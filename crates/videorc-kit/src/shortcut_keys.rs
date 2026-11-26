@@ -174,8 +174,8 @@ impl RenderOnce for ShortcutKeys {
 fn any_context_binding(action: &dyn Action, cx: &App) -> Option<KeyBinding> {
     let keymap = cx.key_bindings();
     let keymap = RefCell::borrow(&keymap);
-    let found = keymap.bindings_for_action(action).next_back().cloned();
-    found
+
+    keymap.bindings_for_action(action).next_back().cloned()
 }
 
 /// A key's name as the platform prints it.

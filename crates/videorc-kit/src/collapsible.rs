@@ -211,15 +211,13 @@ impl RenderOnce for Collapsible {
             None => header.into_any_element(),
         };
         let mut root = self.base.flex().flex_col().w_full().child(header);
-        if open {
-            if let Some(content) = self.content {
-                let panel = if unstyled {
-                    div().w_full().child(content)
-                } else {
-                    div().w_full().pt(px(4.0)).pl(px(22.0)).child(content)
-                };
-                root = root.child(panel);
-            }
+        if open && let Some(content) = self.content {
+            let panel = if unstyled {
+                div().w_full().child(content)
+            } else {
+                div().w_full().pt(px(4.0)).pl(px(22.0)).child(content)
+            };
+            root = root.child(panel);
         }
         root
     }

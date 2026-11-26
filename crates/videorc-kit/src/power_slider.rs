@@ -213,6 +213,9 @@ impl PowerSlider {
     }
 }
 
+/// Moves the slider to its default and tells the screen.
+type ApplyReset = Rc<dyn Fn(&mut Window, &mut App)>;
+
 impl RenderOnce for PowerSlider {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
@@ -229,17 +232,16 @@ impl RenderOnce for PowerSlider {
             clamp_to_range(value, min, max, step) != clamp_to_range(default, min, max, step)
         });
         // Moves the state to the default and tells the screen.
-        let reset: Option<Rc<dyn Fn(&mut Window, &mut App)>> =
-            self.default_value.filter(|_| !disabled).map(|default| {
-                let state = self.state.clone();
-                let on_reset = self.on_reset.clone();
-                Rc::new(move |window: &mut Window, cx: &mut App| {
-                    state.update(cx, |s, cx| s.set_value(default, window, cx));
-                    if let Some(on_reset) = on_reset.as_ref() {
-                        on_reset(default, window, cx);
-                    }
-                }) as Rc<dyn Fn(&mut Window, &mut App)>
-            });
+        let reset: Option<ApplyReset> = self.default_value.filter(|_| !disabled).map(|default| {
+            let state = self.state.clone();
+            let on_reset = self.on_reset.clone();
+            Rc::new(move |window: &mut Window, cx: &mut App| {
+                state.update(cx, |s, cx| s.set_value(default, window, cx));
+                if let Some(on_reset) = on_reset.as_ref() {
+                    on_reset(default, window, cx);
+                }
+            }) as Rc<dyn Fn(&mut Window, &mut App)>
+        });
 
         let id = self.id.clone();
         let label = self.label.clone();

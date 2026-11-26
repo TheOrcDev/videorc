@@ -342,20 +342,20 @@ impl RenderOnce for SoundPad {
                     .on_mouse_down(MouseButton::Left, {
                         let on_trigger = on_trigger.clone();
                         move |_: &MouseDownEvent, window, cx| {
-                            if mode == SoundPadMode::Hold {
-                                if let Some(on_trigger) = &on_trigger {
-                                    on_trigger(window, cx);
-                                }
+                            if mode == SoundPadMode::Hold
+                                && let Some(on_trigger) = &on_trigger
+                            {
+                                on_trigger(window, cx);
                             }
                         }
                     })
                     .on_mouse_up(MouseButton::Left, {
                         let on_stop = on_stop.clone();
                         move |_: &MouseUpEvent, window, cx| {
-                            if mode == SoundPadMode::Hold {
-                                if let Some(on_stop) = &on_stop {
-                                    on_stop(window, cx);
-                                }
+                            if mode == SoundPadMode::Hold
+                                && let Some(on_stop) = &on_stop
+                            {
+                                on_stop(window, cx);
                             }
                         }
                     })
@@ -438,12 +438,6 @@ fn paint_progress_ring(
     let d = size.as_f32().round().max(1.0) as u32;
     let r = d as f32 / 2.0 - 1.5;
     let circ = std::f32::consts::TAU * r;
-    let accent_css = format!(
-        "#{:02x}{:02x}{:02x}",
-        (accent >> 24) & 0xff,
-        (accent >> 16) & 0xff,
-        (accent >> 8) & 0xff
-    );
     let track = format!(
         "rgba({},{},{},0.2)",
         (accent >> 24) & 0xff,

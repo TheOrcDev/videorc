@@ -21,13 +21,18 @@ use crate::{
 
 type Content = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 
+/// Builds a custom trigger from the open state.
+type TriggerBuilder = Box<dyn FnOnce(bool, &Window, &App) -> AnyElement>;
+/// Told when the popover opens or closes.
+type OpenChangeHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+
 #[derive(IntoElement)]
 pub struct Popover {
     id: ElementId,
     trigger: Option<Button>,
-    custom_trigger: Option<Box<dyn FnOnce(bool, &Window, &App) -> AnyElement>>,
+    custom_trigger: Option<TriggerBuilder>,
     controlled_open: Option<bool>,
-    on_open_change: Option<Rc<dyn Fn(bool, &mut Window, &mut App)>>,
+    on_open_change: Option<OpenChangeHandler>,
     content: Option<Content>,
     anchor: Anchor,
     width: f32,

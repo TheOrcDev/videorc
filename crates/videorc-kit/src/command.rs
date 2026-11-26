@@ -33,7 +33,7 @@ impl CommandInput {
 impl RenderOnce for CommandInput {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = current(window, cx).theme();
-        self.state.update(cx, |state, cx| {
+        self.state.update(cx, |state, _cx| {
             state.set_editor_style(InputEditorStyle {
                 foreground: hsla(t.foreground),
                 muted_foreground: hsla(t.muted_foreground),
@@ -68,6 +68,9 @@ impl RenderOnce for CommandInput {
     }
 }
 
+/// A command row's click handler.
+type ClickHandler = std::rc::Rc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
+
 #[derive(IntoElement)]
 pub struct CommandItem {
     id: ElementId,
@@ -76,7 +79,7 @@ pub struct CommandItem {
     disabled: bool,
     leading_icon: Option<IconName>,
     children: Vec<AnyElement>,
-    on_click: Option<std::rc::Rc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>>,
+    on_click: Option<ClickHandler>,
 }
 impl CommandItem {
     pub fn new(id: impl Into<ElementId>, title: impl Into<SharedString>) -> Self {
