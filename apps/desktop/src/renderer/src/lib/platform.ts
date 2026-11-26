@@ -69,7 +69,9 @@ function detectedPlatform(): string | undefined {
   // A test's stubbed navigator may have no user agent at all.
   const userAgent: string | undefined =
     typeof navigator === 'undefined' ? undefined : navigator.userAgent
-  if (!userAgent) return undefined
+  if (!userAgent) {
+    return undefined
+  }
   if (userAgent.includes('Windows')) {
     return 'win32'
   }
