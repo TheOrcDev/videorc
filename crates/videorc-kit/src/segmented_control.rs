@@ -24,7 +24,6 @@ use gpui::{
     AnyElement, App, Axis, ColorSpace, ElementId, FocusHandle, FontWeight, IntoElement, KeyBinding,
     SharedString, Window, div, linear_color_stop, linear_gradient, prelude::*, px,
 };
-use gpui_base::ElementExt as _;
 use gpui_base::actions::{SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp};
 use smallvec::SmallVec;
 
@@ -394,33 +393,17 @@ impl RenderOnce for SegmentedControl {
                 })
             })
             .collect();
-        let width_state =
-            window.use_keyed_state(SharedString::from(format!("{key}/width")), cx, |_, _| {
-                0.0_f32
-            });
-        let track_inner = *width_state.read(cx) - 4.0;
         let fit = self.fit;
-        // `w-fit` is CSS `fit-content`: min(max-content, available). The
-        // track asks for its words and is capped at its column; measured
-        // narrower than its words, it shares and wraps as a full track does.
-        let fits_words =
-            |mins: &[f32]| track_inner <= 0.0 || track_inner + 0.5 >= mins.iter().sum::<f32>();
-        let widths: Option<Vec<f32>> = match &mins {
-            Some(mins) if fit && fits_words(mins.as_slice()) => Some(mins.clone()),
-            // A pixel under the measured width: the bounds are snapped to
-            // whole pixels but the layout's room is not, and exact shares of
-            // a width rounded up wrapped the last segment (Go live's Privacy).
-            Some(mins) if track_inner > 0.0 => Some(
-                segment_widths(mins, (track_inner - 1.0).max(0.0))
-                    .into_iter()
-                    // A hair under, so float rounding never wraps a line early.
-                    .map(|(_, width)| (width - 0.01).max(0.0))
-                    .collect(),
-            ),
-            _ => None,
-        };
+        // Chrome's flex sizing, laid out by layout itself, with no measured
+        // width to go stale: each segment is `flex-1` (equal shares from a
+        // zero basis) and never narrower than its words (`min-width: auto`).
+        // Lines break where the words stop fitting and each line shares
+        // its own width, which is what `segment_widths` writes down.
+        // `w-fit` is CSS `fit-content`: the track asks for its words (plus a
+        // pixel, so the exact sum never wraps on rounding) and is capped at
+        // its column, where the segments share and wrap as a full one's do.
         let track_width = match (&mins, fit) {
-            (Some(mins), true) => Some(mins.iter().sum::<f32>() + 4.0),
+            (Some(mins), true) => Some(mins.iter().sum::<f32>() + 5.0),
             _ => None,
         };
 
@@ -449,10 +432,11 @@ impl RenderOnce for SegmentedControl {
                     .track_focus(&handles[index])
                     .relative()
                     .h(px(height - 4.0))
-                    .map(|radio| match widths.as_ref().and_then(|w| w.get(index)) {
-                        Some(width) => radio.flex_none().w(px(*width)),
-                        None => radio.flex_1(),
-                    })
+                    .flex_1()
+                    .when_some(
+                        mins.as_ref().and_then(|mins| mins.get(index).copied()),
+                        |radio, min| radio.min_w(px(min)),
+                    )
                     .flex()
                     .items_center()
                     .justify_center()
@@ -538,19 +522,6 @@ impl RenderOnce for SegmentedControl {
             .when(!fit, |track| track.w_full())
             .when_some(track_width, |track, width| {
                 track.flex_none().w(px(width)).max_w(gpui::relative(1.0))
-            })
-            .on_prepaint({
-                let width_state = width_state.clone();
-                move |bounds, window, cx| {
-                    let width = f32::from(bounds.size.width);
-                    if (*width_state.read(cx) - width).abs() > 0.5 {
-                        width_state.update(cx, |w, _| *w = width);
-                        // `refresh` is a no-op while the window draws, and prepaint
-                        // is drawing: ask for it from the next frame, where it
-                        // re-renders every view with the new width.
-                        window.on_next_frame(|window, _| window.refresh());
-                    }
-                }
             })
             .rounded(px(radius::ROW))
             .bg(hsla(with_alpha(
