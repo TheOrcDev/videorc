@@ -1003,6 +1003,7 @@ impl Render for StreamManager {
                 )
                 .child(status_bar(
                     self.notices.clone(),
+                    &self.studio.live_chat_now().providers,
                     pinned,
                     hidden,
                     hide_method,

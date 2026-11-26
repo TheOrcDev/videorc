@@ -118,6 +118,10 @@ impl HighlightAnchor {
     }
 }
 
+/// `chat-pane.tsx`'s composer placeholders.
+const COMPOSER_PLACEHOLDER: &str = "Message, /marker [title] or /clip…";
+const COMPOSER_PLACEHOLDER_LOCAL: &str = "/marker [title], /clip · Local commands";
+
 /// The chat pane: filter bar, rows, empty body and composer.
 pub struct ChatPane {
     studio: SharedStudio,
@@ -152,6 +156,9 @@ pub struct ChatPane {
     completion_index: usize,
     /// Follow the newest message (Electron's pinned follow).
     following: bool,
+    /// Whether the composer's placeholder is the writable one (`Message,
+    /// /marker [title] or /clip…`) or the local-commands one.
+    placeholder_writable: Option<bool>,
     /// Frames left to keep a following list at its newest message while the
     /// rows lay out (a window opened onto chat that is already there).
     settle_scroll: u8,
@@ -189,9 +196,8 @@ impl ChatPane {
     ) -> Self {
         let search =
             cx.new(|cx| InputState::new(window, cx).placeholder(pane::copy::SEARCH_PLACEHOLDER));
-        let draft = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("/marker [title], /clip · Local commands")
-        });
+        let draft =
+            cx.new(|cx| InputState::new(window, cx).placeholder(COMPOSER_PLACEHOLDER_LOCAL));
         let search_sub = cx.subscribe(&search, |this, state, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.filter.search = state.read(cx).value().to_string();
@@ -301,6 +307,7 @@ impl ChatPane {
             pending_draft: None,
             completion_index: 0,
             following: true,
+            placeholder_writable: None,
             history: false,
             settle_scroll,
             unread: 0,
@@ -1198,6 +1205,19 @@ impl Render for ChatPane {
                 self.scroll.scroll_to_bottom();
             }
             cx.on_next_frame(window, |_, _, cx| cx.notify());
+        }
+        // The composer's placeholder (`chat-pane.tsx`): a message while a
+        // destination is writable, else only the local commands.
+        let writable = !writable_providers(&self.providers).is_empty();
+        if self.placeholder_writable != Some(writable) {
+            self.placeholder_writable = Some(writable);
+            let words = if writable {
+                COMPOSER_PLACEHOLDER
+            } else {
+                COMPOSER_PLACEHOLDER_LOCAL
+            };
+            self.draft
+                .update(cx, |draft, cx| draft.set_placeholder(words, window, cx));
         }
         let width = f32::from(window.viewport_size().width);
         let tier = Tier::of(width);
