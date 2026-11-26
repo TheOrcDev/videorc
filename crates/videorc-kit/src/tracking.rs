@@ -136,7 +136,6 @@ fn shape_glyph(
 impl RenderOnce for TrackedText {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let gap = tracking_px(self.size, self.tracking_em);
-        let name = self.text.clone();
         // CSS puts the spacing after every letter, the last one too.
         let glow = self.glow.then(|| {
             let t = crate::theme::resolve(None, window, cx);
@@ -146,55 +145,32 @@ impl RenderOnce for TrackedText {
             // light glow barely shows on the pale screen.
             if crate::theme::is_dark(t) { 0.2 } else { 0.12 }
         });
-        if let Some(id) = self.truncate {
-            return truncated(id, self.text, self.size, gap, glow, window);
-        }
-        let glyphs = self.text.chars().map(|glyph| {
-            // A lone space would shape to nothing: draw it unbreakable.
-            let shown =
-                SharedString::from((if glyph == ' ' { '\u{a0}' } else { glyph }).to_string());
-            let halo = glow.filter(|_| glyph != ' ').map(|strength| {
-                GLOW_OFFSETS.map(|(x, y)| {
-                    div()
-                        .absolute()
-                        .left(px(x))
-                        .top(px(y))
-                        .opacity(strength)
-                        .child(shown.clone())
-                })
-            });
-            div()
-                .relative()
-                .flex_none()
-                .mr(px(gap))
-                .children(halo.into_iter().flatten())
-                .child(div().relative().child(shown))
+        // One path for both: each glyph's exact advance (a text box per
+        // glyph rounds its width up to a whole pixel, which made a tracked
+        // label ~0.5 px a glyph wider than Electron's: LIVESTREAM 5.5 pt).
+        let cuts = self.truncate.is_some();
+        let id = self.truncate.unwrap_or_else(|| {
+            ElementId::from(SharedString::from(format!("tracked/{}", self.text)))
         });
-        let row = div()
-            .flex()
-            .flex_none()
-            .items_baseline()
-            .whitespace_nowrap()
-            .children(glyphs);
-        let root = div()
-            .id(SharedString::from(format!("tracked/{}", self.text)))
-            .text_size(px(self.size))
-            .aria_label(name);
-        root.flex().flex_none().child(row).into_any_element()
+        painted(id, self.text, self.size, gap, glow, cuts, window)
     }
 }
 
-/// The truncating line, cut in the frame it's laid out in: a spacer the
-/// whole tracked width sizes its box (it shrinks in a flex row, `min-w-0`,
-/// stretches in a block parent, and grows back), and a canvas over it paints the glyphs that fit its final width, then the
-/// tracked `…`. The glyphs are shaped here, in the face, size and ink the line
-/// inherits (a component renders inside its parent's text style).
-fn truncated(
+/// The line, painted glyph by glyph at each glyph's exact advance plus the
+/// tracking. A spacer the whole tracked width sizes its box, and a canvas
+/// over it paints the glyphs. A truncating line (`cuts`) shrinks in a flex
+/// row (`min-w-0`), stretches in a block parent and grows back; the canvas
+/// paints the glyphs that fit its final width, then the tracked `…`, in the
+/// frame it's laid out in. The glyphs are shaped here, in the face, size and
+/// ink the line inherits (a component renders inside its parent's text
+/// style).
+fn painted(
     id: ElementId,
     text: SharedString,
     size: f32,
     gap: f32,
     glow: Option<f32>,
+    cuts: bool,
     window: &mut Window,
 ) -> gpui::AnyElement {
     let mut style = window.text_style();
@@ -216,8 +192,8 @@ fn truncated(
     div()
         .id(id)
         .relative()
-        .min_w(px(0.0))
-        .overflow_hidden()
+        .when(cuts, |line| line.min_w(px(0.0)).overflow_hidden())
+        .when(!cuts, |line| line.flex_none())
         .aria_label(text)
         // The whole line's width sizes the box from inside, as CSS text
         // does: a flex row shrinks it (`min-w-0`), a block parent stretches
@@ -230,7 +206,12 @@ fn truncated(
                 move |bounds, (), window, cx| {
                     let available = f32::from(bounds.size.width);
                     // CSS drops the spaces before the ellipsis ("3 DESTINATIO…").
-                    let cut = tracked_cut(&xs, gap, ellipsis_width, available).map(|mut kept| {
+                    let fit = if cuts {
+                        tracked_cut(&xs, gap, ellipsis_width, available)
+                    } else {
+                        None
+                    };
+                    let cut = fit.map(|mut kept| {
                         while kept > 0 && chars[kept - 1] == ' ' {
                             kept -= 1;
                         }
