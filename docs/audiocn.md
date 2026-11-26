@@ -6,14 +6,11 @@ Videorc vendors part of it with the shadcn CLI: `@audiocn` is a registry in
 `apps/desktop/components.json`. The decision records, with what Videorc does
 not use and why, are `plans/092-audiocn-audio-components.md` (meters) and
 `plans/093-sources-audio-mixer-on-audiocn-controls.md` (the Sources controls).
-Plan 196 (`plans/196-lcd-level-meter.md`) put every level on the LCD meter;
-plan 197 (`plans/197-retro-lcd-studio.md`) made that, and the Studio on LCD
-screens, the Retro LCD option (Settings → General, off by default). Plan 173 (`plans/173-sources-tab-rewrite.md`) rebuilt the Sources page: the
+Plan 173 (`plans/173-sources-tab-rewrite.md`) rebuilt the Sources page: the
 controls stayed, the channel strips gave way to Sources rows.
 Plan 201 (`plans/201-studio-audio-balance.md`) put Microphone and System
 audio in the Studio's Audio section, on one Mixer scale, with the same Gain
-faders as Sources (`components/audio/gain-faders.tsx`). Retro LCD skins
-those faders from outside with `LCD_FADER` inside the Audio screen.
+faders as Sources (`components/audio/gain-faders.tsx`).
 
 ## What is installed
 
@@ -21,7 +18,7 @@ those faders from outside with `LCD_FADER` inside the Audio screen.
 | ----------------------------------------------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `core`                                                                                          | `lib/audio/*.ts` (11 files) | Used by every item below                                                                                            |
 | `use-frame-source`, `use-clip-hold`, `use-audio-config`, `use-visibility`, `use-reduced-motion` | `hooks/`                    | Dependencies of the components (`use-reduced-motion` also serves the sidebar)                                       |
-| `lcd-meter` with `lcd-display`                                                                  | `components/ui/`            | Retro LCD only: every level (`MicLevelMeter`) and the Studio screens (197)                                          |
+| `lcd-meter` with `lcd-display` | `components/ui/` | Available library components; not used by app screens |
 | `level-meter` with `db-scale`, `db-readout`, `clip-indicator`                                   | `components/ui/`            | Every level (`MicLevelMeter`'s segmented bar), and under `lcd-meter`                                                |
 | `bar-visualizer`                                                                                | `components/ui/`            | Session mic sliver                                                                                                  |
 | `mixer`                                                                                         | `components/ui/`            | Sources Audio column and Studio Audio section: one meter range, Cmd/Ctrl+Up/Down between rows (plans 093, 173, 201) |
@@ -85,7 +82,6 @@ horizontal scale) with the LCD.
 - **Never use audiocn's Web Audio hooks or blocks** (`useMicrophone`, `useAudioAnalyser`, `useAudioDevices`, `useSystemAudio`, `useWebAudioMixer`, `useSound`, the blocks, the soundboard block among them). The backend is the capture authority. The renderer's only microphone stream is the visual one owned by `StudioMicVisualProvider`, which opens only after an exact `granted` status.
 - **Base UI is the primitive layer, and Radix is gone.** audiocn's components and the `@videorc` items synced from videorc-ui (`apps/desktop/ui-registry.json`, `pnpm ui:sync`) build on `@base-ui/react`; `eslint.config.mjs` fails any `radix-ui` or `@radix-ui/*` import.
 - **Do not edit vendored files.** Fix the problem in audiocn (or, for `fader` and `parameter-slider`, in videorc-ui), then re-install. Local patches: none. `hooks/use-reduced-motion.ts` is `@videorc/use-reduced-motion`, a superset of audiocn's that adds `smoothScrollBehavior()` (plan 174 S1.8): when an `@audiocn` item overwrites it, take it back with `pnpm ui:sync use-reduced-motion`.
-- **The LCD draws in Videorc's ink.** `LcdDisplay` keeps `variant="primary"` (`--primary`) and `appearance="auto"`; no hardware ink. Its bezel and glass are the instrument's own materials, so `lcd-display.tsx` is on the style guard's colour-literal allowlist; `audiocn-adoption.test.ts` keeps `LcdDisplay` inside `MicLevelMeter` and the Studio screen kit (`components/lcd-panel.tsx`, plan 197), with no `variant` or `appearance`. The kit sets the screen's variables to the app's glass (`LCD_ON_GLASS`); a dropdown's list keeps the screen's own opaque glass inside `glass-float`.
 - **Tokens are Videorc tokens.** The `audiocn` block in `styles.css` points the three meter tokens (and their foregrounds) at `--foreground`, `--warning` and `--destructive`, and the channel tokens at `--warning` (mute, the muted-speaker amber), `--foreground` (solo) and `--info` (monitor); solo and monitor have no Videorc use. Never keep the CSS the CLI writes (raw colours, and self-referencing lines in `@theme inline`); `audiocn-adoption.test.ts` fails if it comes back.
 
 - **Videorc's skin comes from outside.** Vendored files stay pristine; Videorc styles the parts it renders through `className`:

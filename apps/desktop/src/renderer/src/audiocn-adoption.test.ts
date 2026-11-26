@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { join, relative } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 // Plans 092 and 093: audiocn's meter and channel tokens are Videorc tokens, written by hand in
@@ -45,36 +45,17 @@ describe('audiocn tokens (plans 092 and 093)', () => {
   })
 })
 
-// Plan 196, D1: the LCD draws in Videorc's ink. LcdDisplay's defaults are the
-// theme's --primary and the theme's appearance, so the one screen Videorc
-// renders passes neither a hardware ink nor a pinned appearance.
-function rendererSources(directory: string): string[] {
-  return readdirSync(directory).flatMap((entry) => {
-    const path = join(directory, entry)
-    if (statSync(path).isDirectory()) return rendererSources(path)
-    return /\.tsx$/.test(entry) && !/\.test\.tsx$/.test(entry) ? [path] : []
-  })
-}
-
-describe('audiocn LCD (plan 196)', () => {
-  const screens = rendererSources(__dirname).flatMap((path) =>
-    Array.from(readFileSync(path, 'utf8').matchAll(/<LcdDisplay\b([^>]*)>/g), (match) => ({
-      path: relative(__dirname, path).split(sep).join('/'),
-      props: match[1]
-    }))
-  )
-
-  it('renders LcdDisplay only in the meter and the Studio screen kit (plan 197)', () => {
-    expect(screens.map(({ path }) => path).sort()).toEqual([
-      'components/lcd-panel.tsx',
-      'components/lcd-panel.tsx',
-      'components/studio/mic-level-meter.tsx'
-    ])
-  })
-
-  it('never picks a hardware ink or pins an appearance', () => {
-    for (const { path, props } of screens) {
-      expect(props, path).not.toMatch(/\b(?:variant|appearance)=/)
-    }
-  })
+it('keeps LCD components out of the app screens', () => {
+  function sources(directory: string): string[] {
+    return readdirSync(directory).flatMap((entry) => {
+      const path = join(directory, entry)
+      if (statSync(path).isDirectory()) return entry === 'ui' ? [] : sources(path)
+      return /\.tsx$/.test(entry) && !/\.test\.tsx$/.test(entry) ? [path] : []
+    })
+  }
+  for (const path of sources(__dirname)) {
+    expect(readFileSync(path, 'utf8'), relative(__dirname, path)).not.toMatch(
+      /<Lcd(?:Display|Meter)\b/
+    )
+  }
 })

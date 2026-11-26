@@ -2,7 +2,7 @@ import { DisplayIcon, MobileIcon } from '@/components/icons'
 import { useEffect, type ReactElement, type ReactNode } from 'react'
 
 import { KebabMenu } from '@/components/kebab-menu'
-import type { StudioLook } from '@/components/lcd-panel'
+
 import { PanelSection } from '@/components/panel-section'
 import { SceneGlyphIcon } from '@/components/scene/app-icon'
 import { FollowFrontAppSwitch } from '@/components/scene/follow-front-app-switch'
@@ -67,7 +67,7 @@ const STUDIO_ORIENTATION_OPTIONS: SegmentedControlOption<LayoutOrientation>[] = 
  * card's still comes from `useScenePictures` (S5, D17): macOS only, never
  * while recording or live, and frozen while Hide screen holds.
  */
-export function ScenesSection({ look = 'default' }: { look?: StudioLook }): ReactElement {
+export function ScenesSection(): ReactElement {
   const studio = useStudioCore()
   const {
     savedScenes,
@@ -257,7 +257,6 @@ export function ScenesSection({ look = 'default' }: { look?: StudioLook }): Reac
         changeScreenReason={
           activeSavedSceneId ? changeScreenBlockedReason(studio, activeSavedSceneId) : null
         }
-        look={look}
         onChangeScreen={(options) => {
           const listed = savedScenes.find((entry) => entry.id === activeSavedSceneId)
           if (listed) dialogs.open({ kind: 'change-screen', scene: listed, ...options })

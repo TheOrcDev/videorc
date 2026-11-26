@@ -1,19 +1,17 @@
 // @vitest-environment happy-dom
-import { act, createElement } from 'react'
-import { createRoot } from 'react-dom/client'
-import { renderToStaticMarkup } from 'react-dom/server'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-
-import { RetroAudioSectionView } from '@/components/studio/retro-lcd-studio'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { focusSection } from '@/hooks/use-section-focus'
 import { createFrameEmitter } from '@/lib/audio/frame-source'
-import { SECTION_FOCUS_MARK_ATTRIBUTE, SECTION_FOCUS_MARK_MS } from '@/lib/section-focus'
 import type { MeterFrame } from '@/lib/audio/types'
 import type { Device, ReplayBufferState } from '@/lib/backend'
 import { defaultCaptureConfig } from '@/lib/capture'
 import { micMeterInput, type MeterInput } from '@/lib/mic-meter-input'
+import { SECTION_FOCUS_MARK_ATTRIBUTE, SECTION_FOCUS_MARK_MS } from '@/lib/section-focus'
 import { systemAudioSwitchView, type SystemAudioSwitchInput } from '@/lib/system-audio'
+import { act, createElement } from 'react'
+import { createRoot } from 'react-dom/client'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   AudioSection,
   AudioSectionView,
@@ -503,33 +501,6 @@ describe('Audio section: resets (plan 201 S2)', () => {
     vi.useRealTimers()
     await unmount()
   })
-
-  it('the Retro LCD screen lands on its Microphone the same way', async () => {
-    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-    Element.prototype.scrollIntoView = () => {}
-    container = document.createElement('div')
-    document.body.append(container)
-    const root = createRoot(container)
-    await act(async () => {
-      root.render(
-        createElement(
-          TooltipProvider,
-          null,
-          createElement(RetroAudioSectionView, {
-            microphone: microphoneProps(),
-            systemAudio: null
-          })
-        )
-      )
-    })
-    expect(focusSection('studio-audio', container)).toBe(true)
-    const target = container.querySelector(`[${SECTION_FOCUS_MARK_ATTRIBUTE}]`)
-    expect(target?.querySelector('[data-videorc-mic-level]')).not.toBeNull()
-    const focused = document.activeElement as HTMLElement
-    expect(focused.closest('[data-section-focus-control]')).not.toBeNull()
-    expect(focused.getAttribute('aria-label')).not.toBe('Mute microphone')
-    await act(async () => root.unmount())
-  })
 })
 
 describe('AudioSection (plan 201 S2)', () => {
@@ -634,20 +605,5 @@ describe('AudioSection (plan 201 S2)', () => {
     const markup = renderSection()
     expect(markup).toContain('aria-label="Audio"')
     expect(markup).not.toContain('data-videorc-studio-system-audio')
-  })
-
-  it('draws the same section on one Retro LCD screen, its idle line in the screen ink (S3)', () => {
-    setCore({ settings: { retroLcdStudio: true } })
-    setClips(false, 'off')
-    const markup = renderSection()
-    expect(markup.match(/data-slot="lcd-display"/g)).toHaveLength(1)
-    expect(markup).not.toMatch(/>Audio<\/h2>/)
-    expect(markup).toContain('aria-label="Audio"')
-    expect(markup).toContain('data-videorc-studio-mic-mute=""')
-    expect(markup).toContain('data-videorc-studio-system-audio=""')
-    expect(markup).toContain('data-videorc-studio-system-audio-level=""')
-    const line = new RegExp(`<p[^>]*${IDLE_LINE}[^>]*>`).exec(markup)?.[0] ?? ''
-    expect(line).toContain('normal-case')
-    expect(line).not.toContain('text-muted-foreground')
   })
 })

@@ -89,8 +89,6 @@ const GRADIENT_ALLOWLIST = new Set([
   'src/components/studio/scenes-gallery.tsx',
   // The room layout diagrams (plan 252): the same blank picture as the scene thumbnails.
   'src/components/studio/stage-layout-thumb.tsx',
-  // The level meter's zones (healthy, hot, clipping) as one gradient.
-  'src/components/studio/mic-level-meter.tsx',
   // Caption style previews: stand-ins for the stream behind a caption.
   'src/components/captions/caption-preview.tsx'
 ])
@@ -886,13 +884,10 @@ describe('guardrails consolidated (plan 174 S4.1)', SOURCE_SCAN_TIMEOUT, () => {
 
   it('never hand-rolls a choice from pressed buttons in a list (S1.7)', () => {
     // The Studio's takeovers: any number of them, one on at a time, each a
-    // button (or, with Retro LCD, a row on the Takeover screen; plan 197)
+    // button
     // with its own disabled reason. A ToggleGroup would need the reasons
     // rebuilt; a follow-up, not a mechanical swap.
-    const allowed = [
-      'src/components/studio/session-panel.tsx',
-      'src/components/studio/retro-lcd-studio.tsx'
-    ]
+    const allowed = ['src/components/studio/session-panel.tsx']
     const found = parsed(pressedButtonGroups)
     expect(found.filter((line) => !allowed.some((path) => line.startsWith(`${path}:`)))).toEqual([])
     // Each exception stays real, so it cannot outlive its reason.

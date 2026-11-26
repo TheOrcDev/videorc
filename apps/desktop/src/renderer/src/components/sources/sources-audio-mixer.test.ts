@@ -16,9 +16,9 @@ import {
   keepMicrophoneReadyHint,
   MicrophoneChannel,
   noiseReductionSwitchView,
+  SoundsSettings,
   SyncCalibrationView,
   syncOffsetTag,
-  SoundsSettings,
   SystemAudioSettings
 } from './sources-audio-mixer'
 
@@ -105,7 +105,6 @@ describe('Sources System audio row (plans 069, 173)', () => {
     )
     expect(markup).toContain('data-videorc-system-audio-visualizer=""')
     expect(markup).toContain('aria-label="System audio level"')
-    // The segmented bar; the LCD screen is Retro LCD's (plan 197).
     expect(markup).toMatch(/data-videorc-system-audio-visualizer=""[^]*data-slot="level-meter"/)
     expect(markup).not.toContain('data-slot="lcd-display"')
     expect(markup).not.toContain('Level shows while you record, go live, or keep Clips on.')

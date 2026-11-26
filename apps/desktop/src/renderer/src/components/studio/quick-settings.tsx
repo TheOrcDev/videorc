@@ -16,8 +16,8 @@ import { NavigableRow } from '@/components/navigable-row'
 import { PanelSection } from '@/components/panel-section'
 import { OpenPageCog } from '@/components/studio/open-page-cog'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
-import { useWorkspaceNav } from '@/components/workspace-nav'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { useWorkspaceNav } from '@/components/workspace-nav'
 import {
   useStudioChat,
   useStudioCore,
@@ -32,8 +32,8 @@ import { shortcutAccelerator } from '@/lib/shortcuts'
 import { standInLine } from '@/lib/source-status'
 import { captionsStatusLabel } from '@/lib/state-labels'
 import { chatDoorNewLabel } from '@/lib/studio-chat'
-import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { systemAudioRowDevice, systemAudioSwitchView } from '@/lib/system-audio'
+import { openWorkspaceTab } from '@/lib/workspace-navigation'
 import { WINDOW_NAMES } from '../../../../shared/window-names'
 
 /**
@@ -305,11 +305,6 @@ export function useCameraBackgroundStageLine(): string | null {
   )
 }
 
-/**
- * What the Studio's Sources rows show and act with: the same state for the
- * inspector's rows and the Retro LCD screen (plan 197), which keeps its
- * System audio row until plan 201 S3 moves it to the Audio screen.
- */
 export function useStudioSources() {
   const {
     captureConfig,

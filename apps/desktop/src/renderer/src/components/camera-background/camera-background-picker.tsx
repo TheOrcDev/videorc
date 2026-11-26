@@ -21,12 +21,6 @@ import {
 /** The pictures the popover's Images row shows before Choose image…. */
 const POPOVER_IMAGES = 3
 
-/**
- * The popover's body, shared by both looks (the Retro LCD trigger opens the
- * same picker): the live "What viewers see" picture, the tiles in three
- * groups, the blur caveat while a blur is picked, and the lock line
- * with Settings (the Scene page's Background section, the home).
- */
 export function CameraBackgroundPicker({
   control,
   onChooseImage,

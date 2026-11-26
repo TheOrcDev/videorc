@@ -77,11 +77,6 @@ export type SettingsState = {
    */
   openStreamManagerOnLive?: boolean
   /**
-   * Retro LCD (plan 197, owner 2026-10-25): the Studio inspector draws every
-   * section on an audiocn LCD screen. Default off: the inspector's own rows.
-   */
-  retroLcdStudio?: boolean
-  /**
    * Chat in Studio (plan 204, owner 2026-10-27): while on air, the Studio
    * inspector shows the livestream's chat under Session, and a click puts a
    * message on stream. Default off (owner answer): an absent key is off.
@@ -1600,7 +1595,7 @@ export function normalizeCaptionsCaptureSettings(
  * - `quietWhileLive`: "Quiet while recording or live" (plan 250 D4), retired
  *   once only an urgent problem or a press's answer pops up, live or not.
  */
-export const RETIRED_SETTINGS_KEYS: readonly string[] = ['quietWhileLive']
+export const RETIRED_SETTINGS_KEYS: readonly string[] = ['quietWhileLive', 'retroLcdStudio']
 
 /** `settings` without the retired keys (see `RETIRED_SETTINGS_KEYS`). */
 export function withoutRetiredSettings<T extends object>(settings: T): T {

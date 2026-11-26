@@ -408,8 +408,7 @@ One verb pair on every surface (plan 174 D3; the table in
 `docs/ui-copy.md`, strings in `lib/go-live-copy.ts`):
 
 - The Studio buttons read "Record" and **"Go Live"**: it opens a dialog, and
-  still has no "…", the owner's exception (2026-11-14, plan 235 D2). Its
-  Retro LCD key reads the same.
+  still has no "…", the owner's exception (2026-11-14, plan 235 D2).
 - The Go Live dialog's title and primary button read **"Go live"** ("Go
   live on 3 destinations" when it starts more than one).
 - Stopping a livestream is **"End livestream"**, with the line "Your

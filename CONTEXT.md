@@ -34,7 +34,7 @@ mid-sentence; everything else is sentence case.
 
 **Go Live**:
 The action that starts a livestream. The Studio button reads "Go Live"
-(and its Retro LCD key), with no "…" although it opens a dialog: the owner's
+with no "…" although it opens a dialog: the owner's
 exception (plan 235 D2). The dialog's title and its primary button read
 "Go live"; ⌘K reads "Go live…".
 _Avoid_: Stream (as a button), Start streaming, Confirm Go Live

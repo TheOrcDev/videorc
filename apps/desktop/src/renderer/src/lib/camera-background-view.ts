@@ -7,13 +7,6 @@ import {
 } from '../../../shared/backend'
 import { DEFAULT_CAMERA_BACKGROUND, normalizeCameraBackground } from './camera-background'
 
-// Plan 258 S5: the words and the rules of the camera's Background control,
-// one module for every place it shows (the Studio's Camera row and its
-// Retro LCD twin, the Scene page's Background section, ⌘K and the room).
-// Pure, so each rule has a table test; the components only draw it. Only
-// lazy chunks import it: the launch bundle carries just the output boundary
-// (lib/camera-background.ts), within the renderer asset budget.
-
 /**
  * An effect the camera effect stage draws (a blur, a picture, a video, Cut
  * out), as opposed to Off or a screen key. The privacy rules (D2, D6) and

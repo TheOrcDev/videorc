@@ -20,7 +20,7 @@ import { DevicePicker } from '@/components/device-picker'
 import { GroupedList } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { SourceControlRow, SourceFacts, SourceItem } from '@/components/sources/source-item'
-import { StudioLookContext } from '@/components/lcd-panel'
+
 import { MicLevelMeter } from '@/components/studio/mic-level-meter'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -28,8 +28,8 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { MuteToggle } from '@/components/ui/channel-toggle'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
-import { SettingsRow } from '@/components/ui/field'
 import { Fader, FaderRange, FaderThumb, FaderTrack } from '@/components/ui/fader'
+import { SettingsRow } from '@/components/ui/field'
 import { Mixer, MixerChannels } from '@/components/ui/mixer'
 import {
   ParameterSlider,
@@ -41,11 +41,11 @@ import {
   ParameterSliderReset,
   type ParameterChangeReason
 } from '@/components/ui/parameter-slider'
-import { Switch } from '@/components/ui/switch'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
+import { Switch } from '@/components/ui/switch'
 import { useWorkspaceNav } from '@/components/workspace-nav'
-import { useSectionFocus } from '@/hooks/use-section-focus'
 import { AudioConfigProvider } from '@/hooks/use-audio-config'
+import { useSectionFocus } from '@/hooks/use-section-focus'
 import { useSoundboard } from '@/hooks/use-soundboard'
 import { useStudioCore } from '@/hooks/use-studio'
 import {
@@ -61,11 +61,11 @@ import {
   type MicrophoneNoiseSuppression
 } from '@/lib/backend'
 import {
-  MICROPHONE_SYNC_OFFSET_MAX_MS,
-  MICROPHONE_SYNC_OFFSET_MIN_MS,
   applyAudioSyncRecommendation,
   audioSyncCalibrationState,
   buildMicrophoneSources,
+  MICROPHONE_SYNC_OFFSET_MAX_MS,
+  MICROPHONE_SYNC_OFFSET_MIN_MS,
   microphonePickerDevices,
   normalizeMicrophoneSyncOffsetMs,
   parseAudioSyncRecommendationJson,
@@ -82,23 +82,23 @@ import {
 } from '@/lib/mic-meter-input'
 import type { MicStreamFailureReason } from '@/lib/mic-stream'
 import { microphoneIndicatorCopy, platformCopy } from '@/lib/platform-copy'
-import { isCoreAudioMicrophoneId } from '@/lib/warm-microphone-gate'
-import { takeoverMicrophoneStatus, useTakeoverMicrophoneHold } from '@/lib/takeover-microphone'
-import type { MicMonitorState } from '@/lib/state-labels'
 import {
   microphoneStatus,
   selectedDeviceStatus,
   systemAudioStatus,
   type SourceStatus
 } from '@/lib/source-status'
+import type { MicMonitorState } from '@/lib/state-labels'
 import {
-  SYSTEM_AUDIO_IDLE_LINE,
-  systemAudioRowDevice,
   requestSystemAudioResume,
+  SYSTEM_AUDIO_IDLE_LINE,
   systemAudioIssueCopy,
+  systemAudioRowDevice,
   systemAudioSwitchView,
   type SystemAudioSwitchView
 } from '@/lib/system-audio'
+import { takeoverMicrophoneStatus, useTakeoverMicrophoneHold } from '@/lib/takeover-microphone'
+import { isCoreAudioMicrophoneId } from '@/lib/warm-microphone-gate'
 
 // Plan 173: the Sources page's Audio column. Microphone, System audio and the
 // soundboard's Sounds (plan 189) are SourceItems (the shape every Sources row
@@ -229,8 +229,7 @@ export function SourcesAudioMixer(): ReactElement {
   })
 
   return (
-    // Retro LCD (plan 197) draws every level here on the LCD screen.
-    <StudioLookContext.Provider value={settings.retroLcdStudio === true ? 'lcd' : 'default'}>
+    <>
       <PanelSection
         description={
           microphone.processingDetail
@@ -373,7 +372,7 @@ export function SourcesAudioMixer(): ReactElement {
           </MixerChannels>
         </Mixer>
       </PanelSection>
-    </StudioLookContext.Provider>
+    </>
   )
 }
 

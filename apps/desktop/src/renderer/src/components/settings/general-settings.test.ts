@@ -75,28 +75,18 @@ describe('GeneralSettings', () => {
     expect(container.textContent).toContain('Open Stream Manager when you go live')
   })
 
+  it('does not offer the retired Studio appearance', async () => {
+    await act(async () => root.render(createElement(GeneralSettings)))
+    expect(switchById('retro-lcd-studio')).toBeNull()
+    expect(container.textContent).not.toContain('Retro LCD')
+  })
+
   // The owner's rule made "Quiet while recording or live" always true: only
   // an urgent problem or a press's answer pops up. Its switch is gone.
   it('has no Quiet while recording or live switch any more', async () => {
     await act(async () => root.render(createElement(GeneralSettings)))
     expect(switchById('quiet-while-live')).toBeNull()
     expect(container.textContent).not.toContain('Quiet while recording or live')
-  })
-
-  it('offers Retro LCD under Appearance, off until turned on (plan 197)', async () => {
-    await act(async () => root.render(createElement(GeneralSettings)))
-    const toggle = switchById('retro-lcd-studio')
-    expect(toggle?.getAttribute('role')).toBe('switch')
-    expect(toggle?.getAttribute('aria-checked')).toBe('false')
-    const appearance = container.querySelector('h2')?.closest('[data-slot="panel-section"]')
-    expect(appearance?.textContent).toContain('Retro LCD')
-    await act(async () => (toggle as HTMLElement).click())
-    const setSettings = mocked.core.setSettings as ReturnType<typeof vi.fn>
-    const update = setSettings.mock.calls.at(-1)?.[0] as (current: object) => object
-    expect(update({ keepOriginalRecording: false })).toEqual({
-      keepOriginalRecording: false,
-      retroLcdStudio: true
-    })
   })
 
   // Plan 204 (D3, D4): Chat in Studio is the Chat section's first row, off
