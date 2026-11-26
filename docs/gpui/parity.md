@@ -1546,17 +1546,17 @@ until the runtime, visual and accessibility checks above can run.
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1026 | Bell button (count "9+", tooltip with shortcut, live announcements) | Toggles notification popover | `renderer/components/notifications/notification-bell.tsx:135` | [ ] | [ ] | [ ] |
-| P1027 | ⌘⇧B / Ctrl+Shift+B | Toggles notifications | `renderer/lib/shortcuts.ts:41; renderer/components/notifications/stream-manager-notification-bell.tsx:33` | [ ] | [ ] | [ ] |
-| P1028 | Header "Notifications" + "Clear all" | Clears all clearable entries | `renderer/components/notifications/notification-center.tsx:181,183` | [ ] | [ ] | [ ] |
-| P1029 | "No notifications" / "Problems and finished work show up here." | Empty state | `renderer/components/notifications/notification-center.tsx:195` | [ ] | [ ] | [ ] |
-| P1030 | "Now" / "Earlier" groups | Groups entries | `renderer/components/notifications/notification-center.tsx:209` | [ ] | [ ] | [ ] |
-| P1031 | Entry row (icon, title, unread dot, time, detail) | One notification | `renderer/components/notifications/notification-entry.tsx:61` | [ ] | [ ] | [ ] |
-| P1032 | Entry action buttons | Run notification's actions (spinner while busy) | `renderer/components/notifications/notification-entry.tsx:114` | [ ] | [ ] | [ ] |
-| P1033 | "Clear {title}" X | Clears one entry | `renderer/components/notifications/notification-entry.tsx:136` | [ ] | [ ] | [ ] |
-| P1034 | Keys ↑/↓, Enter (first action), ⌫/Del (clear) | Keyboard list navigation | `renderer/components/notifications/notification-center.tsx:143` | [ ] | [ ] | [ ] |
-| P1035 | Footer quiet line + "Settings" (main window) | Quiet-while-live state; opens settings | `renderer/components/notifications/main-notification-center.tsx:30,41` | [ ] | [ ] | [ ] |
-| P1036 | Footer quiet line + "Settings" (Stream Manager) | Opens main window settings | `renderer/components/notifications/stream-manager-notification-center.tsx:33,44` | [ ] | [ ] | [ ] |
+| P1026 | Bell button (count "9+", tooltip with shortcut, live announcements) | Toggles notification popover | `renderer/components/notifications/notification-bell.tsx:135` | [x] | [ ] | [ ] |
+| P1027 | ⌘⇧B / Ctrl+Shift+B | Toggles notifications | `renderer/lib/shortcuts.ts:41; renderer/components/notifications/stream-manager-notification-bell.tsx:33` | [x] | [ ] | [ ] |
+| P1028 | Header "Notifications" + "Clear all" | Clears all clearable entries | `renderer/components/notifications/notification-center.tsx:181,183` | [x] | [ ] | [ ] |
+| P1029 | "No notifications" / "Problems and finished work show up here." | Empty state | `renderer/components/notifications/notification-center.tsx:195` | [x] | [ ] | [ ] |
+| P1030 | "Now" / "Earlier" groups | Groups entries | `renderer/components/notifications/notification-center.tsx:209` | [x] | [ ] | [ ] |
+| P1031 | Entry row (icon, title, unread dot, time, detail) | One notification | `renderer/components/notifications/notification-entry.tsx:61` | [x] | [ ] | [ ] |
+| P1032 | Entry action buttons | Run notification's actions (spinner while busy) | `renderer/components/notifications/notification-entry.tsx:114` | [x] | [ ] | [ ] |
+| P1033 | "Clear {title}" X | Clears one entry | `renderer/components/notifications/notification-entry.tsx:136` | [x] | [ ] | [ ] |
+| P1034 | Keys ↑/↓, Enter (first action), ⌫/Del (clear) | Keyboard list navigation | `renderer/components/notifications/notification-center.tsx:143` | [x] | [ ] | [ ] |
+| P1035 | Footer quiet line + "Settings" (main window) | Quiet-while-live state; opens settings | `renderer/components/notifications/main-notification-center.tsx:30,41` | [x] | [ ] | [ ] |
+| P1036 | Footer quiet line + "Settings" (Stream Manager) | Opens main window settings | `renderer/components/notifications/stream-manager-notification-center.tsx:33,44` | [x] | [ ] | [ ] |
 
 ### Notes window (notes-window.tsx)
 
