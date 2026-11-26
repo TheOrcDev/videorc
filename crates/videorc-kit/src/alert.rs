@@ -183,6 +183,9 @@ impl RenderOnce for Alert {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
         let variant = self.variant;
+        // Plain GPUI text is not an AccessKit node. Name the live region
+        // with its visible title so assistive technology announces it.
+        let accessible_title = self.title.clone();
         let has_description = self.description.is_some();
         let leading = match self.icon {
             AlertIcon::Tone => {
@@ -248,6 +251,7 @@ impl RenderOnce for Alert {
         div()
             .id(self.id)
             .role(variant.role())
+            .when_some(accessible_title, |alert, title| alert.aria_label(title))
             .relative()
             .w_full()
             .flex()
