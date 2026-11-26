@@ -561,8 +561,9 @@ impl RenderOnce for Toggle {
             .items_center()
             .justify_center()
             .rounded(px(radius::CHIP))
-            .border_1()
-            .border_color(gpui::transparent_black())
+            // Electron's default Toggle has no border: 16 px icon + 6 px
+            // padding on each side is 28 px, not 30. The pressed plate's
+            // inset shadow supplies its edge without taking layout space.
             .relative()
             .child(glyph)
             .when(self.dot, |toggle| {
