@@ -1151,7 +1151,10 @@ impl Render for StudioPage {
             .flex()
             .flex_col()
             .gap(px(8.))
-            .p(px(size::GUTTER))
+            // ShowStage is already a padded PanelSection, as in Electron's
+            // StudioStagePanel. A second gutter narrows its people rows and
+            // truncates guest names beside their badges and controls.
+            .when(!preview_replaced, |column| column.p(px(size::GUTTER)))
             .min_w_0()
             .children(title)
             .child(stage)
