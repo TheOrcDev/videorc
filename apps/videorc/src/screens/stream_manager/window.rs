@@ -28,6 +28,7 @@ use videorc_app_core::studio::remote::RemoteStreamManager;
 use videorc_app_core::studio::remote_app::{HoldAction, stream_manager_hold_action};
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle};
+use videorc_kit::tabs::Tabs;
 use videorc_kit::{
     theme::{self, hsla},
     window,
@@ -38,7 +39,7 @@ use super::activity::ActivityPane;
 use super::chat::ChatPane;
 use super::cohost::{self, SidekickEvent};
 use super::frame::{DEFAULT_HEIGHT, DEFAULT_WIDTH, StreamManagerFrame};
-use super::layout::{MIN_HEIGHT, MIN_WIDTH, Pane, Slot, Tier, right_pane_width, slot};
+use super::layout::{MIN_HEIGHT, MIN_WIDTH, Pane, RightPane, Slot, Tier, right_pane_width, slot};
 use super::panes::{PaneKey, Panes, composer_available, key_runs};
 use super::sidekick::SidekickPane;
 use super::stats::{StatsView, stats_bar};
@@ -776,6 +777,7 @@ impl StreamManager {
         width: f32,
         border: gpui::Hsla,
         nudge: Option<gpui::AnyElement>,
+        weak: gpui::WeakEntity<Self>,
     ) -> Option<gpui::AnyElement> {
         let body = match pane {
             // Sidekick's nudge sits under the chat composer (`CohostNudge`).
@@ -794,11 +796,49 @@ impl StreamManager {
         let region = match slot(pane, tier, self.panes.narrow(), self.panes.right()) {
             Slot::Hidden => return None,
             Slot::Whole | Slot::Left => region.flex_1(),
-            Slot::Right => region
-                .flex_none()
-                .w(px(right_pane_width(width)))
-                .border_l_1()
-                .border_color(border),
+            Slot::Right => {
+                // The right pane's tabs at Wide (`pane-tabs-wide`): Activity,
+                // and Sidekick while it is present.
+                let mut tabs = Tabs::new("right-pane-tabs").tab(Pane::Activity.label());
+                if self.facts.sidekick_present {
+                    tabs = tabs.tab(Pane::Sidekick.label());
+                }
+                let tabs = tabs
+                    .selected(match self.panes.right() {
+                        RightPane::Activity => 0,
+                        RightPane::Sidekick => 1,
+                    })
+                    .on_select(move |index, _, app| {
+                        let pane = if index == 1 {
+                            RightPane::Sidekick
+                        } else {
+                            RightPane::Activity
+                        };
+                        let _ = weak.update(app, |sm, cx| {
+                            sm.panes.pick_right(pane);
+                            cx.notify();
+                        });
+                    });
+                div()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .min_w(px(0.))
+                    .flex_none()
+                    .w(px(right_pane_width(width)))
+                    .border_l_1()
+                    .border_color(border)
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(8.))
+                            .py(px(6.))
+                            .border_b_1()
+                            .border_color(border)
+                            .child(tabs),
+                    )
+                    .child(region.flex_1().min_h(px(0.)))
+            }
         };
         Some(region.into_any_element())
     }
@@ -814,6 +854,7 @@ impl Render for StreamManager {
         let mut nudge = self
             .sidekick
             .update(cx, |pane, cx| pane.cohost_nudge(window, cx));
+        let weak = cx.entity().downgrade();
         let regions: Vec<gpui::AnyElement> = [Pane::Chat, Pane::Activity, Pane::Sidekick]
             .into_iter()
             .filter_map(|pane| {
@@ -822,7 +863,7 @@ impl Render for StreamManager {
                 } else {
                     None
                 };
-                self.region(pane, tier, width, border, nudge)
+                self.region(pane, tier, width, border, nudge, weak.clone())
             })
             .collect();
         let pinned = self.pinned;
