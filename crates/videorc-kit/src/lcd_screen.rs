@@ -43,6 +43,11 @@ pub struct LcdGlassColors {
     pub scanline: Color,
     /// `--lcd-display-glow`: the ink's halo (60% dark, 22% light).
     pub glow: Color,
+    /// How much of the glass the holes' layer lays over the ink. Electron's
+    /// glow sits outside its mask and fills the gaps between the dots, so
+    /// its strokes read solid with a fine texture; a full layer here cut
+    /// the strokes into separate dots (studio-retro re-shoot on 452c38b66).
+    pub mask: f32,
 }
 
 impl LcdGlassColors {
@@ -61,6 +66,7 @@ impl LcdGlassColors {
             sheen,
             scanline,
             glow,
+            mask: if dark { 0.55 } else { 0.45 },
         }
     }
 }
@@ -92,9 +98,10 @@ fn dots_svg(w: u32, h: u32, scale: f32, ink: Color) -> String {
 
 /// The glass over the ink with a hole of radius 0.86 px on every dot (the
 /// mask's 58-64% stops): the ink shows only through the holes.
-fn holes_svg(w: u32, h: u32, scale: f32, ground: Color) -> String {
+fn holes_svg(w: u32, h: u32, scale: f32, ground: Color, mask: f32) -> String {
     let p = LCD_PITCH * scale;
     let (fill, opacity) = svg_color(ground);
+    let opacity = opacity * mask.clamp(0.0, 1.0);
     format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\"><defs><pattern id=\"h\" width=\"{p}\" height=\"{p}\" patternUnits=\"userSpaceOnUse\"><circle cx=\"{c}\" cy=\"{c}\" r=\"{r}\" fill=\"black\"/></pattern><mask id=\"m\" maskUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"{w}\" height=\"{h}\"><rect width=\"{w}\" height=\"{h}\" fill=\"white\"/><rect width=\"{w}\" height=\"{h}\" fill=\"url(#h)\"/></mask></defs><rect width=\"{w}\" height=\"{h}\" fill=\"{fill}\" fill-opacity=\"{opacity}\" mask=\"url(#m)\"/></svg>",
         c = p / 2.0,
@@ -220,7 +227,7 @@ impl RenderOnce for LcdScreen {
             .child(div().relative().flex().flex_col().children(self.children))
             .when(matrix, |screen| {
                 screen.child(layer(r, move |w, h, scale| {
-                    holes_svg(w, h, scale, colors.ground)
+                    holes_svg(w, h, scale, colors.ground, colors.mask)
                 }))
             })
             .child(layer(r, move |w, h, scale| {
@@ -246,7 +253,7 @@ mod tests {
     #[test]
     fn patterns_follow_the_pitch_at_scale() {
         assert!(dots_svg(40, 20, 2.0, 0xffffffff).contains("width=\"4\" height=\"4\""));
-        assert!(holes_svg(40, 20, 2.0, 0x000000ff).contains("r=\"1.72\""));
+        assert!(holes_svg(40, 20, 2.0, 0x000000ff, 1.0).contains("r=\"1.72\""));
         assert!(
             front_svg(40, 20, 2.0, &LcdGlassColors::new(true, 0xffffffff, 0), true)
                 .contains("height=\"6\"")

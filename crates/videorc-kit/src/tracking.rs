@@ -53,14 +53,26 @@ impl RenderOnce for TrackedText {
         // CSS puts the spacing after every letter, the last one too.
         let glow = self.glow.then(|| {
             let t = crate::theme::resolve(None, window, cx);
-            if crate::theme::is_dark(t) { 0.3 } else { 0.11 }
+            // Dark: a wider, brighter bloom; light: enough to give the
+            // strokes Electron's weight (its mono face draws heavier).
+            if crate::theme::is_dark(t) { 0.35 } else { 0.25 }
         });
         let glyphs = self.text.chars().map(|glyph| {
             // A lone space would shape to nothing: draw it unbreakable.
             let shown =
                 SharedString::from((if glyph == ' ' { '\u{a0}' } else { glyph }).to_string());
             let halo = glow.filter(|_| glyph != ' ').map(|strength| {
-                [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)].map(|(x, y)| {
+                [
+                    (-1.0, 0.0),
+                    (1.0, 0.0),
+                    (0.0, -1.0),
+                    (0.0, 1.0),
+                    (-1.0, -1.0),
+                    (1.0, -1.0),
+                    (-1.0, 1.0),
+                    (1.0, 1.0),
+                ]
+                .map(|(x, y)| {
                     div()
                         .absolute()
                         .left(px(x))
