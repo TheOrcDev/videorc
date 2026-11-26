@@ -129,6 +129,7 @@ fn the_layouts_intent_leaves_out_the_committed_boxes() {
     );
 }
 
+#[test]
 fn the_layouts_visibility_follows_the_committed_scene() {
     let scene: Scene = serde_json::from_value(json!({
         "id": "scene", "name": "Scene", "outputs": [],

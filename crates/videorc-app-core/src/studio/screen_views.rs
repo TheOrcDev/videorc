@@ -423,7 +423,7 @@ pub struct TalkShowRoomView {
 impl TalkShowRoomView {
     /// `StudioTransport`'s `talkShowOutputs`: only while the room is open.
     pub fn transport_outputs(&self) -> Option<TalkShowOutputs> {
-        self.open.then(|| TalkShowOutputs {
+        self.open.then_some(TalkShowOutputs {
             recording: self.recording,
             live: self.live,
             stopping: self.recording_stopping,

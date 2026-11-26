@@ -68,10 +68,10 @@ where
 
     /// Drop an expired lease.
     pub fn step(&mut self) {
-        if let Some(current) = &self.current {
-            if (self.now)() >= current.expires_at {
-                self.drop_scene();
-            }
+        if let Some(current) = &self.current
+            && (self.now)() >= current.expires_at
+        {
+            self.drop_scene();
         }
     }
 

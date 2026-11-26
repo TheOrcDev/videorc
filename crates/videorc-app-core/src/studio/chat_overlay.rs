@@ -242,12 +242,10 @@ impl<B: StudioBackend> Studio<B> {
             state.layout_asked |= ask;
             ask
         };
-        if ask {
-            if let Ok(layout) = self.overlay_layout().await {
-                let mut state = self.chat_overlay_lock();
-                if state.layout.is_none() {
-                    state.layout = Some(layout);
-                }
+        if ask && let Ok(layout) = self.overlay_layout().await {
+            let mut state = self.chat_overlay_lock();
+            if state.layout.is_none() {
+                state.layout = Some(layout);
             }
         }
         let layout = self.chat_overlay_lock().layout.clone();

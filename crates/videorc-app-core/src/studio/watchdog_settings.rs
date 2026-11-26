@@ -59,19 +59,16 @@ impl<B: StudioBackend> Studio<B> {
     /// Bootstrap / page open: `watchdog.settings.get`. Silence on failure
     /// (the section stays away, as Electron).
     pub(super) async fn read_watchdog_settings(&self) {
-        match self
+        if let Ok(settings) = self
             .backend
             .livestream_request(SETTINGS_GET, Value::Null)
             .await
             .and_then(|value| super::backend::read_json::<Settings>(SETTINGS_GET, value))
         {
-            Ok(settings) => {
-                self.edit_watchdog_settings(|store| {
-                    store.settings = Some(settings);
-                    true
-                });
-            }
-            Err(_) => {}
+            self.edit_watchdog_settings(|store| {
+                store.settings = Some(settings);
+                true
+            });
         }
     }
 
@@ -129,13 +126,7 @@ impl<B: StudioBackend> Studio<B> {
                 });
             }
             Err(_) => {
-                self.edit_watchdog_settings(|store| {
-                    if store.phone_devices.take().is_some() {
-                        true
-                    } else {
-                        false
-                    }
-                });
+                self.edit_watchdog_settings(|store| store.phone_devices.take().is_some());
             }
         }
     }

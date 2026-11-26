@@ -36,9 +36,7 @@ pub fn sound_key_digit(key: &str) -> Option<&str> {
 
 /// The sound bound to `key`, if any.
 pub fn sound_for_key<'a, T: AsSoundHotkey>(key: &str, sounds: &'a [T]) -> Option<&'a T> {
-    if sound_key_digit(key).is_none() {
-        return None;
-    }
+    sound_key_digit(key)?;
     sounds.iter().find(|sound| sound.hotkey() == Some(key))
 }
 

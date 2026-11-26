@@ -331,6 +331,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // pins the capture facts
     fn states_capture_facts() {
         assert_eq!(ROOM_SCREEN_CAPTURE_FACTS.cursor, "capturer-default");
         assert_eq!(

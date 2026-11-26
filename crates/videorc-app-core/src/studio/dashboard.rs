@@ -285,22 +285,20 @@ impl DashboardRelay {
         if let (Some(session_id), Some(confirmed)) = (
             status.session_id.as_deref(),
             self.confirmed_session_id.as_deref(),
-        ) {
-            if matches!(status.state, RecordingState::Idle | RecordingState::Failed)
-                && session_id != confirmed
-            {
-                return false;
-            }
+        ) && matches!(status.state, RecordingState::Idle | RecordingState::Failed)
+            && session_id != confirmed
+        {
+            return false;
         }
         if status.session_id.is_some() && session_runs_for_the_window(status) {
             self.confirmed_session_id = status.session_id.clone();
         }
         let before = self.state.clone();
         self.state.apply_recording(status, now);
-        if let Some(pending) = self.pending_totals.take() {
-            if Some(pending.session_id()) == self.confirmed_session_id.as_deref() {
-                self.state.apply_chat_totals(pending, now);
-            }
+        if let Some(pending) = self.pending_totals.take()
+            && Some(pending.session_id()) == self.confirmed_session_id.as_deref()
+        {
+            self.state.apply_chat_totals(pending, now);
         }
         self.state != before
     }
@@ -355,13 +353,11 @@ impl DashboardRelay {
                 revision: pending_rev,
                 ..
             }) = &self.pending_totals
+                && pending_id == totals.session_id()
             {
-                if pending_id == totals.session_id() {
-                    match &totals {
-                        SessionChatTotals::Available { revision, .. } if revision > pending_rev => {
-                        }
-                        _ => return false,
-                    }
+                match &totals {
+                    SessionChatTotals::Available { revision, .. } if revision > pending_rev => {}
+                    _ => return false,
                 }
             }
             self.pending_totals = Some(totals);
@@ -388,15 +384,15 @@ impl DashboardRelay {
                 self.state.apply_viewers(None, now);
                 changed |= self.state != before;
             }
-            if let Some(confirmed) = self.confirmed_session_id.clone() {
-                if let Some(pending) = self.pending_totals.take() {
-                    if pending.session_id() == confirmed {
-                        let before = self.state.clone();
-                        self.state.apply_chat_totals(pending, now);
-                        changed |= self.state != before;
-                    } else {
-                        self.pending_totals = Some(pending);
-                    }
+            if let Some(confirmed) = self.confirmed_session_id.clone()
+                && let Some(pending) = self.pending_totals.take()
+            {
+                if pending.session_id() == confirmed {
+                    let before = self.state.clone();
+                    self.state.apply_chat_totals(pending, now);
+                    changed |= self.state != before;
+                } else {
+                    self.pending_totals = Some(pending);
                 }
             }
             if room.session_id.is_some() && session_is_live(&room) && !status.legs.is_empty() {
@@ -677,13 +673,12 @@ impl<B: StudioBackend> Studio<B> {
             let session_id = inner.relay.current().session_id.clone();
             let off_air = inner.relay.current().session == SessionState::OffAir;
             let show_id = status.show.as_ref().map(|show| show.id.clone());
-            if status.stopped_by.is_some() || off_air {
-                if show_id
+            if (status.stopped_by.is_some() || off_air)
+                && show_id
                     .as_deref()
                     .is_some_and(|id| inner.hydrated_session_id.as_deref() == Some(id))
-                {
-                    inner.hydrated_session_id = None;
-                }
+            {
+                inner.hydrated_session_id = None;
             }
             let push = self.schedule_dashboard_locked(&mut inner, changed, now_ms);
             let hydrate = if status.stopped_by.is_none() && !off_air {
@@ -764,10 +759,9 @@ impl<B: StudioBackend> Studio<B> {
             .backend
             .livestream_request(CLOUD_STATUS, Value::Null)
             .await
+            && let Ok(status) = serde_json::from_value::<CloudStatus>(status)
         {
-            if let Ok(status) = serde_json::from_value::<CloudStatus>(status) {
-                self.feed_dashboard_cloud(&status);
-            }
+            self.feed_dashboard_cloud(&status);
         }
     }
 }
@@ -800,14 +794,12 @@ async fn read_dashboard_backfill<B: StudioBackend>(
     if let Ok(snapshot) = backend
         .livestream_request(AUDIENCE_SNAPSHOT, Value::Null)
         .await
+        && let Ok(snapshot) = serde_json::from_value::<AudienceSnapshot>(snapshot)
+        && snapshot.session_id == session_id
     {
-        if let Ok(snapshot) = serde_json::from_value::<AudienceSnapshot>(snapshot) {
-            if snapshot.session_id == session_id {
-                publish_if_changed(&dashboard, &dashboard_tx, |inner| {
-                    inner.relay.audience(snapshot, &now)
-                });
-            }
-        }
+        publish_if_changed(&dashboard, &dashboard_tx, |inner| {
+            inner.relay.audience(snapshot, &now)
+        });
     }
     read_dashboard_totals(backend.as_ref(), &dashboard, &dashboard_tx, &session_id).await;
 }

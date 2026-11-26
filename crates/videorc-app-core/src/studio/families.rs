@@ -839,7 +839,7 @@ pub fn save_stats_layout(layout: &StatsLayout) -> SettingWrite {
 /// `moveStat`: move `id` to `to_index`. A move that would push the clock or
 /// the viewer count out of the main slots is refused.
 pub fn move_stat(layout: &StatsLayout, id: &str, to_index: usize) -> StatsLayout {
-    let Some(from) = layout.order.iter().position(|candidate| candidate == id) else {
+    let Some(_from) = layout.order.iter().position(|candidate| candidate == id) else {
         return layout.clone();
     };
     let mut order: Vec<String> = layout

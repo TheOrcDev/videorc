@@ -43,7 +43,7 @@ fn a_takeover_still_on_air_never_takes_a_second_mute() {
         }
     );
     let end = transition(false, false, again.ownership);
-    assert_eq!(end.microphone_muted, false);
+    assert!(!end.microphone_muted);
     assert_eq!(end.ownership, None);
 }
 
@@ -52,7 +52,7 @@ fn a_takeover_still_on_air_never_takes_a_second_mute() {
 #[test]
 fn a_microphone_muted_before_stays_muted() {
     let start = transition(true, true, None);
-    assert_eq!(start.microphone_muted, true);
+    assert!(start.microphone_muted);
     assert_eq!(start.ownership, owned(true));
     let end = transition(false, true, start.ownership);
     assert_eq!(

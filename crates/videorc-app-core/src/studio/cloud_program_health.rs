@@ -5,7 +5,6 @@
 //! preview is never proof of the encoded stream.
 
 use serde::Deserialize;
-use serde_json::Value;
 
 use crate::guests::view::{ManagedEffectiveOutput, ManagedOutputProfile};
 use crate::guests::wire::{RoomRole, RoomStatus};
@@ -634,6 +633,8 @@ pub fn program_health_layers(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
+
     use super::*;
     use serde_json::json;
 
@@ -759,7 +760,7 @@ mod tests {
             ..good.clone()
         };
         assert_eq!(
-            program_health_verdict(&[good.clone()]),
+            program_health_verdict(std::slice::from_ref(&good)),
             ProgramHealthTone::Good
         );
         assert_eq!(

@@ -272,6 +272,7 @@ fn waits_for_a_camera_keeps_other_cameras_and_never_replaces_an_effect() {
 }
 
 #[test]
+#[allow(clippy::assertions_on_constants)] // pins the flag S5 flips
 fn settles_by_default_and_never_runs_again() {
     assert!(MIGRATION_SETTLES);
     let scenes = [keyed(

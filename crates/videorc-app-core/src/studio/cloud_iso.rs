@@ -19,11 +19,10 @@ impl<B: StudioBackend> Studio<B> {
             .backend
             .livestream_request(method, params)
             .await
-            .map_err(|error| {
+            .inspect_err(|error| {
                 self.config
                     .logger
                     .warn(format!("Cloud ISO: {method} failed: {}", error.message));
-                error
             })?;
         serde_json::from_value(answer).map_err(|_| {
             RpcError::new(
