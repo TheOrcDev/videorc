@@ -18,9 +18,9 @@ use gpui_base::input::InputEditorStyle;
 pub use gpui_base::input::TextareaState;
 
 use crate::{
-    chrome::box_shadow,
+    chrome::ring_outline,
     theme::{Appearance, FONT, faded_over, hsla, resolve, with_alpha},
-    tokens::{Color, Shadow, radius},
+    tokens::{Color, radius},
 };
 
 /// Default text size: React's `text-sm`.
@@ -110,18 +110,6 @@ impl Textarea {
     }
 }
 
-/// A focus ring: `ring-3` in `color`.
-fn ring(color: Color) -> gpui::BoxShadow {
-    box_shadow(&Shadow {
-        inset: false,
-        x: 0.0,
-        y: 0.0,
-        blur: 0.0,
-        spread: 3.0,
-        color,
-    })
-}
-
 impl RenderOnce for Textarea {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
@@ -193,15 +181,12 @@ impl RenderOnce for Textarea {
             .text_size(text_size)
             .line_height(line_height)
             .text_color(hsla(fade(t.foreground)))
-            .styles(|styles| {
-                styles.focused(|style| {
-                    let mut style = style.border_color(hsla(focus_rim));
-                    if !plain {
-                        style = style.shadow(vec![ring(focus_ring)]);
-                    }
-                    style
-                })
-            });
+            .styles(|styles| styles.focused(|style| style.border_color(hsla(focus_rim))));
+        if focused && !plain {
+            frame = frame
+                .relative()
+                .child(ring_outline(focus_ring, radius::CHIP));
+        }
         if let Some(label) = self.accessibility_label {
             frame = frame.accessibility_label(label);
         }

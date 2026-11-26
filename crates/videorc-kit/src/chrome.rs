@@ -41,6 +41,25 @@ pub fn box_shadow(shadow: &Shadow) -> BoxShadow {
 }
 
 /// The inset 2 px focus ring (`ring-2 ring-inset ring-ring`).
+/// A control's focus ring (`ring-3` outside the border) as an outline of its
+/// own, for a child of the control. GPUI paints a box shadow as a filled
+/// shape under the whole element, so a ring shadow tinted a control's
+/// half-transparent fill (a focused, invalid field read pink); CSS never
+/// paints a shadow under its own box. `radius` is the control's.
+pub fn ring_outline(color: Color, radius: f32) -> gpui::Div {
+    use gpui::{Styled as _, px};
+    gpui::div()
+        .absolute()
+        // From the border's outer edge outward: the 1 px border, then 3 px.
+        .top(px(-4.0))
+        .left(px(-4.0))
+        .right(px(-4.0))
+        .bottom(px(-4.0))
+        .rounded(px(radius + 3.0))
+        .border(px(3.0))
+        .border_color(crate::theme::hsla(color))
+}
+
 pub fn focus_ring(t: &Theme) -> gpui::BoxShadow {
     box_shadow(&Shadow {
         inset: true,

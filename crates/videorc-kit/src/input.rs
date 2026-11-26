@@ -17,10 +17,10 @@ pub use gpui_base::input::InputState;
 use gpui_base::input::{Escape, InputEditorStyle};
 
 use crate::{
-    chrome::box_shadow,
+    chrome::ring_outline,
     icon::{IconName, icon},
     theme::{Appearance, FONT, faded_over, hsla, resolve, with_alpha},
-    tokens::{Color, Shadow, radius, size},
+    tokens::{Color, radius, size},
 };
 
 #[derive(IntoElement)]
@@ -142,18 +142,6 @@ impl Input {
     }
 }
 
-/// A focus ring: `ring-3` in `color`.
-fn ring(color: Color) -> gpui::BoxShadow {
-    box_shadow(&Shadow {
-        inset: false,
-        x: 0.0,
-        y: 0.0,
-        blur: 0.0,
-        spread: 3.0,
-        color,
-    })
-}
-
 impl RenderOnce for Input {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
@@ -234,6 +222,7 @@ impl RenderOnce for Input {
             .h(px(size::CONTROL))
             .px(if self.plain { px(4.0) } else { px(10.0) })
             .py(px(4.0))
+            .relative()
             .rounded(px(radius::CHIP))
             .font_family(FONT)
             .text_size(px(self.text_size.unwrap_or(14.0)))
@@ -254,13 +243,7 @@ impl RenderOnce for Input {
                 .border_1()
                 .border_color(hsla(rim))
                 .bg(hsla(fade(with_alpha(t.input, 0.5))))
-                .styles(|styles| {
-                    styles.focused(|style| {
-                        style
-                            .border_color(hsla(focus_rim))
-                            .shadow(vec![ring(focus_ring)])
-                    })
-                });
+                .styles(|styles| styles.focused(|style| style.border_color(hsla(focus_rim))));
         }
         if let Some(label) = self.accessibility_label {
             frame = frame.accessibility_label(label);
@@ -276,6 +259,9 @@ impl RenderOnce for Input {
                 window.blur(cx);
                 cx.stop_propagation();
             });
+        }
+        if focused && !self.plain {
+            frame = frame.child(ring_outline(focus_ring, radius::CHIP));
         }
         let editor = frame.child(self.state.clone());
         let Some(step) = self.step.filter(|_| !self.plain) else {

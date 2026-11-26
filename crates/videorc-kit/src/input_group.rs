@@ -9,10 +9,10 @@ use gpui::{
 use smallvec::SmallVec;
 
 use crate::{
-    chrome::box_shadow,
+    chrome::ring_outline,
     input::{Input, InputState},
     theme::{Appearance, hsla, resolve, with_alpha},
-    tokens::{Color, Shadow, radius, size},
+    tokens::{Color, radius, size},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -186,17 +186,6 @@ impl RenderOnce for InputGroupText {
     }
 }
 
-fn ring(color: Color) -> gpui::BoxShadow {
-    box_shadow(&Shadow {
-        inset: false,
-        x: 0.0,
-        y: 0.0,
-        blur: 0.0,
-        spread: 3.0,
-        color,
-    })
-}
-
 impl RenderOnce for InputGroup {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let t = resolve(self.appearance, window, cx);
@@ -238,7 +227,10 @@ impl RenderOnce for InputGroup {
             .border_1()
             .border_color(hsla(if focused { focus_rim } else { rim }))
             .bg(hsla(with_alpha(t.input, 0.5)))
-            .when(focused, |group| group.shadow(vec![ring(focus_ring)]))
+            .relative()
+            .when(focused, |group| {
+                group.child(ring_outline(focus_ring, radius::CHIP))
+            })
             // `has-disabled:opacity-50`: the group, addons and text fade as
             // one, once (the plain control inside skips its own fade).
             .when(disabled, |group| group.opacity(0.5))
