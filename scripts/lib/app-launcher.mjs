@@ -500,6 +500,11 @@ export async function launchDevApp({
     let launchPollTimer = null
     const recentOutput = []
     const childEnv = smokeAppEnv(env)
+    // GPUI publishes backend-ready through its smoke server, unlike Electron's
+    // main process. Backend-only smokes need that server for the same handshake.
+    if (smokeAppIsGpui(childEnv) && requiredMarkers.includes('backend-ready')) {
+      childEnv.VIDEORC_SMOKE_COMMAND_SERVER ??= '1'
+    }
     const spawnSpec = launchViaMacosLaunchServices
       ? macosLaunchServicesAppSpawnSpec({
           ...requestedSpawnSpec,
