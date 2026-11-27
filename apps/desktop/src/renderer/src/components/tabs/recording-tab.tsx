@@ -568,7 +568,7 @@ function RecordingsFolderSection(): ReactElement {
             ) : null}
             {folder.custom ? (
               <Button
-                variant="ghost"
+                variant="outline"
                 onClick={() =>
                   setSettings((current) => ({
                     ...current,

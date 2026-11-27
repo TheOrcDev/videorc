@@ -600,7 +600,10 @@ export function LibraryTab({
                 <DeleteIcon data-icon="inline-start" />
                 Delete
               </Button>
-              <Button variant="outline" onClick={() => setSelection({ selected: [], anchor: null })}>
+              <Button
+                variant="outline"
+                onClick={() => setSelection({ selected: [], anchor: null })}
+              >
                 Clear selection
               </Button>
               {bulkHoldReason ? (
@@ -762,7 +765,7 @@ export function LibraryTab({
                     <Button
                       disabled={sessionsLoadingMore}
                       size="xs"
-                      variant="ghost"
+                      variant="outline"
                       onClick={() => void loadMoreSessions()}
                     >
                       {sessionsLoadingMore ? 'Loading…' : 'Load more'}

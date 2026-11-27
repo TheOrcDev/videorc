@@ -141,7 +141,7 @@ export function LibraryCloudArchive() {
               <>
                 <Button
                   size="xs"
-                  variant="ghost"
+                  variant="outline"
                   disabled={busy}
                   onClick={() =>
                     void act(async () => client?.requestTyped('cloud.archive.stop', { id: job.id }))
@@ -167,7 +167,7 @@ export function LibraryCloudArchive() {
                 {job.state === 'interrupted' && (
                   <Button
                     size="xs"
-                    variant="ghost"
+                    variant="outline"
                     disabled={busy}
                     onClick={() =>
                       void act(async () =>
@@ -180,7 +180,7 @@ export function LibraryCloudArchive() {
                 )}
                 <Button
                   size="xs"
-                  variant="ghost"
+                  variant="outline"
                   disabled={busy}
                   onClick={() =>
                     void act(async () =>

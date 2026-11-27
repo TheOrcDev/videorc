@@ -479,7 +479,7 @@ function CheckList({ checks }: { checks: readonly HealthCheck[] }): ReactElement
         data-testid="health-show-all-checks"
         size="xs"
         type="button"
-        variant="ghost"
+        variant="outline"
         onClick={() => setShowAll((current) => !current)}
       >
         {showAll ? 'Show fewer checks' : `Show all checks (${checks.length})`}
