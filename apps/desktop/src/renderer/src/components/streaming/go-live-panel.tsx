@@ -318,13 +318,13 @@ export function ReadyToGoLive({
       {notReady.length ? (
         // Each link opens its destination and moves focus to it (plan 174
         // S3.5a, D-24), on a 24 px target.
-        <div className="-mt-1 flex flex-col pl-6" data-slot="destinations-not-ready">
+        <div className="-mt-1 flex flex-col gap-1 pl-6" data-slot="destinations-not-ready">
           {notReady.map(({ target, hint }) => (
             <Button
-              className="h-auto min-h-6 justify-start px-0 py-0.5 text-xs font-normal text-muted-foreground hover:text-foreground"
+              className="max-w-full justify-start self-start"
               key={target.id}
               size="xs"
-              variant="link"
+              variant="outline"
               onClick={() => onOpenDestination(target.id)}
             >
               {destinationLabel(target.label)} · {hint}

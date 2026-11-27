@@ -134,6 +134,12 @@ describe('Ready to go live', () => {
     expect(markup).toContain('1 of 3 ready')
     expect(markup).toContain('Twitch · sign in or add a stream key')
     expect(markup).toContain('TikTok · add a stream key')
+    // Each one is a button that opens its destination, not a text link
+    // (owner, 11-27).
+    expect(markup).toMatch(
+      /<button[^>]*data-variant="outline"[^>]*>Twitch · sign in or add a stream key</
+    )
+    expect(markup).not.toContain('data-variant="link"')
   })
 
   it('keeps the Go Live blocker visible in the checklist', () => {
