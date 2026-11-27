@@ -920,7 +920,7 @@ fn status_row(
                     row = row
                         .child(
                             Button::new("clean-cut-reveal")
-                                .variant(ButtonVariant::Ghost)
+                                .variant(ButtonVariant::Outline)
                                 .icon(IconName::FolderOpen)
                                 .label(label)
                                 .on_click(move |_, _, cx| {

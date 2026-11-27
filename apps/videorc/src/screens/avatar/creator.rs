@@ -2361,7 +2361,7 @@ fn review_row(
     let (mark, redo) = (cx.entity(), cx.entity());
     let redo_label = if this_redoing { REDOING } else { REDO_ROW };
     let redo_button = Button::new(SharedString::from(format!("avatar-creator-redo-{key}")))
-        .variant(ButtonVariant::Ghost)
+        .variant(ButtonVariant::Outline)
         .size(ButtonSize::Xs)
         .disabled(disabled || this_redoing || creation.redos_remaining == 0 || creation.expired)
         .on_click(move |_, _, cx| redo.update(cx, |screen, cx| screen.creator_redo_row(key, cx)));
