@@ -12,6 +12,7 @@ import {
   Suspense,
   useContext,
   useEffect,
+  useId,
   useState,
   type ReactElement,
   type ReactNode
@@ -31,6 +32,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { DisabledReason } from '@/components/ui/disabled-reason'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useWorkspaceNav, WorkspaceNavContext } from '@/components/workspace-nav'
 import {
   useStudioChat,
@@ -55,7 +57,7 @@ import {
 import type { SessionStartFailure } from '@/lib/session-start-failure'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import { shortcutAccelerator } from '@/lib/shortcuts'
-import { connectionBlockedReason } from '@/lib/state-labels'
+import { connectionBlockedReason, START_BLOCKED_COPY } from '@/lib/state-labels'
 import { classifyStreamHealthAttribution } from '@/lib/stream-health-attribution'
 import {
   cameraCaptureNotice,
@@ -231,6 +233,10 @@ export type BlockedJump = {
  * (plan 174 S3.2, B-9; never the yellow top banner of post-0.9.4 F8), with
  * the jump to the page that owns the fix. Without the shell's navigation
  * (a bare transport under test) the line stands alone.
+ *
+ * With no destination on, the fix is one step away, so the row is the step
+ * itself (owner call, 2026-11-27): one "Open Destinations" button across the
+ * row, with the reason on its hover and focus.
  */
 function BlockedReasonLine({
   reason,
@@ -240,6 +246,14 @@ function BlockedReasonLine({
   jump: BlockedJump | null
 }): ReactElement {
   const nav = useContext(WorkspaceNavContext)
+  const openJump =
+    jump && nav
+      ? (): void =>
+          jump.to === 'settings' ? nav.openSettings(jump.settingsTab) : nav.setActive(jump.to)
+      : null
+  if (jump && openJump && reason === START_BLOCKED_COPY.noDestination) {
+    return <BlockedJumpButton label={jump.label} reason={reason} onOpen={openJump} />
+  }
   return (
     <div
       className="flex items-center gap-1.5 text-xs text-muted-foreground"
@@ -247,17 +261,56 @@ function BlockedReasonLine({
     >
       <InfoIcon className="size-3.5 shrink-0" />
       <span className="min-w-0">{reason}</span>
-      {jump && nav ? (
+      {jump && openJump ? (
         <button
           className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
           type="button"
-          onClick={() =>
-            jump.to === 'settings' ? nav.openSettings(jump.settingsTab) : nav.setActive(jump.to)
-          }
+          onClick={openJump}
         >
           {jump.label}
         </button>
       ) : null}
+    </div>
+  )
+}
+
+/**
+ * The blocked row as its own fix: the jump as one button across the row. The
+ * reason is its tooltip, on hover and on keyboard focus, and stays in the DOM
+ * as the button's description, not only while the tooltip is open.
+ */
+function BlockedJumpButton({
+  label,
+  reason,
+  onOpen
+}: {
+  label: string
+  reason: string
+  onOpen: () => void
+}): ReactElement {
+  const descriptionId = useId()
+  return (
+    <div className="flex" data-slot="session-blocked-reason">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              aria-describedby={descriptionId}
+              className="min-w-0 flex-1"
+              data-testid="session-blocked-jump"
+              size="lg"
+              onClick={onOpen}
+            />
+          }
+        >
+          {label}
+        </TooltipTrigger>
+        {/* Below: above, it would cover Record and Go Live. */}
+        <TooltipContent side="bottom">{reason}</TooltipContent>
+      </Tooltip>
+      <span hidden id={descriptionId}>
+        {reason}
+      </span>
     </div>
   )
 }

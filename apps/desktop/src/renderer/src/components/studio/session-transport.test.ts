@@ -3,8 +3,11 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { WorkspaceNavContext } from '@/components/workspace-nav'
 import { StudioContextProviders } from '@/hooks/use-studio'
 import type { RecordingStatus } from '@/lib/backend'
+import { OPEN_DESTINATIONS_LABEL } from '@/lib/go-live-copy'
+import { START_BLOCKED_COPY } from '@/lib/start-blocked-copy'
 import { sessionStopControl } from '@/lib/studio-session-view'
 
 import { SessionTransport } from './session-panel'
@@ -476,6 +479,76 @@ describe('SessionTransport reason line (plan 174 S3.2)', () => {
     expect(line?.querySelector('button')).toBeNull()
     render(true)
     expect(container.querySelector('[data-slot="session-blocked-reason"]')).toBeNull()
+  })
+
+  // Owner call, 2026-11-27: with no destination on, the row is one "Open
+  // Destinations" button, and the reason is its hover and its description.
+  const renderBlocked = (reason: string, setActive: (tab: string) => void): void =>
+    act(() =>
+      root.render(
+        createElement(
+          WorkspaceNavContext.Provider,
+          { value: { setActive } as never },
+          createElement(
+            StudioContextProviders,
+            {
+              core: unused,
+              recordingState: { recording: { state: 'idle' } },
+              recording: { recording: { state: 'idle' } },
+              preview: unused,
+              diagnostics: unused,
+              chat: unused,
+              audio: unused
+            },
+            createElement(SessionTransport, {
+              active: false,
+              canStop: false,
+              stopLabel: 'Stop recording',
+              startRequestPending: false,
+              recordBlockedReason: null,
+              liveStreamBlockedReason: reason,
+              blockedReason: reason,
+              blockedJump: { label: OPEN_DESTINATIONS_LABEL, to: 'live' },
+              onRecord: noop,
+              onLiveStream: noop,
+              onStop: noop
+            })
+          )
+        )
+      )
+    )
+
+  it('is one Open Destinations button, described by the reason, with no destination on', () => {
+    const setActive = vi.fn()
+    renderBlocked(START_BLOCKED_COPY.noDestination, setActive)
+    const row = container.querySelector('[data-slot="session-blocked-reason"]')
+    const buttons = row?.querySelectorAll('button') ?? []
+    expect(buttons).toHaveLength(1)
+    const button = buttons[0]
+    expect(button.textContent).toBe('Open Destinations')
+    expect(button.dataset.variant).toBe('default')
+    expect(button.dataset.size).toBe('lg')
+    // The reason is not a line of the row: it is the button's description.
+    expect(row?.querySelector('svg')).toBeNull()
+    const description = document.getElementById(button.getAttribute('aria-describedby') ?? '')
+    expect(description?.textContent).toBe(
+      'Turn on a destination in Destinations before you go live.'
+    )
+    expect(description?.hidden).toBe(true)
+    act(() => button.click())
+    expect(setActive).toHaveBeenCalledExactlyOnceWith('live')
+  })
+
+  it('keeps the reason line and its jump for every other reason', () => {
+    const setActive = vi.fn()
+    renderBlocked(START_BLOCKED_COPY.destinationSetup, setActive)
+    const row = container.querySelector('[data-slot="session-blocked-reason"]')
+    expect(row?.textContent).toContain(START_BLOCKED_COPY.destinationSetup)
+    const jump = row?.querySelector('button')
+    expect(jump?.textContent).toBe('Open Destinations')
+    expect(jump?.dataset.slot).toBeUndefined()
+    act(() => jump?.click())
+    expect(setActive).toHaveBeenCalledExactlyOnceWith('live')
   })
 })
 
