@@ -7,7 +7,11 @@ import type { Device, ReplayBufferState } from '@/lib/backend'
 import { defaultCaptureConfig } from '@/lib/capture'
 import { micMeterInput, type MeterInput } from '@/lib/mic-meter-input'
 import { SECTION_FOCUS_MARK_ATTRIBUTE, SECTION_FOCUS_MARK_MS } from '@/lib/section-focus'
-import { systemAudioSwitchView, type SystemAudioSwitchInput } from '@/lib/system-audio'
+import {
+  systemAudioRowView,
+  systemAudioSwitchView,
+  type SystemAudioSwitchInput
+} from '@/lib/system-audio'
 import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -74,17 +78,18 @@ function systemAudioProps(
   input: Partial<SystemAudioSwitchInput> = {},
   overrides: Partial<SystemAudioRowProps> = {}
 ): SystemAudioRowProps {
+  const switchInput = {
+    device: { status: 'available' as const },
+    requested: true,
+    sessionActive: false,
+    audioBusActive: false,
+    confirmed: null,
+    joining: false,
+    issue: null,
+    ...input
+  }
   return {
-    view: systemAudioSwitchView({
-      device: { status: 'available' },
-      requested: true,
-      sessionActive: false,
-      audioBusActive: false,
-      confirmed: null,
-      joining: false,
-      issue: null,
-      ...input
-    }),
+    view: systemAudioRowView(systemAudioSwitchView(switchInput), switchInput.requested),
     gainDb: -6,
     meter: NO_READING,
     sessionActive: input.sessionActive ?? false,
@@ -347,28 +352,45 @@ describe('Audio section: System audio row (plan 201 S2)', () => {
     expect(renderToStaticMarkup(createElement(SystemAudioIdleLine, { reason: null }))).toBe('')
   })
 
-  it('disables the switch and Gain with the reason, and opens Permissions, without the grant', () => {
+  it('is only the row while off, with or without the grant', () => {
+    for (const status of ['permission-required', 'available'] as const) {
+      const section = render({}, systemAudioProps({ device: { status }, requested: false }))
+      const markup = row(section, 'studio-system-audio')
+      expect(toggle(markup)).toContain('aria-checked="false"')
+      expect(toggle(markup)).not.toContain('aria-disabled="true"')
+      expect(section).not.toMatch(
+        /<section(?=[^>]*data-disabled="true")[^>]*data-source="studio-system-audio"/
+      )
+      expect(markup).toContain('>System audio<')
+      expect(markup).not.toContain('Needs permission')
+      expect(markup).not.toContain('System audio needs Screen Recording permission.')
+      expect(markup).not.toContain('Open Permissions')
+      expect(markup).not.toContain('aria-label="System audio gain"')
+      expect(markup).not.toContain('aria-label="System audio level"')
+    }
+  })
+
+  it('warns with a real Open Permissions button when turned on without the grant', () => {
     const section = render(
       {},
       systemAudioProps({ device: { status: 'permission-required' } }, { gainDb: -12 })
     )
     const markup = row(section, 'studio-system-audio')
-    expect(toggle(markup)).toContain('aria-disabled="true"')
-    expect(section).toMatch(
-      /<section(?=[^>]*data-disabled="true")(?=[^>]*data-slot="source-item")[^>]*data-source="studio-system-audio"/
-    )
-    expect(markup).toContain('>Needs permission</span>')
+    expect(toggle(markup)).toContain('aria-checked="true"')
+    expect(toggle(markup)).not.toContain('aria-disabled="true"')
+    // The warning says it: no chip squeezing the name to "System…".
+    expect(markup).not.toContain('>Needs permission</span>')
+    expect(markup).toContain('data-videorc-studio-system-audio-issue="permission"')
     expect(markup).toContain('System audio needs Screen Recording permission.')
-    expect(markup).toContain('>Open Permissions</button>')
+    // A button that looks like one, under the words: never a text link.
+    const action = markup.match(/<button[^>]*>Open Permissions<\/button>/)?.[0]
+    expect(action).toContain('data-variant="outline"')
+    expect(action).toContain('data-size="xs"')
     // Sources' hint points at that page's alert; the Studio row has its own.
     expect(markup).not.toContain('Turn it on above')
+    // Nothing to level or mix until the permission is there.
     expect(markup).not.toContain('aria-label="System audio level"')
-    expect(markup).toContain('aria-label="System audio gain"')
-    expect(markup).toMatch(
-      /data-disabled=""[^>]*data-slot="fader"|data-slot="fader"[^>]*data-disabled=""/
-    )
-    // No reset on a disabled fader.
-    expect(markup).not.toContain('Reset to')
+    expect(markup).not.toContain('aria-label="System audio gain"')
   })
 
   it('shows Paused with Resume after the echo guard, on a Clips bus too (plan 076)', () => {

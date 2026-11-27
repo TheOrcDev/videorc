@@ -267,56 +267,15 @@ impl AudioSectionView {
             issue: facts.issue,
             joining: facts.joining,
         });
-        let macos = cfg!(target_os = "macos");
         let system_audio = view.visible.then(|| {
-            let issue = if view.permission_required {
-                Some(words::PERMISSION_REASON.to_string())
-            } else {
-                view.issue.map(|issue| {
-                    audio_mixer::system_audio_issue_copy(issue, audio_mixer::this_computer_word())
-                })
-            };
-            let issue_action = if view.permission_required
-                || (view.issue == Some(SystemAudioIssue::Unavailable) && macos)
-            {
-                Some(IssueAction::OpenPermissions)
-            } else if view.issue == Some(SystemAudioIssue::Echo) {
-                Some(IssueAction::Resume)
-            } else {
-                None
-            };
-            SystemAudioRowView {
-                checked: view.checked,
-                disabled: view.disabled,
-                permission_required: view.permission_required,
-                chip: audio_mixer::system_audio_status(&view, session_active),
-                toggle_accelerator: bound_accelerator(&shortcuts, "systemAudioToggle"),
-                show_level: view.checked,
-                idle_line: audio_mixer::system_audio_idle_line(view.checked, bus_active, false),
-                show_gain: view.checked || view.permission_required,
-                gain_text: audio_mixer::format_db(audio.system_audio_gain_db),
-                gain_db: whole(audio.system_audio_gain_db),
-                gain_reset: (!view.permission_required)
-                    .then(|| {
-                        audio_mixer::gain_reset_label(
-                            audio.system_audio_gain_db,
-                            audio_mixer::SYSTEM_AUDIO_GAIN_DEFAULT,
-                        )
-                    })
-                    .flatten(),
-                issue,
-                issue_action,
-                issue_kind: if view.permission_required {
-                    Some("permission")
-                } else {
-                    view.issue.map(|issue| match issue {
-                        SystemAudioIssue::Lost => "lost",
-                        SystemAudioIssue::Unavailable => "unavailable",
-                        SystemAudioIssue::Bypassed => "bypassed",
-                        SystemAudioIssue::Echo => "echo",
-                    })
-                },
-            }
+            system_audio_row(
+                &view,
+                audio.system_audio_enabled,
+                audio.system_audio_gain_db,
+                session_active,
+                bus_active,
+                &shortcuts,
+            )
         });
         Self {
             label: words::AUDIO,
@@ -324,6 +283,78 @@ impl AudioSectionView {
             microphone,
             system_audio,
         }
+    }
+}
+
+/// The System audio row from its switch's view.
+///
+/// Without the Screen Recording permission the switch still shows what the
+/// user asked for and stays theirs to flip (owner, 2026-11-27): while it is
+/// off the row is its icon, name and switch, with no chip, Gain or warning
+/// for a feature that is off; turned on, it says what is missing, with the
+/// way to the fix, and still no level or Gain, which have nothing to show.
+fn system_audio_row(
+    view: &audio_mixer::SwitchView,
+    requested: bool,
+    gain: f32,
+    session_active: bool,
+    bus_active: bool,
+    shortcuts: &Value,
+) -> SystemAudioRowView {
+    let macos = cfg!(target_os = "macos");
+    let needs_permission = view.permission_required;
+    let checked = if needs_permission {
+        requested
+    } else {
+        view.checked
+    };
+    // What the row says is missing, only while the user wants it on.
+    let warns = needs_permission && checked;
+    let working = checked && !needs_permission;
+    let issue = if warns {
+        Some(words::PERMISSION_REASON.to_string())
+    } else if needs_permission {
+        None
+    } else {
+        view.issue.map(|issue| {
+            audio_mixer::system_audio_issue_copy(issue, audio_mixer::this_computer_word())
+        })
+    };
+    let issue_action = if warns || (view.issue == Some(SystemAudioIssue::Unavailable) && macos) {
+        Some(IssueAction::OpenPermissions)
+    } else if view.issue == Some(SystemAudioIssue::Echo) {
+        Some(IssueAction::Resume)
+    } else {
+        None
+    };
+    SystemAudioRowView {
+        checked,
+        disabled: view.disabled && !needs_permission,
+        permission_required: needs_permission,
+        chip: (!needs_permission || checked)
+            .then(|| audio_mixer::system_audio_status(view, session_active))
+            .flatten(),
+        toggle_accelerator: bound_accelerator(shortcuts, "systemAudioToggle"),
+        show_level: working,
+        idle_line: audio_mixer::system_audio_idle_line(working, bus_active, false),
+        show_gain: working,
+        gain_text: audio_mixer::format_db(gain),
+        gain_db: whole(gain),
+        gain_reset: working
+            .then(|| audio_mixer::gain_reset_label(gain, audio_mixer::SYSTEM_AUDIO_GAIN_DEFAULT))
+            .flatten(),
+        issue,
+        issue_action,
+        issue_kind: if warns {
+            Some("permission")
+        } else {
+            view.issue.map(|issue| match issue {
+                SystemAudioIssue::Lost => "lost",
+                SystemAudioIssue::Unavailable => "unavailable",
+                SystemAudioIssue::Bypassed => "bypassed",
+                SystemAudioIssue::Echo => "echo",
+            })
+        },
     }
 }
 
@@ -393,6 +424,7 @@ impl AudioMeters {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use videorc_protocol::DeviceStatus;
 
     use super::*;
 
@@ -420,5 +452,64 @@ mod tests {
         );
         assert_eq!(bound_accelerator(&shortcuts, "systemAudioToggle"), None);
         assert_eq!(bound_accelerator(&json!({}), "micToggle"), None);
+    }
+
+    fn row(status: DeviceStatus, requested: bool) -> SystemAudioRowView {
+        let view = audio_mixer::system_audio_switch_view(&SwitchInput {
+            status: Some(status),
+            requested,
+            session_active: false,
+            audio_bus_active: false,
+            confirmed: None,
+            issue: None,
+            joining: false,
+        });
+        system_audio_row(&view, requested, -6.0, false, false, &json!({}))
+    }
+
+    #[test]
+    fn system_audio_off_is_only_its_switch_even_without_the_permission() {
+        for status in [DeviceStatus::PermissionRequired, DeviceStatus::Available] {
+            let off = row(status.clone(), false);
+            assert!(
+                !off.checked && !off.disabled,
+                "{status:?}: the switch is the user's"
+            );
+            assert_eq!(off.chip, None, "{status:?}");
+            assert!(
+                !off.show_gain && !off.show_level && !off.idle_line,
+                "{status:?}"
+            );
+            assert_eq!(off.issue, None, "{status:?}");
+            assert_eq!(off.issue_action, None, "{status:?}");
+            assert_eq!(off.issue_kind, None, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn system_audio_on_without_the_permission_says_so_with_the_way_to_the_fix() {
+        let on = row(DeviceStatus::PermissionRequired, true);
+        assert!(on.checked && !on.disabled && on.permission_required);
+        assert_eq!(on.chip.map(|chip| chip.label), Some("Needs permission"));
+        assert_eq!(
+            on.issue.as_deref(),
+            Some("System audio needs Screen Recording permission.")
+        );
+        assert_eq!(on.issue_action, Some(IssueAction::OpenPermissions));
+        assert_eq!(on.issue_kind, Some("permission"));
+        assert!(
+            !on.show_gain && !on.show_level && !on.idle_line,
+            "nothing to level or mix until the permission is there"
+        );
+    }
+
+    #[test]
+    fn system_audio_on_with_the_permission_keeps_its_chip_level_and_gain() {
+        let on = row(DeviceStatus::Available, true);
+        assert!(on.checked && !on.permission_required);
+        assert_eq!(on.chip.map(|chip| chip.label), Some("On"));
+        assert!(on.show_gain && on.show_level && on.idle_line);
+        assert_eq!(on.gain_text, audio_mixer::format_db(-6.0));
+        assert_eq!(on.issue, None);
     }
 }

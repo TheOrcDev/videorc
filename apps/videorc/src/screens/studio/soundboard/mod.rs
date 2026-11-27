@@ -18,8 +18,8 @@ use videorc_app_core::BackendEvent;
 use videorc_app_core::nav::PageId;
 use videorc_app_core::protocol::{Sound, SoundMode, SoundVoice, SoundboardState, SoundsPlayback};
 use videorc_app_core::soundboard::{
-    self, RoomAudioRouting, RoomAux, SystemAudio, copy as words, description, sound_for_key,
-    sound_key_digit, voice_by_sound,
+    self, PadPress, RoomAudioRouting, RoomAux, SystemAudio, copy as words, description, pad_click,
+    pad_key, sound_for_key, sound_key_digit, voice_by_sound,
 };
 use videorc_app_core::studio::StudioBackend;
 use videorc_app_core::studio::scenes_section::session_active;
@@ -284,8 +284,19 @@ impl SoundboardSection {
         self.board.as_ref().map(|b| b.monitor).unwrap_or(true)
     }
 
-    pub(crate) fn play(&mut self, id: String, cx: &mut Context<Self>) {
-        self.action("sounds.play", Some(id), cx);
+    /// A sound and whether it plays now, for a pad or key press.
+    fn pad_state(&self, id: &str) -> Option<(SoundMode, bool)> {
+        let mode = self.sounds().iter().find(|s| s.id == id)?.mode;
+        Some((mode, self.voices.iter().any(|v| v.sound_id == id)))
+    }
+
+    /// A pad click: a second press of a playing pad stops that sound
+    /// instead of restarting it (`pad_press_stops`).
+    pub(crate) fn pad_click(&mut self, id: String, cx: &mut Context<Self>) {
+        let press = self
+            .pad_state(&id)
+            .map_or(PadPress::Play, |(mode, playing)| pad_click(mode, playing));
+        self.action(press.method(), Some(id), cx);
     }
 
     pub(crate) fn stop(&mut self, id: String, cx: &mut Context<Self>) {
@@ -296,8 +307,12 @@ impl SoundboardSection {
         self.action("sounds.stop", None, cx);
     }
 
+    /// The pad's key, 1–9: the same toggle as the click.
     fn press(&mut self, id: String, cx: &mut Context<Self>) {
-        self.action("sounds.press", Some(id), cx);
+        let press = self
+            .pad_state(&id)
+            .map_or(PadPress::Press, |(mode, playing)| pad_key(mode, playing));
+        self.action(press.method(), Some(id), cx);
     }
 
     fn action(&mut self, method: &'static str, id: Option<String>, cx: &mut Context<Self>) {
@@ -510,8 +525,9 @@ impl Render for SoundboardSection {
         );
         let playing = !self.voices.is_empty();
         let stop_all = entity.clone();
+        // An outlined button, not ghost: it has to read as a button.
         let stop_button = Button::new("soundboard-stop-all")
-            .variant(ButtonVariant::Ghost)
+            .variant(ButtonVariant::Outline)
             .size(ButtonSize::Xs)
             .disabled(!playing || self.disconnected.is_some())
             .tooltip(words::STOP_ALL)

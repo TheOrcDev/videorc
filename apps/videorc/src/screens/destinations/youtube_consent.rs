@@ -15,6 +15,7 @@ use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
 
 use crate::app::accounts as app_accounts;
+use crate::screens::dialogs::after_open_change;
 
 use super::DestinationsPanel;
 
@@ -63,7 +64,9 @@ impl DestinationsPanel {
             move |open, _, window, cx| {
                 if !open {
                     // Escape / backdrop — same as Cancel.
-                    entity.update(cx, |this, cx| this.close_youtube_consent(window, cx));
+                    after_open_change(&entity.downgrade(), window, cx, |this, window, cx| {
+                        this.close_youtube_consent(window, cx)
+                    });
                 }
             }
         })
@@ -273,7 +276,9 @@ impl DestinationsPanel {
                 move |open, _, window, cx| {
                     if !open {
                         // Escape / backdrop — same as Cancel.
-                        entity.update(cx, |this, cx| this.close_disconnect(window, cx));
+                        after_open_change(&entity.downgrade(), window, cx, |this, window, cx| {
+                            this.close_disconnect(window, cx)
+                        });
                     }
                 }
             })

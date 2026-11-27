@@ -18,6 +18,7 @@ use videorc_kit::tokens::text;
 
 use super::super::{platform, wayland};
 use super::SceneDialogs;
+use crate::screens::dialogs::after_open_change;
 
 pub(super) mod copy {
     pub const MENU_ITEM: &str = "Set key…";
@@ -283,12 +284,14 @@ impl SceneDialogs {
         Dialog::new("scene-key-dialog", &self.set_key, copy::TITLE)
             .size(DialogSize::Sm)
             .description(copy::description(&setting.name, unavailable.is_some()))
-            .on_open_change(move |open, _, _, cx| {
+            .on_open_change(move |open, _, window, cx| {
                 if !open {
-                    let _ = page.update(cx, |page, cx| {
-                        page.disarm_key(cx);
-                        page.setting_key = None;
-                        cx.notify();
+                    after_open_change(&page, window, cx, |page, _, cx| {
+                        if !page.set_key.is_open() {
+                            page.disarm_key(cx);
+                            page.setting_key = None;
+                            cx.notify();
+                        }
                     });
                 }
             })

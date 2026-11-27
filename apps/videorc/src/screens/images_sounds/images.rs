@@ -19,6 +19,10 @@ use videorc_app_core::resources::{
 };
 use videorc_app_core::scenes::background::{BUNDLED_BACKGROUNDS, bundled_background_name};
 use videorc_app_core::studio::StudioBackend;
+use videorc_app_core::studio::scene_editor::{
+    BACKGROUND_NOT_APPLIED, BACKGROUND_NOT_APPLIED_CODE, BACKGROUND_TRY_AGAIN,
+};
+use videorc_app_core::studio::scene_switch::SwitchRefusal;
 use videorc_app_core::{BackendClient, BackendState, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
@@ -29,6 +33,7 @@ use videorc_kit::icon::{IconName, icon};
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::kebab_menu::{KEBAB_HOST, KebabMenu, KebabMenuItem, KebabReveal};
 use videorc_kit::list_row::{GroupedList, GroupedRow, ListRow};
+use videorc_kit::media_card::MediaCard;
 use videorc_kit::page::Gallery;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::scroll_area::ScrollArea;
@@ -58,12 +63,14 @@ enum PendingDelete {
 struct ImportedBackground {
     id: String,
     name: String,
+    file_name: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BackgroundImportAnswer {
     id: String,
+    asset_file_name: String,
 }
 
 pub struct ImagesPanel {
@@ -80,6 +87,10 @@ pub struct ImagesPanel {
     banner_kind: BannerImportKind,
     takeover_importing: bool,
     background_importing: bool,
+    background_pending: Option<String>,
+    background_active: Option<Value>,
+    background_refusal: Option<SwitchRefusal>,
+    background_retry: Option<Value>,
     backgrounds: Vec<ImportedBackground>,
     load_epoch: u64,
     rename: DialogHandle,
@@ -123,6 +134,10 @@ impl ImagesPanel {
             banner_kind: BannerImportKind::Image,
             takeover_importing: false,
             background_importing: false,
+            background_pending: None,
+            background_active: None,
+            background_refusal: None,
+            background_retry: None,
             backgrounds: Vec::new(),
             load_epoch: 0,
             rename: DialogHandle::new(false),
@@ -153,7 +168,10 @@ impl ImagesPanel {
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
         let connected = self.studio.is_connected();
-        let session_active = self.studio.snapshot().session.phase.is_active();
+        let snapshot = self.studio.snapshot();
+        let session_active = snapshot.session.phase.is_active();
+        let background_changed = self.background_active != snapshot.scenes.working_background;
+        self.background_active = snapshot.scenes.working_background;
         let was = self.connected;
         if self.connected != connected || self.session_active != session_active {
             self.connected = connected;
@@ -165,6 +183,10 @@ impl ImagesPanel {
                 self.banners_state = LoadState::Loading;
                 self.takeovers_state = LoadState::Loading;
             }
+            cx.notify();
+        }
+        // Scene commits must repaint the selected tile even while idle.
+        if background_changed {
             cx.notify();
         }
     }
@@ -378,6 +400,14 @@ impl ImagesPanel {
         }
     }
 
+    fn open_sources(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(shell) = self.shell.clone() {
+            let _ = shell.update(cx, |shell, cx| {
+                shell.open_page(PageId::Sources, window, cx);
+            });
+        }
+    }
+
     fn place_on_scene(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(shell) = self.shell.clone() {
             let _ = shell.update(cx, |shell, cx| {
@@ -527,6 +557,100 @@ impl ImagesPanel {
         .detach();
     }
 
+    fn apply_background(&mut self, background: Option<Value>, cx: &mut Context<Self>) {
+        if self.background_pending.is_some() {
+            return;
+        }
+        self.background_pending = Some(
+            background
+                .as_ref()
+                .and_then(|value| value.get("assetId"))
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+                .to_string(),
+        );
+        self.background_refusal = None;
+        self.background_retry = background.clone();
+        cx.notify();
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let result = runtime
+                .spawn(async move { studio.apply_working_background(background.as_ref()).await })
+                .await;
+            let _ = this.update(cx, |panel, cx| {
+                panel.background_pending = None;
+                panel.background_refusal = match result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(refusal)) => Some(refusal),
+                    Err(_) => Some(SwitchRefusal {
+                        code: BACKGROUND_NOT_APPLIED_CODE.to_string(),
+                        reason: BACKGROUND_TRY_AGAIN.to_string(),
+                    }),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn background_tile(
+        &self,
+        name: SharedString,
+        live: bool,
+        picture: Option<ImageSource>,
+        background: Value,
+        t: &Theme,
+        cx: &Context<Self>,
+    ) -> MediaCard {
+        let id = if live {
+            format!(
+                "live-bg-{}",
+                background["live"]["id"].as_str().unwrap_or_default()
+            )
+        } else {
+            format!(
+                "bg-asset-{}",
+                background["assetId"].as_str().unwrap_or_default()
+            )
+        };
+        let selected = self
+            .background_active
+            .as_ref()
+            .and_then(|v| v.get("assetId"))
+            == background.get("assetId");
+        let pending = self.background_pending.as_deref() == background["assetId"].as_str();
+        let entity = cx.entity();
+        picture_tile(id.into(), name.clone(), live, picture, t)
+            .selected(selected)
+            .disabled(!self.connected || self.background_pending.is_some())
+            .accessibility_label(name)
+            .when(selected || pending, |tile| {
+                tile.child(
+                    div().absolute().top(px(6.)).right(px(6.)).child(
+                        Badge::new(if pending {
+                            "Applying…"
+                        } else {
+                            assets::STATUS_ACTIVE
+                        })
+                        .variant(BadgeVariant::Outline),
+                    ),
+                )
+            })
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |panel, cx| {
+                    panel.apply_background(
+                        if selected {
+                            None
+                        } else {
+                            Some(background.clone())
+                        },
+                        cx,
+                    );
+                });
+            })
+    }
+
     fn import_background(&mut self, cx: &mut Context<Self>) {
         if self.background_importing || !self.connected {
             return;
@@ -581,6 +705,7 @@ impl ImagesPanel {
                 Ok::<ImportedBackground, String>(ImportedBackground {
                     id: imported.id,
                     name,
+                    file_name: imported.asset_file_name,
                 })
             });
             let result = job.await;
@@ -641,7 +766,7 @@ fn picture_tile(
     live: bool,
     picture: Option<ImageSource>,
     t: &Theme,
-) -> gpui::Stateful<gpui::Div> {
+) -> MediaCard {
     // Over a picture the strip fades up from the background
     // (`bg-gradient-to-t from-background/95 to-transparent`), so the name
     // reads on any picture.
@@ -651,19 +776,18 @@ fn picture_tile(
         linear_color_stop(hsla(with_alpha(t.background, 0.95)), 0.),
         linear_color_stop(hsla(with_alpha(t.background, 0.)), 1.),
     );
-    div()
-        .id(id)
+    MediaCard::new(id)
         .relative()
         .w_full()
         .min_w(px(0.))
         .aspect_ratio(16. / 9.)
         .flex()
+        .justify_end()
         .items_end()
         .overflow_hidden()
         .rounded(px(radius::ROW))
         .border_1()
         .border_color(hsla(t.border))
-        .hover(|style| style.border_color(hsla(with_alpha(t.foreground, 0.3))))
         .bg(hsla(t.muted))
         // The picture fills the frame (`object-cover`) under the strip.
         .children(picture.map(|picture| {
@@ -766,21 +890,23 @@ impl Render for ImagesPanel {
             // `<Gallery rowsOfFive>`: at most five 16:9 tiles a row, by width.
             let mut grid = Gallery::new("images-gallery-pictures").rows_of_five(true);
             for (id, name, path) in presets {
-                grid = grid.child(picture_tile(
-                    SharedString::from(format!("bg-asset-{id}")),
+                grid = grid.child(self.background_tile(
                     SharedString::from(name),
                     false,
                     Some(ImageSource::from(path)),
+                    json!({"assetId": id}),
                     t,
+                    cx,
                 ));
             }
             for row in &self.backgrounds {
-                grid = grid.child(picture_tile(
-                    SharedString::from(format!("bg-asset-{}", row.id)),
+                grid = grid.child(self.background_tile(
                     SharedString::from(row.name.clone()),
                     false,
                     None,
+                    json!({"assetId": row.id, "fileName": row.file_name}),
                     t,
+                    cx,
                 ));
             }
             grid.into_any_element()
@@ -791,19 +917,91 @@ impl Render for ImagesPanel {
         for id in assets::live_backgrounds_offered() {
             // The default look's thumbnail (`liveBackgroundThumbnail`), the
             // same embedded still first-run shows.
-            live_grid = live_grid.child(picture_tile(
-                SharedString::from(format!("live-bg-{id}")),
+            live_grid = live_grid.child(self.background_tile(
                 SharedString::from(assets::live_background_name(id)),
                 true,
                 crate::screens::first_run::pictures::live_thumb(id).map(ImageSource::from),
+                assets::live_background_style(id).expect("offered background has a default look"),
                 t,
+                cx,
             ));
+        }
+        let mut background_feedback = div().flex().flex_col().gap(px(8.));
+        if let Some(refusal) = &self.background_refusal {
+            let entity = entity.clone();
+            // A layout that needs a source nobody picked: trying again can't
+            // help, so the button goes where the streamer picks one.
+            let needs_source = match refusal.code.as_str() {
+                "layout-screen-not-selected" => Some("Choose a screen"),
+                "layout-camera-not-selected" => Some("Open Sources"),
+                _ => None,
+            };
+            let action = match needs_source {
+                Some(label) => Button::new("images-background-open-sources")
+                    .label(label)
+                    .variant(ButtonVariant::Outline)
+                    .on_click(move |_, window, cx| {
+                        entity.update(cx, |panel, cx| panel.open_sources(window, cx));
+                    }),
+                None => Button::new("images-background-retry")
+                    .label("Retry")
+                    .variant(ButtonVariant::Outline)
+                    .disabled(offline)
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |panel, cx| {
+                            panel.apply_background(panel.background_retry.clone(), cx)
+                        });
+                    }),
+            };
+            background_feedback = background_feedback.child(
+                Alert::new("images-background-failed")
+                    .variant(AlertVariant::Warning)
+                    .title(BACKGROUND_NOT_APPLIED)
+                    .description(SharedString::from(refusal.reason.clone()))
+                    .action(action),
+            );
+        }
+        if let Some(background) = &self.background_active {
+            let asset = background["assetId"].as_str().unwrap_or_default();
+            let name = background
+                .get("live")
+                .and_then(|live| live["id"].as_str())
+                .map(assets::live_background_name)
+                .or_else(|| bundled_background_name(asset))
+                .or_else(|| {
+                    self.backgrounds
+                        .iter()
+                        .find(|row| row.id == asset)
+                        .map(|row| row.name.as_str())
+                })
+                .unwrap_or("Background");
+            let entity = entity.clone();
+            background_feedback = background_feedback.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(SharedString::from(format!(
+                        "{} {name}",
+                        assets::IN_THIS_SCENE
+                    )))
+                    .child(
+                        Button::new("images-background-clear")
+                            .label(assets::USE_NO_BACKGROUND)
+                            .variant(ButtonVariant::Ghost)
+                            .disabled(offline || self.background_pending.is_some())
+                            .on_click(move |_, _, cx| {
+                                entity.update(cx, |panel, cx| panel.apply_background(None, cx));
+                            }),
+                    ),
+            );
         }
         let backgrounds = PanelSection::new("images-backgrounds")
             .icon(icon(IconName::ImageSquare, 16., hsla(t.muted_foreground)))
             .title(assets::BACKGROUNDS)
             .description(assets::BACKGROUNDS_DESCRIPTION)
             .action(bg_import_btn("images-import-bg"))
+            .child(background_feedback)
             .child(
                 div()
                     .flex()

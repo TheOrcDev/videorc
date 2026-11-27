@@ -5,6 +5,7 @@
 //! A `cloud.marker.created` for the open show reads the list again.
 
 use super::*;
+use crate::screens::dialogs::after_open_change;
 use gpui::{AnyElement, SharedString, div, px};
 use videorc_app_core::BackendEvent;
 use videorc_app_core::library::cloud_markers::{
@@ -275,15 +276,17 @@ impl LibraryScreen {
                 body.child(list)
             }
         };
-        let closing = entity.clone();
+        let closing = entity.downgrade();
         Dialog::new("cloud-markers-dialog", &self.markers_dialog, TITLE)
             .size(DialogSize::Lg)
             .description(DESCRIPTION)
-            .on_open_change(move |open, _, _, cx| {
+            .on_open_change(move |open, _, window, cx| {
                 if !open {
-                    closing.update(cx, |this, cx| {
-                        this.markers = None;
-                        cx.notify();
+                    after_open_change(&closing, window, cx, |this, _, cx| {
+                        if !this.markers_dialog.is_open() {
+                            this.markers = None;
+                            cx.notify();
+                        }
                     });
                 }
             })

@@ -1473,9 +1473,9 @@ export function SceneStage({
         <p className="flex flex-wrap items-center justify-center gap-x-1 px-3 pb-3 text-center text-xs text-muted-foreground">
           No sources in the scene yet. Choose a screen or a camera in Sources.
           <Button
-            className="h-auto p-0 text-xs font-normal"
+            className="text-foreground"
             size="xs"
-            variant="link"
+            variant="outline"
             onClick={() => openWorkspaceTab('sources')}
           >
             Open Sources
@@ -1489,10 +1489,10 @@ export function SceneStage({
           {layoutOnlyNote.text}
           {onLayoutOnlyAction ? (
             <Button
-              className="h-auto p-0 text-xs font-normal"
+              className="text-foreground"
               data-videorc-stage-layout-only-action={layoutOnlyNote.action}
               size="xs"
-              variant="link"
+              variant="outline"
               onClick={onLayoutOnlyAction}
             >
               {layoutOnlyNote.actionLabel}

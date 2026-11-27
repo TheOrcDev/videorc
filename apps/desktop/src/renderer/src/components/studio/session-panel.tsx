@@ -475,17 +475,24 @@ export function SessionNotices({
             <div className="flex flex-wrap gap-1 pt-2">
               {onRetryStart ? (
                 <Button
+                  className="text-foreground"
                   disabled={startRequestPending}
                   size="xs"
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   onClick={onRetryStart}
                 >
                   Retry
                 </Button>
               ) : null}
               {onDismissStartFailure ? (
-                <Button size="xs" type="button" variant="ghost" onClick={onDismissStartFailure}>
+                <Button
+                  className="text-foreground"
+                  size="xs"
+                  type="button"
+                  variant="outline"
+                  onClick={onDismissStartFailure}
+                >
                   Dismiss
                 </Button>
               ) : null}
@@ -712,13 +719,15 @@ export function TakeoverSection(): ReactElement {
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <ImageIcon className="size-3.5 shrink-0" weight="duotone" />
           <span className="min-w-0">No takeovers yet.</span>
-          <button
-            className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
+          <Button
+            className="shrink-0 text-foreground"
+            size="xs"
             type="button"
+            variant="outline"
             onClick={() => setActive('assets')}
           >
             Add in Images
-          </button>
+          </Button>
         </div>
       ) : (
         <>

@@ -20,6 +20,7 @@ use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
 
 use super::DestinationsPanel;
+use crate::screens::dialogs::after_open_change;
 
 const SECTION_TITLE: &str = "Chat commands";
 const HELP: &str = "Viewers type !name in chat. Videorc answers as you, starting with @their name, in the chat they asked in.";
@@ -308,7 +309,9 @@ impl DestinationsPanel {
                 move |open, _, window, cx| {
                     if !open {
                         // Escape / backdrop / X — same as Cancel.
-                        entity.update(cx, |this, cx| this.close_command_editor(window, cx));
+                        after_open_change(&entity.downgrade(), window, cx, |this, window, cx| {
+                            this.close_command_editor(window, cx)
+                        });
                     }
                 }
             })

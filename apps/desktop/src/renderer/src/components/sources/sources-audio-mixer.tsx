@@ -94,6 +94,9 @@ import {
   SYSTEM_AUDIO_IDLE_LINE,
   systemAudioIssueCopy,
   systemAudioRowDevice,
+  systemAudioRowNeedsPermission,
+  systemAudioRowView,
+  systemAudioRowWorking,
   systemAudioSwitchView,
   type SystemAudioSwitchView
 } from '@/lib/system-audio'
@@ -218,15 +221,18 @@ export function SourcesAudioMixer(): ReactElement {
   const microphoneId = captureConfig.sources.microphoneId
   const setAudio = (update: (current: AudioSettings) => AudioSettings): void =>
     setCaptureConfig((current) => ({ ...current, audio: update(current.audio) }))
-  const systemAudio = systemAudioSwitchView({
-    device: systemAudioRowDevice(deviceList, platform),
-    requested: audio.systemAudioEnabled,
-    sessionActive: isSessionActive,
-    audioBusActive,
-    confirmed: systemAudioConfirmed,
-    joining: systemAudioJoining,
-    issue: systemAudioIssue
-  })
+  const systemAudio = systemAudioRowView(
+    systemAudioSwitchView({
+      device: systemAudioRowDevice(deviceList, platform),
+      requested: audio.systemAudioEnabled,
+      sessionActive: isSessionActive,
+      audioBusActive,
+      confirmed: systemAudioConfirmed,
+      joining: systemAudioJoining,
+      issue: systemAudioIssue
+    }),
+    audio.systemAudioEnabled
+  )
 
   return (
     <>
@@ -738,18 +744,21 @@ export function SystemAudioSettings({
   onResume: () => void
 }): ReactElement {
   // Without Screen Recording the chip's line says so and the page's alert
-  // has the fix (plan 174 C-8): no second recovery here.
+  // has the fix (plan 174 C-8): no second recovery here. The chip shows only
+  // while the switch is on (owner, 2026-11-27): off is the row alone.
+  const needsPermission = systemAudioRowNeedsPermission(view)
+  const working = systemAudioRowWorking(view)
   const issueCopy = view.permissionRequired
     ? null
     : view.issue
       ? systemAudioIssueCopy(view.issue, platform ?? (macOS ? 'darwin' : undefined))
       : null
   const issueAction = view.permissionRequired ? null : view.issue === 'unavailable' && macOS ? (
-    <Button className="-ml-2" size="xs" variant="ghost" onClick={onOpenPermissions}>
+    <Button className="text-foreground" size="xs" variant="outline" onClick={onOpenPermissions}>
       Open Permissions
     </Button>
   ) : view.issue === 'echo' ? (
-    <Button className="-ml-2" size="xs" variant="ghost" onClick={onResume}>
+    <Button className="text-foreground" size="xs" variant="outline" onClick={onResume}>
       Resume
     </Button>
   ) : null
@@ -772,7 +781,7 @@ export function SystemAudioSettings({
         data-section-focus="sources-system-audio"
         data-videorc-system-audio-settings=""
         defaultMoreOpen={defaultMoreOpen}
-        disabled={view.permissionRequired}
+        disabled={needsPermission}
         icon={DesktopIcon}
         id="system-audio"
         more={
@@ -806,11 +815,13 @@ export function SystemAudioSettings({
           </>
         }
         moreLabel="More System audio settings"
-        status={systemAudioStatus(view, sessionActive)}
+        status={
+          view.permissionRequired && !view.checked ? null : systemAudioStatus(view, sessionActive)
+        }
         title="System audio"
       >
         <SourceFacts>Everything your {computer} plays, except Videorc.</SourceFacts>
-        {view.checked ? (
+        {working ? (
           <>
             {meterHasNoReading(meter) ? (
               // No dead meter. The level exists while a recording, livestream
@@ -827,18 +838,14 @@ export function SystemAudioSettings({
                 />
               </div>
             )}
-            <SystemAudioGainFader
-              disabled={view.permissionRequired}
-              gainDb={gainDb}
-              onGainChange={onGainChange}
-            />
+            <SystemAudioGainFader gainDb={gainDb} onGainChange={onGainChange} />
           </>
         ) : null}
         {issueCopy ? (
           <Alert data-videorc-system-audio-issue={view.issue ?? undefined} variant="warning">
             <AlertTitle>{issueCopy}</AlertTitle>
             {issueAction ? (
-              <AlertDescription className="pt-1">{issueAction}</AlertDescription>
+              <AlertDescription className="pt-1.5">{issueAction}</AlertDescription>
             ) : null}
           </Alert>
         ) : null}
