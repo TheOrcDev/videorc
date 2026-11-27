@@ -511,7 +511,10 @@ impl RenderOnce for Select {
                             } else {
                                 with_alpha(t.border, 0.0)
                             }))
-                            .bg(hsla(fade(with_alpha(t.input, 0.5))))
+                            // Keep the fill translucent over the actual parent.
+                            // Pre-blending against the window ground can erase
+                            // a disabled trigger when it sits on a card.
+                            .bg(hsla(with_alpha(t.input, if disabled { 0.25 } else { 0.5 })))
                     }
                 })
                 .whitespace_nowrap()

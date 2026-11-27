@@ -134,8 +134,8 @@ impl Alert {
         self
     }
 
-    /// `AlertAction`: a control pinned to the top right (Retry, Dismiss),
-    /// out of flow as Electron's is.
+    /// `AlertAction`: a trailing control in its own column. The text wraps
+    /// before the action; when space is tight, the action wraps below it.
     pub fn action(mut self, action: impl IntoElement) -> Self {
         self.action = Some(action.into_any_element());
         self
@@ -214,7 +214,6 @@ impl RenderOnce for Alert {
                 .child(mark)
         });
         let inline_action = self.inline_action;
-        let has_inline = inline_action.is_some();
         let body = div()
             .flex_1()
             .min_w_0()
@@ -247,7 +246,19 @@ impl RenderOnce for Alert {
                     .text_color(hsla(t.muted_foreground))
                     .child(description)
             }));
-        let has_action = self.action.is_some() && !has_inline;
+        let has_action = self.action.is_some();
+        // Reserve the action's intrinsic width, not a fixed text inset.
+        // A useful text column keeps a long action on the next line when
+        // narrow; on wide alerts both columns share the row.
+        let message = div()
+            .flex_1()
+            .min_w_0()
+            .when(has_action, |message| message.flex_basis(px(240.0)))
+            .flex()
+            .items_start()
+            .gap(px(10.0))
+            .children(leading)
+            .child(body);
         div()
             .id(self.id)
             .role(variant.role())
@@ -255,24 +266,22 @@ impl RenderOnce for Alert {
             .relative()
             .w_full()
             .flex()
+            .flex_wrap()
             .items_start()
-            .gap(px(10.0))
+            .gap_x(px(10.0))
+            .gap_y(px(8.0))
             .px(px(12.0))
             .pt(px(10.0))
             .pb(px(if empty_row { 12.0 } else { 10.0 }))
-            // The action's room: 72 px on the right (`pr-18`); the action
-            // itself is absolute (`top-2.5 right-3`) and never grows the row.
-            .when(has_action, |alert| alert.pr(px(72.0)))
             .rounded(px(radius::ROW))
             .bg(hsla(with_alpha(t.foreground, 0.04)))
             .text_color(hsla(t.foreground))
             .text_size(px(14.0))
             .line_height(px(20.0))
-            .children(leading)
-            .child(body)
+            .child(message)
             .children(
                 self.action
-                    .map(|action| div().absolute().top(px(10.0)).right(px(12.0)).child(action)),
+                    .map(|action| div().flex_none().max_w_full().ml_auto().child(action)),
             )
     }
 }
