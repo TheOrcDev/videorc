@@ -124,7 +124,12 @@ export function SceneList({
       {/* Why some scenes can't be chosen, once, under the list (D9), as in Studio. */}
       <SceneGalleryReason
         action={
-          <Button size="xs" variant="outline" onClick={() => openWorkspaceTab('sources')}>
+          <Button
+            className="text-foreground"
+            size="xs"
+            variant="outline"
+            onClick={() => openWorkspaceTab('sources')}
+          >
             Open Sources
           </Button>
         }

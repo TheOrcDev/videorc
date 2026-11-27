@@ -286,6 +286,7 @@ describe('the Scene page scene list (plan 210 D6)', () => {
     expect(rowButton('Break').closest('[aria-describedby]')).toBeTruthy()
     // A button, not a text link beside the reason (owner, 11-27).
     expect(button('Open Sources')!.dataset.variant).toBe('outline')
+    expect(button('Open Sources')!.className).toContain('text-foreground')
     await act(async () => button('Open Sources')!.click())
     expect(openWorkspaceTab).toHaveBeenCalledExactlyOnceWith('sources')
   })
