@@ -246,7 +246,7 @@ export function LookStep(): ReactElement {
           <SceneGalleryReason
             action={
               grantMissing ? (
-                <Button size="xs" variant="ghost" onClick={() => frame.goTo('permissions')}>
+                <Button size="xs" variant="outline" onClick={() => frame.goTo('permissions')}>
                   Back to permissions
                 </Button>
               ) : undefined

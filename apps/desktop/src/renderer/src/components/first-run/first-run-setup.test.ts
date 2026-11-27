@@ -325,6 +325,8 @@ describe('FirstRunSetup', () => {
     expect(markup).toContain('data-first-run-sound-blocked=""')
     expect(markup).toMatch(/Videorc can(&#x27;|')t hear your microphone yet\./)
     expect(markup).toContain('Back to permissions')
+    // A button under the title, not ghost text (owner, 11-27).
+    expect(markup).toMatch(/<button[^>]*data-variant="outline"[^>]*>Back to permissions</)
     expect(markup).not.toContain('data-mic-level-meter=""')
   })
 
