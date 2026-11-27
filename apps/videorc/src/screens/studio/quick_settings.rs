@@ -397,8 +397,9 @@ impl QuickSettingsSection {
             t,
             move |choice, _, cx| {
                 let _ = choose_entity.update(cx, |section, cx| {
+                    // Stays open, as in Electron: "What viewers see" shows the
+                    // new pick at once and a second tile can follow.
                     section.choose_background(choice);
-                    section.popover_open = false;
                     cx.notify();
                 });
             },
