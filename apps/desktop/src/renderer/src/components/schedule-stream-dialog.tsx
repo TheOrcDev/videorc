@@ -451,9 +451,9 @@ export function ScheduleStreamDialog({
                   <FieldDescription>
                     {`Sign in to ${providerLabel} in Destinations → Setup first.`}{' '}
                     <Button
-                      className="h-auto p-0"
+                      className="text-foreground"
                       size="xs"
-                      variant="link"
+                      variant="outline"
                       onClick={() => {
                         openLivestreamView('setup')
                         onClose()
