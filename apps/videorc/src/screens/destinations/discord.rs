@@ -187,7 +187,7 @@ impl DestinationsPanel {
                     .child(
                         Button::new(format!("discord-remove-{id}"))
                             .label(page_copy::REMOVE)
-                            .variant(ButtonVariant::Ghost)
+                            .variant(ButtonVariant::Outline)
                             .on_click({
                                 let entity = entity.clone();
                                 let id = id.clone();
@@ -201,7 +201,7 @@ impl DestinationsPanel {
                     actions = actions.child(
                         Button::new(format!("discord-view-{id}"))
                             .label(page_copy::VIEW_IN_DISCORD)
-                            .variant(ButtonVariant::Ghost)
+                            .variant(ButtonVariant::Outline)
                             .on_click(move |_, _, cx| cx.open_url(&url)),
                     );
                 }

@@ -202,7 +202,7 @@ impl DestinationsPanel {
                                     .child(
                                         Button::new("watchdog-copy-link")
                                             .label(view.copy_label)
-                                            .variant(ButtonVariant::Ghost)
+                                            .variant(ButtonVariant::Outline)
                                             .on_click({
                                                 let entity = entity.clone();
                                                 move |_, _, cx| {
