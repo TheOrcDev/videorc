@@ -600,7 +600,7 @@ export function LibraryTab({
                 <DeleteIcon data-icon="inline-start" />
                 Delete
               </Button>
-              <Button variant="ghost" onClick={() => setSelection({ selected: [], anchor: null })}>
+              <Button variant="outline" onClick={() => setSelection({ selected: [], anchor: null })}>
                 Clear selection
               </Button>
               {bulkHoldReason ? (
