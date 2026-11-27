@@ -71,11 +71,11 @@ export function XCategoryField({
             <>
               {' '}
               <Button
-                className="h-auto p-0 align-baseline"
+                className="align-baseline text-foreground"
                 disabled={disabled}
                 size="xs"
                 type="button"
-                variant="link"
+                variant="outline"
                 onClick={onRetry}
               >
                 Try again

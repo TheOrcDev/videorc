@@ -295,7 +295,14 @@ The backend owns everything in `crates/videorc-backend/src/live_background/`:
 ### macOS (Metal)
 
 `live_background/metal.rs` runs the MSL ports on the primary leg's device
-and queue:
+and queue. The MSL itself is `live_background/live_background.metal`, a file
+of its own because the GPUI app compiles it too: first-run setup's backdrop
+draws its Liquid Chrome pass in the app's own process
+(`apps/videorc/src/screens/first_run/backdrop.rs`, rules in
+`videorc_app_core::first_run::backdrop`), as Electron's renderer does with
+the GLSL.
+
+In the backend:
 
 - **One render per tick.** The primary leg (the recording, or the stream in
   a stream-only session, which Studio's preview shows) renders the live frame

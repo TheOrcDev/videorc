@@ -144,6 +144,60 @@ describe('Studio → Soundboard (plan 189 S6)', () => {
     expect(board().stopAll).toHaveBeenCalled()
   })
 
+  it('stops a playing pad on a second press instead of restarting it (owner, 2026-11-27)', async () => {
+    const playingAirhorn: SoundVoice = { ...playingApplause, voiceId: 'v-2', soundId: 'airhorn' }
+    await render()
+    await act(async () => pad('airhorn').click())
+    expect(board().play).toHaveBeenCalledWith('airhorn')
+    expect(board().stop).not.toHaveBeenCalled()
+    // The board comes back with the voice: the same pad now stops it.
+    setBoard({ voices: [playingAirhorn] })
+    await render()
+    expect(pad('airhorn').getAttribute('aria-label')).toBe('Stop Airhorn')
+    await act(async () => pad('airhorn').click())
+    expect(board().stop).toHaveBeenCalledWith('airhorn')
+    expect(board().play).not.toHaveBeenCalled()
+    // Only that sound: Stop all is its own button.
+    expect(board().stopAll).not.toHaveBeenCalled()
+  })
+
+  it('stops a playing sound with its key, and plays it again once it has stopped', async () => {
+    const playingAirhorn: SoundVoice = { ...playingApplause, voiceId: 'v-2', soundId: 'airhorn' }
+    setBoard({ voices: [playingAirhorn, playingApplause] })
+    await render()
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '1' }))
+      window.dispatchEvent(new KeyboardEvent('keyup', { key: '1' }))
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '2' }))
+      window.dispatchEvent(new KeyboardEvent('keyup', { key: '2' }))
+    })
+    expect(board().stop.mock.calls).toEqual([['airhorn'], ['applause']])
+    expect(board().press).not.toHaveBeenCalled()
+    setBoard({ voices: [] })
+    await render()
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: '1' })))
+    expect(board().press).toHaveBeenCalledWith('airhorn')
+    expect(board().stop).not.toHaveBeenCalled()
+  })
+
+  it('keeps a While held key on its press and release while the sound plays', async () => {
+    setBoard({ voices: [{ ...playingApplause, voiceId: 'v-3', soundId: 'drumroll' }] })
+    await render()
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: '3' })))
+    expect(board().press).toHaveBeenCalledWith('drumroll')
+    expect(board().stop).not.toHaveBeenCalled()
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keyup', { key: '3' })))
+    expect(board().stop).toHaveBeenCalledWith('drumroll')
+  })
+
+  it('draws Stop all as a button with an edge, with its icon and words', async () => {
+    setBoard({ voices: [playingApplause] })
+    await render()
+    expect(stopAllButton().getAttribute('data-variant')).toBe('outline')
+    expect(stopAllButton().textContent).toBe('Stop all')
+    expect(stopAllButton().querySelector('svg')).not.toBeNull()
+  })
+
   it('hides Stop all while nothing plays, keeping its place out of reach', async () => {
     await render()
     expect(stopAllShown()).toBe(false)

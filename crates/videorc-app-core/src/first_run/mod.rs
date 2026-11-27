@@ -22,6 +22,7 @@
 //! (`first-run-look.ts`) need the Studio's scenes and layouts (L7) and come
 //! with them.
 
+pub mod backdrop;
 pub mod sound;
 
 use serde_json::{Value, json};
