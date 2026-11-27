@@ -23,6 +23,14 @@ const gpuiStudioSourcePath = join(
   'smoke',
   'studio.rs'
 )
+const gpuiCommandsSourcePath = join(
+  repoRoot,
+  'crates',
+  'videorc-app-core',
+  'src',
+  'smoke',
+  'commands.rs'
+)
 
 test('the maintained preview-lifecycle probe uses its supported gate argument', () => {
   const packageDocument = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
@@ -139,8 +147,19 @@ test('the server allowlist covers literal commands used by smoke callers and nam
   const gpuiStudio = new Set(
     [...gpuiStudioBlock[1].replace(/\/\/.*$/gm, '').matchAll(/"([^"]+)"/g)].map((match) => match[1])
   )
+  // The same for the GPUI app's own window commands (APP_WINDOW_COMMANDS,
+  // e.g. `notifications-state`), which only its window handlers serve.
+  const gpuiWindowBlock = readFileSync(gpuiCommandsSourcePath, 'utf8').match(
+    /APP_WINDOW_COMMANDS: &\[&str\] = &\[([\s\S]*?)\];/
+  )
+  assert.ok(gpuiWindowBlock, 'Could not locate APP_WINDOW_COMMANDS.')
+  const gpuiWindow = new Set(
+    [...gpuiWindowBlock[1].replace(/\/\/.*$/gm, '').matchAll(/"([^"]+)"/g)].map((match) => match[1])
+  )
   const unlisted = [...callers.keys()]
-    .filter((command) => !allowed.has(command) && !gpuiStudio.has(command))
+    .filter(
+      (command) => !allowed.has(command) && !gpuiStudio.has(command) && !gpuiWindow.has(command)
+    )
     .sort()
   assert.deepEqual(
     unlisted,
