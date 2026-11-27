@@ -98,13 +98,6 @@ struct PaintObserved {
     decoded: bool,
 }
 
-impl IntoElement for PaintObserved {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl Element for PaintObserved {
     type RequestLayoutState = ();
     type PrepaintState = ();
