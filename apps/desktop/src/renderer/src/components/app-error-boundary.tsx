@@ -1,6 +1,7 @@
 import { Suspense, lazy, type ErrorInfo, type ReactElement, type ReactNode } from 'react'
 
 import { ErrorBoundary } from '@/components/error-boundary'
+import { Button } from '@/components/ui/button'
 
 // The root boundary (plan 174 S3.21, A-7), shared by every window: a crash
 // in the shell itself (or in the providers above it) shows the root panel,
@@ -41,9 +42,9 @@ export function AppErrorBoundary({
         <ErrorBoundary
           fallback={() => (
             <div className="flex h-screen items-center justify-center" role="alert">
-              <button className="text-sm underline" type="button" onClick={() => location.reload()}>
+              <Button type="button" variant="outline" onClick={() => location.reload()}>
                 Reload Videorc
-              </button>
+              </Button>
             </div>
           )}
           onError={logRenderCrash}
