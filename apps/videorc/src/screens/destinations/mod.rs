@@ -300,7 +300,7 @@ impl DestinationsPanel {
                 platforms: &platforms,
                 runtimes: &runtimes,
                 entitlements: None,
-                session_active: snapshot.session.phase.is_active(),
+                session_active: setup::session_locks_setup(&snapshot.session),
                 go_live_pending: go_live.open || go_live.pending,
                 development: cfg!(debug_assertions),
             },

@@ -138,7 +138,7 @@ pub mod stream_report_store;
 pub mod takeover_microphone;
 pub mod takeover_mute;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 pub mod timecode;
 pub mod transport;
 pub mod ui_local;
