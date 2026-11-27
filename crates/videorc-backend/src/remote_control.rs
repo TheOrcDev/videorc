@@ -119,6 +119,14 @@ pub enum RemoteIntent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sound_id: Option<String>,
     },
+    /// A pad's tap (the phone remote; owner, 2026-11-27: "a second tap stops
+    /// the playing sound, the same as in the app"). Never relayed: the
+    /// backend, which owns the mode and the voices, turns it into
+    /// `soundStop` for that sound or `soundPlay` ([`Self::relayed`]).
+    #[serde(rename_all = "camelCase")]
+    SoundToggle {
+        sound_id: String,
+    },
     #[serde(rename_all = "camelCase")]
     WindowFront {
         window: RemoteWindow,
@@ -186,7 +194,7 @@ impl RemoteIntent {
                 "banner"
             }
             // Its own bucket and its own, shorter window (plan 189).
-            Self::SoundPlay { .. } | Self::SoundStop { .. } => "sound",
+            Self::SoundPlay { .. } | Self::SoundStop { .. } | Self::SoundToggle { .. } => "sound",
             Self::WindowFront { .. } => "window",
             // Its own bucket: a bounce must not move the window back at once.
             // A tap and a hold are one key: one bucket.
@@ -206,6 +214,7 @@ impl RemoteIntent {
     pub fn debounce_key(&self) -> std::borrow::Cow<'_, str> {
         match self {
             Self::SoundPlay { sound_id }
+            | Self::SoundToggle { sound_id }
             | Self::SoundStop {
                 sound_id: Some(sound_id),
             } => std::borrow::Cow::Owned(format!("sound:{sound_id}")),
@@ -217,8 +226,28 @@ impl RemoteIntent {
     /// How long after an accepted intent the same bucket refuses another.
     pub fn debounce_window(&self) -> Duration {
         match self {
-            Self::SoundPlay { .. } | Self::SoundStop { .. } => REMOTE_SOUND_INTENT_DEBOUNCE,
+            Self::SoundPlay { .. } | Self::SoundStop { .. } | Self::SoundToggle { .. } => {
+                REMOTE_SOUND_INTENT_DEBOUNCE
+            }
             _ => REMOTE_INTENT_DEBOUNCE,
+        }
+    }
+
+    /// The intent the desktop runs. `soundToggle` becomes `soundStop` for
+    /// that sound when `pad_tap_stops` says its tap stops it, else
+    /// `soundPlay` (a press); every other intent is relayed as it came.
+    pub fn relayed(self, pad_tap_stops: impl FnOnce(&str) -> bool) -> Self {
+        match self {
+            Self::SoundToggle { sound_id } => {
+                if pad_tap_stops(&sound_id) {
+                    Self::SoundStop {
+                        sound_id: Some(sound_id),
+                    }
+                } else {
+                    Self::SoundPlay { sound_id }
+                }
+            }
+            other => other,
         }
     }
 
@@ -269,6 +298,9 @@ impl RemoteIntent {
             }
             Self::SoundPlay { sound_id } if sound_id.trim().is_empty() => {
                 Err("soundPlay needs a non-empty soundId.".to_string())
+            }
+            Self::SoundToggle { sound_id } if sound_id.trim().is_empty() => {
+                Err("soundToggle needs a non-empty soundId.".to_string())
             }
             Self::SoundStop {
                 sound_id: Some(sound_id),
@@ -957,6 +989,71 @@ mod tests {
                 .validate()
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn sound_toggle_is_a_sound_key_and_is_relayed_as_a_stop_or_a_press() {
+        let toggle: RemoteIntent =
+            serde_json::from_str(r#"{"kind":"soundToggle","soundId":"s-1"}"#).unwrap();
+        assert_eq!(
+            toggle,
+            RemoteIntent::SoundToggle {
+                sound_id: "s-1".to_string()
+            }
+        );
+        assert!(toggle.validate().is_ok());
+        assert_eq!(toggle.debounce_kind(), "sound");
+        assert_eq!(toggle.debounce_key(), "sound:s-1");
+        assert_eq!(toggle.debounce_window(), REMOTE_SOUND_INTENT_DEBOUNCE);
+        assert!(serde_json::from_str::<RemoteIntent>(r#"{"kind":"soundToggle"}"#).is_err());
+        assert!(
+            RemoteIntent::SoundToggle {
+                sound_id: " ".to_string()
+            }
+            .validate()
+            .is_err()
+        );
+        // The desktop only ever sees the two intents it already runs.
+        assert_eq!(
+            toggle.clone().relayed(|id| id == "s-1"),
+            RemoteIntent::SoundStop {
+                sound_id: Some("s-1".to_string())
+            }
+        );
+        assert_eq!(
+            toggle.clone().relayed(|_| false),
+            RemoteIntent::SoundPlay {
+                sound_id: "s-1".to_string()
+            }
+        );
+        // A bounce of the pad is refused, whichever form names that sound.
+        let mut runtime = RemoteControlRuntime::default();
+        let start = Instant::now();
+        assert!(runtime.admit_intent(&toggle, start).accepted);
+        assert!(
+            !runtime
+                .admit_intent(&toggle, start + Duration::from_millis(50))
+                .accepted
+        );
+        assert!(
+            runtime
+                .admit_intent(
+                    &toggle,
+                    start + REMOTE_SOUND_INTENT_DEBOUNCE + Duration::from_millis(1)
+                )
+                .accepted
+        );
+        // Nothing else is rewritten: a named press stays a press, Stop all
+        // stays Stop all.
+        for intent in [
+            RemoteIntent::SoundPlay {
+                sound_id: "s-1".to_string(),
+            },
+            RemoteIntent::SoundStop { sound_id: None },
+            RemoteIntent::RecordToggle,
+        ] {
+            assert_eq!(intent.clone().relayed(|_| true), intent);
         }
     }
 

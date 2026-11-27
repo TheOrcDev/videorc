@@ -187,6 +187,7 @@ Intent params (`kind` + fields):
 | `bannerToggle`                                           | `bannerId`                               | show or hide that banner, from its `shown` in `describe` (for one deck key)                                                                                                                                                                                                       |
 | `soundPlay`                                              | `soundId`                                | press that sound (plan 189): the sound's own mode decides, like its key in Studio                                                                                                                                                                                                 |
 | `soundStop`                                              | `soundId?`                               | stop that sound; without `soundId`, stop every sound                                                                                                                                                                                                                              |
+| `soundToggle`                                            | `soundId`                                | a pad's tap (the phone): stop that sound when it plays, in every mode but While held, else press it. The backend decides and relays `soundStop` or `soundPlay`                                                                                                                    |
 | `windowFront`                                            | `window`: `notes`\|`comments`\|`preview` | bring window forward (`comments` is the Stream Manager)                                                                                                                                                                                                                           |
 | `streamManagerScreenSwap`                                | `presentingScreen`, `monitorScreen`      | move the Stream Manager to the other of the two screens (display ids); from closed, minimized or a third screen it goes to the Monitor screen. Both ids are required, must differ and are at most 32 bytes. It never sets Hide from stream (plan 230)                             |
 | `streamManagerFrontOrClose`                              | —                                        | the same key held (plan 230): bring the Stream Manager to the front where it is, with the focus, or close it when it already has the focus. Shares the `streamManagerScreenSwap` debounce                                                                                         |
@@ -427,10 +428,10 @@ show past the four-at-once cap is refused with the desktop's sentence.
 ### Sounds on the phone (plan 189 leak argument)
 
 The phone lists the soundboard's sounds by name under Controls → Sounds;
-each key presses one, and "Stop all sounds" stops them. What crosses the LAN
+each key is a pad, and "Stop all sounds" stops them. What crosses the LAN
 socket is one more field in `remote.describe`, `sounds: [{id, name,
-playing}]`, and what a paired phone can do is send `soundPlay` or
-`soundStop` through the existing `remote.intent`:
+playing}]`, and what a paired phone can do is send `soundPlay`, `soundStop`
+or `soundToggle` through the existing `remote.intent`:
 
 - Ids are opaque UUIDs.
 - Names are labels the streamer typed for sounds they play to viewers.
@@ -441,6 +442,15 @@ The worst a paired device can do is what a pad in Studio does: play one of
 the streamer's own sounds into the stream, or stop it. A While held sound
 pressed from a remote plays to its end: `describe` carries no mode, so a
 remote has no release to send.
+
+A second tap of a playing pad on the phone stops that sound, as in the apps
+(owner, 2026-11-27). The page sends `soundToggle`; the backend, which owns
+the mode and the voices, relays `soundStop` for that sound when it plays and
+is not While held, else `soundPlay`. That is the stop a phone could already
+send itself: no new route, event or `describe` field, and nothing new for a
+paired device to do. `soundPlay` keeps its press semantics for every other
+remote (a Stream Deck key, Companion), and `/sound <name>` and an agent's
+`play_sound` never pass through here.
 
 The phone's other words now match the desktop too, with no protocol change:
 the tabs read Chat and Controls, the header reads ON AIR while a livestream
