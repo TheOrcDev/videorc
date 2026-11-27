@@ -15,6 +15,9 @@ videorc-protocol = { workspace = true }
 # The update rules the sidebar chip and Settings → About read (`updater`).
 videorc-updater = { workspace = true }
 anyhow = "1.0"
+# Canonical paths without Windows' verbatim `\\?\` prefix, which resource
+# paths and the backend refuse (`resources::capability`).
+dunce = "1.0"
 # Chat timestamps and the highlight's expiry (`chat::highlight`); the session
 # clock parses the backend's RFC 3339 `startedAt`, and Health formats its
 # timestamps.

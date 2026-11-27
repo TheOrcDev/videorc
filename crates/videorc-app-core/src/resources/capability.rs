@@ -154,7 +154,9 @@ pub fn canonical_resource_path(raw_path: &str, kind: ResourceKind) -> Result<Pat
     {
         return Err("Resource path must be absolute and traversal-free.".to_string());
     }
-    let canonical = std::fs::canonicalize(path)
+    // dunce: a drive path stays `C:\...`; std's `\\?\C:\...` is the very
+    // device form the guard above (and the backend) refuse.
+    let canonical = dunce::canonicalize(path)
         .map_err(|_| "Resource path does not exist or could not be resolved.".to_string())?;
     let metadata = std::fs::metadata(&canonical)
         .map_err(|_| "Resource path metadata could not be read.".to_string())?;
@@ -313,7 +315,12 @@ mod tests {
         let canonical =
             canonical_resource_path(folder.to_str().unwrap(), ResourceKind::OutputDirectory)
                 .expect("a folder");
-        assert_eq!(canonical, std::fs::canonicalize(&folder).unwrap());
+        assert_eq!(canonical, dunce::canonicalize(&folder).unwrap());
+        // Never std's verbatim `\\?\` form on Windows: the backend refuses it,
+        // and so does this function's own guard when the path comes back.
+        assert!(!canonical.to_string_lossy().starts_with(r"\\?\"));
+        canonical_resource_path(canonical.to_str().unwrap(), ResourceKind::OutputDirectory)
+            .expect("its own answer is accepted again");
         assert_eq!(display_name(&canonical), "Recordings");
     }
 
