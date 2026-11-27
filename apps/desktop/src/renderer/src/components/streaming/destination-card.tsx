@@ -1218,7 +1218,7 @@ function OAuthAccountPanel({
           </Button>
         ) : null}
         {shared ? null : (
-          <Button disabled={disabled} variant="ghost" onClick={() => setDisconnectOpen(true)}>
+          <Button disabled={disabled} variant="outline" onClick={() => setDisconnectOpen(true)}>
             <SignOutIcon data-icon="inline-start" weight="bold" />
             Disconnect
           </Button>

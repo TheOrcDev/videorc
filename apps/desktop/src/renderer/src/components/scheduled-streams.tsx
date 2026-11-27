@@ -706,7 +706,7 @@ function EventRow({
       </div>
       <div className="flex shrink-0 items-center gap-1" ref={menuAnchor}>
         {event.thumbnailState === 'error' ? (
-          <Button disabled={pending} variant="ghost" onClick={onSchedule}>
+          <Button disabled={pending} variant="outline" onClick={onSchedule}>
             Retry thumbnail
           </Button>
         ) : null}

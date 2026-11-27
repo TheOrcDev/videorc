@@ -460,7 +460,7 @@ function WebhookRow({
         </DisabledReason>
         <Button
           data-testid={`discord-webhook-remove-${webhook.id}`}
-          variant="ghost"
+          variant="outline"
           onClick={onRemove}
         >
           Remove
@@ -477,7 +477,7 @@ function ViewInDiscord({ url }: { url: string }): ReactElement {
     <Button
       className="before:hidden"
       size="xs"
-      variant="ghost"
+      variant="outline"
       onClick={() => void window.videorc.openOAuthUrl(url)}
     >
       View in Discord
