@@ -369,7 +369,7 @@ function BuddyLivePowers({
                 className="shrink-0"
                 size="xs"
                 type="button"
-                variant="ghost"
+                variant="outline"
                 onClick={() => onSelectTab(power.tab)}
               >
                 {label}

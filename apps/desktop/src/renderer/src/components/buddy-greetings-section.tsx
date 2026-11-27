@@ -173,7 +173,7 @@ export function BuddyGreetingsSection(): ReactElement | null {
             className="shrink-0"
             size="xs"
             type="button"
-            variant="ghost"
+            variant="outline"
             onClick={() => openBuddyTab('chat')}
           >
             {`Sidekick → ${buddyTabLabel('chat')}`}
