@@ -5295,6 +5295,31 @@ impl Drop for RoomScreenCapture {
     }
 }
 
+/// Plan 260 S1.8c c4b off macOS: the room has no second capture of its own
+/// yet (Linux's portal would ask the host to pick again; Windows is owed), so
+/// a hand-picked source the preview does not run is refused with a reason
+/// the Studio shows. The scene's own screen is shared from the preview's
+/// frames on every platform.
+#[cfg(all(backend_room, not(target_os = "macos")))]
+pub(crate) struct RoomScreenCapture {
+    source: PreviewScreenFrameSource,
+}
+
+#[cfg(all(backend_room, not(target_os = "macos")))]
+impl RoomScreenCapture {
+    pub(crate) async fn start(_state: &AppState, _source_id: &str) -> Result<Self, String> {
+        Err(
+            "Only the scene's own screen can be shared into the room here. Add this screen \
+             to the scene to share it."
+                .to_string(),
+        )
+    }
+
+    pub(crate) fn frame_source(&self) -> &PreviewScreenFrameSource {
+        &self.source
+    }
+}
+
 fn selected_screen_source(params: &PreviewScreenStartParams) -> Option<SelectedScreenSource> {
     if let Some(window_id) = params.sources.window_id.clone() {
         // Linux portal window: the portal's picker names the window, so the
