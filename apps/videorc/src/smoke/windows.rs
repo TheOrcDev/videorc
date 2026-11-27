@@ -11,7 +11,7 @@
 //! `-click-message` is a row's click, `-set-highlight-anchor` the status
 //! bar's corner pick, `-reader-state` the rows' words and highlight phases,
 //! `-command-trace` the clicks in flight. The fixture commands
-//! (`comments-window-push-*`, `-seed-*`) stay "not supported".
+//! `-push-snapshot` seeds the actual pane; delta and seed commands remain unsupported.
 
 use gpui::{AnyWindowHandle, App, Hsla, Window, rgb};
 use serde_json::{Map, Value, json};
@@ -32,6 +32,7 @@ pub const WINDOW_COMMANDS: &[&str] = &[
     "comments-window-close",
     "comments-window-command-trace",
     "comments-window-open",
+    "comments-window-push-snapshot",
     "comments-window-reader-state",
     "comments-window-set-bounds",
     "comments-window-set-hidden-from-stream",
@@ -198,6 +199,13 @@ fn run(command: &str, params: &Map<String, Value>, cx: &mut App) -> Result<Value
                 .update(cx, |sm, _, cx| sm.smoke_click_message(&id, cx))
                 .map_err(|_| CHAT_CLOSED.to_string())?;
             Ok(json!({ "clicked": clicked, "messageId": id }))
+        }
+        "comments-window-push-snapshot" => {
+            let fixture = videorc_app_core::smoke::comments::SnapshotFixture::parse(params)?;
+            let view = stream_manager::window::view(cx).ok_or(CHAT_CLOSED)?;
+            view.update(cx, |sm, _, cx| sm.smoke_push_snapshot(&fixture, cx))
+                .map_err(|_| CHAT_CLOSED.to_string())?;
+            Ok(fixture.answer())
         }
         "comments-window-reader-state" => {
             let view = stream_manager::window::view(cx).ok_or(CHAT_CLOSED)?;

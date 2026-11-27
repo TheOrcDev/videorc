@@ -37,6 +37,7 @@
 pub mod admin;
 pub mod capture;
 pub mod commands;
+pub mod comments;
 pub mod gpui_tree;
 pub mod security;
 pub mod server;

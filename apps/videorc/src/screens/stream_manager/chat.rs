@@ -169,6 +169,8 @@ pub struct ChatPane {
     /// A past session's transcript is on screen (Library ⋯ → Open in Stream
     /// Manager): the live chat waits until Back to live.
     history: bool,
+    /// An isolated smoke owns this window until explicitly leaving its view.
+    smoke_snapshot_override: bool,
     unread: usize,
     incomplete: bool,
     delivery_cursor: DeliveryCursor,
@@ -266,7 +268,7 @@ impl ChatPane {
                 }
                 let chat = live_chat.borrow().clone();
                 let alive = this.update(cx, |pane, cx| {
-                    if !pane.history {
+                    if !pane.history && !pane.smoke_snapshot_override {
                         pane.apply_live_chat(&chat, cx);
                     }
                 });
@@ -318,6 +320,7 @@ impl ChatPane {
             picked: None,
             placeholder_writable: None,
             history: false,
+            smoke_snapshot_override: false,
             settle_scroll,
             unread: 0,
             incomplete: false,
@@ -508,6 +511,20 @@ impl ChatPane {
             }
         })
         .detach();
+    }
+
+    /// Same rendering path as a published chat, with isolated fixture ownership.
+    pub fn smoke_push_snapshot(
+        &mut self,
+        fixture: &videorc_app_core::smoke::comments::SnapshotFixture,
+        cx: &mut Context<Self>,
+    ) {
+        self.smoke_snapshot_override = true;
+        self.history = fixture.history;
+        self.following = true;
+        self.apply_live_chat(&fixture.chat(), cx);
+        self.unread = fixture.unread;
+        cx.notify();
     }
 
     /// `comments-window-reader-state`: the rows' words and each shown row's
@@ -845,6 +862,7 @@ impl ChatPane {
             return;
         }
         self.history = false;
+        self.smoke_snapshot_override = false;
         let chat = self.studio.live_chat_now();
         self.apply_live_chat(&chat, cx);
     }
@@ -853,6 +871,9 @@ impl ChatPane {
     /// session (Electron's chat pane), so this only covers a pane that
     /// has no chat yet.
     pub fn set_live(&mut self, live: bool, cx: &mut Context<Self>) {
+        if self.smoke_snapshot_override {
+            return;
+        }
         let live = live || (!self.history && self.session_id.is_some());
         if self.live == live {
             return;

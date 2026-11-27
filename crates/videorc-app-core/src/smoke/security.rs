@@ -445,8 +445,8 @@ pub struct ValidatedSmokeCommand {
 /// `None` is the 400.
 ///
 /// The Comments fixture commands keep Electron's larger key budget for the
-/// snapshot; their full fixture schema is not checked here because the Rust
-/// app answers them "not supported" until the Comments window exists.
+/// snapshot. The window's typed fixture handler validates the snapshot schema
+/// before it takes ownership of the view; unsupported fixture fields fail by name.
 pub fn validate_smoke_command_payload(value: &Value) -> Option<ValidatedSmokeCommand> {
     let body = value.as_object()?;
     let command = body.get("command")?.as_str()?;
