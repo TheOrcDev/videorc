@@ -1430,7 +1430,7 @@ impl SourcesPanel {
                     Button::new("sync-reset")
                         .label("Reset")
                         .size(ButtonSize::Xs)
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .on_click(move |_, _, cx| {
                             entity.update(cx, |panel, _| {
                                 let studio = panel.studio.clone();

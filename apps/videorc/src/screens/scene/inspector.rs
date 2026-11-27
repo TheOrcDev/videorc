@@ -330,7 +330,7 @@ impl ScenePage {
                     .icon(IconName::ArrowCounterClockwise)
                     .label(copy::RESET_CROP)
                     .size(ButtonSize::Xs)
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .disabled(!enabled)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !cropped {

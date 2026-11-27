@@ -170,7 +170,7 @@ impl ScenePage {
                 actions = actions.child(
                     Button::new("restore-built-in-password-managers")
                         .label(copy::RESTORE_BUILT_IN)
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .on_click(move |_, _, cx| {
                             let _ = restore_page.update(cx, |page, _| {
                                 page.update_privacy(restore_built_in_password_managers)

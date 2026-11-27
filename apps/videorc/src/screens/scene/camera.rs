@@ -155,7 +155,7 @@ impl ScenePage {
                         .icon(IconName::ArrowCounterClockwise)
                         .label(inspector_copy::CAMERA_RESET_LABEL)
                         .size(ButtonSize::Xs)
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.controls.camera_reset.open(window, cx);
                             cx.notify();
@@ -331,7 +331,7 @@ impl ScenePage {
                             .label(copy::RESET)
                             .accessibility_label(copy::RESET_CAMERA_LOOK)
                             .size(ButtonSize::Xs)
-                            .variant(ButtonVariant::Ghost)
+                            .variant(ButtonVariant::Outline)
                             .disabled(!lens.look_reset_enabled)
                             .on_click(cx.listener(|this, _, _, cx| this.reset_camera_look(cx))),
                     )
@@ -568,7 +568,7 @@ impl ScenePage {
                                 .icon(IconName::ArrowCounterClockwise)
                                 .label(copy::SHOW_ALL_EDGES)
                                 .size(ButtonSize::Xs)
-                                .variant(ButtonVariant::Ghost)
+                                .variant(ButtonVariant::Outline)
                                 .on_click(cx.listener(|this, _, _, _| {
                                     this.set_hide_edges(key_edges_of(None))
                                 }))
@@ -709,7 +709,7 @@ impl ScenePage {
         .footer(
             Button::new("scene-choose-image-open-images")
                 .label(OPEN_IMAGES_LABEL)
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.controls.choose_image.close(window, cx);
                     this.navigate(SceneNavigate::Page(PageId::Assets), cx);
