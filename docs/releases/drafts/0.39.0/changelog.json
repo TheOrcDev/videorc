@@ -6,9 +6,7 @@
       "version": "0.39.0-beta.1",
       "date": "2026-11-26",
       "channel": "beta",
-      "platforms": [
-        "macos"
-      ],
+      "platforms": ["macos"],
       "title": "Cleaner green-screen edges and smoother system audio",
       "summary": "Green screen removes more of the green tint around hair, system audio avoids brief gaps, and Health clears an old Preview slowdown when you close the Preview.",
       "highlights": [
@@ -16,22 +14,20 @@
         "System audio avoids brief silent gaps caused by uneven capture timing.",
         "Closing the Preview clears its old slowdown warning from Health."
       ],
-      "body": "## Fixes\n\n- **Cleaner hair against a green screen**: removing the background now removes more of the green tint along the edge of your hair, including the olive tint on brown hair. The correction reaches farther into the edge and stays consistent as you resize the camera.\n- **Smoother system audio**: a small jump in the capture timing no longer inserts a brief silent gap into the sound from your Mac.\n- **Health clears old Preview warnings**: closing the Preview clears its old slowdown warning, so Health no longer reports a problem with a Preview that is already closed.\n- **Retro LCD removed**: the Retro LCD look and its switch in Settings → General have been removed. If you previously had it turned on, Videorc opens normally with the standard look."
+      "body": "## Fixes\n\n- **Cleaner hair against a green screen**: removing the background now removes more of the green tint along the edge of your hair, including the olive tint on brown hair. The correction reaches farther into the edge and stays consistent as you resize the camera.\n- **Smoother system audio**: a small jump in the capture timing no longer inserts a brief silent gap into the sound from your Mac.\n- **Health clears old Preview warnings**: closing the Preview clears its old slowdown warning, so Health no longer reports a problem with a Preview that is already closed.\n- **Retro LCD removed**: the Retro LCD look and its switch in Settings → General have been removed. If you previously had it turned on, Videorc opens normally with the standard look.\n- **Steadier live backgrounds**: brief slowdowns are less likely to switch a live background to a still image."
     },
     {
       "version": "0.39.0-alpha.1",
       "date": "2026-11-26",
       "channel": "alpha",
-      "platforms": [
-        "windows"
-      ],
+      "platforms": ["windows"],
       "title": "Smoother system audio and clearer Health warnings",
       "summary": "System audio avoids brief gaps when capture timing jumps, and closing the Preview clears its old slowdown warning from Health.",
       "highlights": [
         "System audio avoids brief silent gaps caused by uneven capture timing.",
         "Health no longer reports an old slowdown after you close the Preview."
       ],
-      "body": "## Fixes\n\n- **Smoother system audio**: a small jump in the capture timing no longer inserts a brief silent gap into your system audio.\n- **Health clears old Preview warnings**: closing the Preview clears its old slowdown warning, so Health no longer reports a problem with a Preview that is already closed.\n- **Retro LCD removed**: the Retro LCD look and its switch in Settings → General have been removed. If you previously had it turned on, Videorc opens normally with the standard look."
+      "body": "## Fixes\n\n- **Smoother system audio**: a small jump in the capture timing no longer inserts a brief silent gap into your system audio.\n- **Health clears old Preview warnings**: closing the Preview clears its old slowdown warning, so Health no longer reports a problem with a Preview that is already closed.\n- **Retro LCD removed**: the Retro LCD look and its switch in Settings → General have been removed. If you previously had it turned on, Videorc opens normally with the standard look.\n- **Steadier live backgrounds**: brief slowdowns are less likely to switch a live background to a still image."
     }
   ]
 }
