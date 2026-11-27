@@ -8,9 +8,13 @@ import type { GlobalShortcutsConfig } from '@/lib/backend'
 
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
+  cloudStatus: null as unknown,
   registered: { 'scene-slot-3': false }
 }))
-vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
+vi.mock('@/hooks/use-studio', () => ({
+  useStudioCore: () => mocked.core,
+  useStudioCloud: () => ({ cloudStatus: mocked.cloudStatus })
+}))
 vi.mock('@/lib/global-shortcuts', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/global-shortcuts')>()),
   globalShortcutRegistration: {
@@ -46,7 +50,15 @@ it('renders the Scenes group in order, names conflicts, and changes or clears a 
   }
   const render = () => act(async () => root.render(createElement(ShortcutsSettings)))
   try {
-    await render()
+    for (const shown of [false, true, false]) {
+      mocked.cloudStatus = { allowance: { enabled: true, talkShows: shown } }
+      await render()
+      const rows = [...container.querySelectorAll('[data-accelerator]')]
+      expect(
+        rows.some((row) => row.getAttribute('data-accelerator') === `CmdOrCtrl+${shown ? 9 : 8}`)
+      ).toBe(true)
+      expect(container.textContent?.includes('Guests')).toBe(shown)
+    }
     const group = container.querySelector('fieldset')!
     expect(group.textContent).toContain('Scenes')
     expect([...group.querySelectorAll('label')].map((label) => label.textContent)).toEqual([

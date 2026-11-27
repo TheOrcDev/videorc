@@ -442,7 +442,7 @@ export function CommandPalette({
           {PAGES.map((page) => {
             // Guests shows only with talk shows, as its sidebar row does.
             if (page.id === 'guests' && !guestsVisible(cloudStatus)) return null
-            const pageShortcut = pageShortcutFor(page.id)
+            const pageShortcut = pageShortcutFor(page.id, guestsVisible(cloudStatus))
             const PageIcon = page.icon
             return (
               <Fragment key={page.id}>

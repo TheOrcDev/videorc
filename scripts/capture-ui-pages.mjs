@@ -44,7 +44,9 @@ if (flag('baseline') || flag('baseline-manifest')) {
 }
 const sweep = flag('sweep')
 const themeArg = arg('theme')
-const themes = (arg('themes') ?? (sweep ? 'light,dark' : themeArg ?? '')).split(',').filter(Boolean)
+const themes = (arg('themes') ?? (sweep ? 'light,dark' : (themeArg ?? '')))
+  .split(',')
+  .filter(Boolean)
 for (const theme of themes) {
   if (theme !== 'light' && theme !== 'dark') {
     console.error(`A theme is light or dark, got ${theme}`)
@@ -52,7 +54,11 @@ for (const theme of themes) {
   }
 }
 const sizesArg = arg('sizes')
-const sizes = sizesArg ? parseSizes(sizesArg) : sweep ? UI_SWEEP_SIZES : [{ width: 1280, height: 860 }]
+const sizes = sizesArg
+  ? parseSizes(sizesArg)
+  : sweep
+    ? UI_SWEEP_SIZES
+    : [{ width: 1280, height: 860 }]
 // One size keeps the old names (`studio-dark`); several add the size.
 const sizeTag = sweep || sizes.length > 1 || sizesArg
 const check = sweep || flag('check')
@@ -68,12 +74,15 @@ const launched = await launchDevApp({
     VIDEORC_DISABLE_AUTO_PREVIEW: '1'
   },
   // The host queues (build slot, smoke lock, memory) say why a run waits.
-  onLine: (line) => { if (line.startsWith('[smoke:')) console.error(line) }
+  onLine: (line) => {
+    if (line.startsWith('[smoke:')) console.error(line)
+  }
 })
 const smoke = launched.connections['preview-motion-ready']
 const cmd = async (command, params = {}) => {
   const r = await fetch(`http://${smoke.host}:${smoke.port}/command`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${smoke.capability}` },
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${smoke.capability}` },
     body: JSON.stringify({ command, params })
   })
   const j = await r.json()
@@ -85,16 +94,19 @@ const setTheme = async (theme) => {
   // would send, so the theme applies without a reload.
   const applied = await cmd('eval-js', {
     code: `localStorage.setItem('videorc.theme', '${theme}'); window.dispatchEvent(new StorageEvent('storage', { key: 'videorc.theme', newValue: '${theme}' })); await sleep(700); return document.documentElement.classList.contains('${theme}')`
-  }).then(r => r.result === true, () => false)
+  }).then(
+    (r) => r.result === true,
+    () => false
+  )
   if (!applied) {
     await stopProcess(launched.process)
     console.error(`Could not switch the app to the ${theme} theme.`)
     process.exit(1)
   }
 }
-// Pages by tab id. The Sidekick page (id `ai`, ⌘9; plan 119) doubles as a
+// Pages by tab id. The Sidekick page (id `ai`, ⌘8/⌘9; plan 119) doubles as a
 // probe: it must render Sidekick Live's status (its Overview tab, id `live`),
-// or the run fails at the end. So must the Avatar page (id `avatar`, ⌘8; plan
+// or the run fails at the end. So must the Avatar page (id `avatar`, ⌘7/⌘8; plan
 // 239) with its status row (its Profile tab). The profile under the output
 // folder outlives a run and each page reopens on the sub-tab used last, so
 // the probe selects its tab itself, with a click: Base UI tabs switch on
@@ -131,15 +143,27 @@ const shoot = async (name, tag, size, theme) => {
   }
   const { result } = await cmd('eval-js', { code: layoutCheckSource })
   const breaking = breakingFindings(result.findings)
-  report.push({ page: name, ...size, theme: theme ?? null, file: shot.file, findings: result.findings })
-  console.log(`${breaking.length === 0 ? 'ok  ' : 'BAD '} ${shot.file}${breaking.length ? ` (${breaking.length}: ${[...new Set(breaking.map((f) => f.kind))].join(', ')})` : ''}`)
+  report.push({
+    page: name,
+    ...size,
+    theme: theme ?? null,
+    file: shot.file,
+    findings: result.findings
+  })
+  console.log(
+    `${breaking.length === 0 ? 'ok  ' : 'BAD '} ${shot.file}${breaking.length ? ` (${breaking.length}: ${[...new Set(breaking.map((f) => f.kind))].join(', ')})` : ''}`
+  )
 }
 // A page with a PageTabs strip (Settings, plan 064; Buddy, plan 150;
 // Destinations, plan 174): shoot each of its tabs. Triggers are found by the
 // page's data attribute when it has one, else by the strip's tab role.
-const stripTabs = async (selector) => cmd('eval-js', {
-  code: `return [...document.querySelectorAll(${JSON.stringify(selector)})].map((el, index) => ({ index, id: el.getAttribute('data-videorc-settings-tab') ?? el.getAttribute('data-videorc-buddy-tab') ?? el.getAttribute('data-videorc-avatar-tab') ?? el.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-') }))`
-}).then(r => r.result ?? [], () => [])
+const stripTabs = async (selector) =>
+  cmd('eval-js', {
+    code: `return [...document.querySelectorAll(${JSON.stringify(selector)})].map((el, index) => ({ index, id: el.getAttribute('data-videorc-settings-tab') ?? el.getAttribute('data-videorc-buddy-tab') ?? el.getAttribute('data-videorc-avatar-tab') ?? el.textContent.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-') }))`
+  }).then(
+    (r) => r.result ?? [],
+    () => []
+  )
 const shootStripTabs = async (name, selector, tag, size, theme) => {
   const tabs = await stripTabs(selector)
   for (const { index, id } of tabs) {
@@ -148,7 +172,9 @@ const shootStripTabs = async (name, selector, tag, size, theme) => {
         code: `const el = document.querySelectorAll(${JSON.stringify(selector)})[${index}]; el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 })); el.click(); await sleep(600); return true`
       })
       await shoot(`${name}-${id}`, tag, size, theme)
-    } catch (e) { console.log(`SKIP ${name}-${id}: ${e.message}`) }
+    } catch (e) {
+      console.log(`SKIP ${name}-${id}: ${e.message}`)
+    }
   }
   return tabs
 }
@@ -170,7 +196,7 @@ const shootAll = async (tag, size, theme) => {
       } else {
         await cmd('open-tab', mustShow ? { tab, waitFor: mustShow } : { tab })
       }
-      await new Promise(r => setTimeout(r, 900))
+      await new Promise((r) => setTimeout(r, 900))
       await shoot(name, tag, size, theme)
     } catch (e) {
       console.log(`SKIP ${name}: ${e.message}`)
@@ -186,9 +212,16 @@ const shootAll = async (tag, size, theme) => {
     } else if (name === 'avatar') {
       const avatarTabs = await shootStripTabs(name, '[data-videorc-avatar-tab]', tag, size, theme)
       // Plan 239: Profile, Greetings.
-      if (avatarTabs.length !== 2) failures.push(`avatar tabs: expected 2, found ${avatarTabs.length}`)
+      if (avatarTabs.length !== 2)
+        failures.push(`avatar tabs: expected 2, found ${avatarTabs.length}`)
     } else if (name === 'streaming') {
-      await shootStripTabs('livestream', 'main [data-slot="pane-strip"] [role="tab"]', tag, size, theme)
+      await shootStripTabs(
+        'livestream',
+        'main [data-slot="pane-strip"] [role="tab"]',
+        tag,
+        size,
+        theme
+      )
     }
   }
 }
@@ -196,7 +229,7 @@ for (const theme of themes.length > 0 ? themes : [null]) {
   if (theme) await setTheme(theme)
   for (const size of sizes) {
     await cmd('resize-window', size)
-    await new Promise(r => setTimeout(r, sizeTag ? 1200 : 2500))
+    await new Promise((r) => setTimeout(r, sizeTag ? 1200 : 2500))
     const tag = `${sizeTag ? `-${size.width}x${size.height}` : ''}${theme ? `-${theme}` : ''}`
     await shootAll(tag, size, theme)
   }
@@ -205,7 +238,9 @@ await stopProcess(launched.process)
 if (check) {
   writeFileSync(join(out, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
   const bad = report.filter((shot) => breakingFindings(shot.findings).length > 0)
-  console.log(`\n${report.length} shots, ${bad.length} with a breaking finding. Report: ${join(out, 'report.json')}`)
+  console.log(
+    `\n${report.length} shots, ${bad.length} with a breaking finding. Report: ${join(out, 'report.json')}`
+  )
   for (const shot of bad) {
     console.log(`\n${shot.page} at ${shot.width}×${shot.height} ${shot.theme ?? ''}`)
     for (const finding of breakingFindings(shot.findings)) {

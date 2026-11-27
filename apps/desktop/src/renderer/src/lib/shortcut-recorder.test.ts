@@ -198,3 +198,14 @@ describe('shortcutRecorderName (plan 174 I-17)', () => {
     ).toBe('Mark a clip: press the new shortcut')
   })
 })
+
+it('names the current page when refusing a reserved navigation key', () => {
+  for (const shown of [false, true, false]) {
+    expect(appShortcutOwner('CmdOrCtrl+7', 'darwin', shown)?.label).toBe(
+      shown ? 'Guests' : 'Avatar'
+    )
+    expect(appShortcutOwner('CmdOrCtrl+8', 'darwin', shown)?.label).toBe(
+      shown ? 'Avatar' : 'Sidekick'
+    )
+  }
+})

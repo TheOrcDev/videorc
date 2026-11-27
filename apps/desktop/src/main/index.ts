@@ -537,7 +537,7 @@ import {
 } from './live-activity'
 import { DisplaySleepGuard } from './display-sleep-guard'
 import { appMenuReleaseNotesUrl, type AppMenuWindowId } from '../shared/app-menu-items'
-import { pageKeyForInput, type PageKey } from '../shared/sidebar-pages'
+import { guestsVisible, pageKeyForInput, type PageKey } from '../shared/sidebar-pages'
 import {
   DARK_GLASS_COATS,
   DARK_WINDOW_PALETTE,
@@ -3177,7 +3177,7 @@ function createWindow(): void {
     }
     // The page keys (shared/sidebar-pages): ⌘ digits, ⇧⌘ letters and ⌘,, one
     // key list for every window.
-    const pageKey = pageKeyForInput(input)
+    const pageKey = pageKeyForInput(input, sidebarGuestsShown)
     if (pageKey) {
       event.preventDefault()
       if (mainWindow) {
@@ -3746,7 +3746,7 @@ function attachAuxWindowShortcuts(window: BrowserWindow): void {
     }
     // The page keys' ⇧⌘ letters go on to here with the digits and ⌘,; the
     // window chords above carry no page key, so nothing acts twice.
-    const pageKey = pageKeyForInput(input)
+    const pageKey = pageKeyForInput(input, sidebarGuestsShown)
     if (pageKey) {
       event.preventDefault()
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -16734,6 +16734,11 @@ function updateMainCaptureState(payload: RecordingStatus): void {
 
 /** Plan 249 S26: a `cloud.state` payload (or the `cloud.status` answer). */
 function observeCloudRoomActivity(payload: unknown): void {
+  const guestsShown = guestsVisible(payload)
+  if (guestsShown !== sidebarGuestsShown) {
+    sidebarGuestsShown = guestsShown
+    installApplicationMenu()
+  }
   const next = cloudRoomActivityFromCloudStatus(payload)
   if (next === cloudRoomActivity) return
   cloudRoomActivity = next
@@ -18218,8 +18223,11 @@ function toggleAppMenuWindow(id: AppMenuWindowId): void {
   }
 }
 
+let sidebarGuestsShown = false
+
 function installApplicationMenu(): void {
   installAppMenu({
+    guestsShown: sidebarGuestsShown,
     platform: process.platform,
     isPackaged: app.isPackaged,
     windowsEnabled: {

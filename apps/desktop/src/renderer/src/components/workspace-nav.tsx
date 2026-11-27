@@ -125,7 +125,7 @@ export type SidebarZone = {
 export const SIDEBAR_ZONES: readonly SidebarZone[] = SIDEBAR_LAYOUT
 
 // Page shortcuts, derived there: ⌘1–⌘9 down the nine rows above the Assets
-// group (Guests ⌘7 whether or not its row shows), ⇧⌘G Images, ⇧⌘S Sounds,
+// group after visibility filtering, ⇧⌘G Images, ⇧⌘S Sounds,
 // ⌘0 Library, ⌘, Settings. Health has NO key: it stays reachable via ⌘K, the
 // status bar and the account menu. Main forwards the key and AppShell maps it
 // here.
@@ -134,8 +134,8 @@ export const WORKSPACE_SHORTCUTS: readonly { key: PageKey; tab: WorkspaceTab }[]
 )
 
 /** A page's shortcut as an Electron accelerator (`CmdOrCtrl+7`, `CmdOrCtrl+Shift+G`), if it has one. */
-export function pageShortcutFor(tab: WorkspaceTab): string | undefined {
-  const key = pageKeyFor(tab)
+export function pageShortcutFor(tab: WorkspaceTab, guestsShown = true): string | undefined {
+  const key = pageKeyFor(tab, guestsShown)
   return key ? pageKeyAccelerator(key) : undefined
 }
 

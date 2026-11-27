@@ -1,3 +1,5 @@
+import { useStudioCloud } from '@/hooks/use-studio'
+import { guestsVisible } from '@/lib/livestream-tabs'
 import { useCallback, useRef, useState, type KeyboardEvent, type ReactElement } from 'react'
 
 import type { AcceleratorKeyInput, AcceleratorModifier } from '../../../shared/accelerator'
@@ -93,6 +95,8 @@ function ShortcutRecorderControl({
   onArmedChange: (armed: boolean) => void
   onMessageChange: (message: string | null) => void
 }): ReactElement {
+  const guestsShown = useRef(false)
+  guestsShown.current = guestsVisible(useStudioCloud().cloudStatus)
   const [held, setHeld] = useState<AcceleratorModifier[]>([])
   // Registered with the row's Field: its label points here, and its
   // description (none today) would describe the field.
@@ -111,7 +115,7 @@ function ShortcutRecorderControl({
   }, [setArmed])
 
   const handleKey = (input: AcceleratorKeyInput): void => {
-    const step = shortcutRecorderStep(input, platform, validate)
+    const step = shortcutRecorderStep(input, platform, validate, guestsShown.current)
     switch (step.type) {
       case 'held':
         setHeld(step.modifiers)

@@ -6,7 +6,12 @@
 // live in shared/sidebar-pages, and the Navigation rows are built from it. Plan 174 S1.2: bindings are Electron
 // accelerators, printed per platform by ShortcutKeys.
 
-import { PAGE_KEYS, SIDEBAR_PAGE_LABELS, pageKeyAccelerator } from '../../../shared/sidebar-pages'
+import {
+  PAGE_KEYS,
+  pageKeys,
+  SIDEBAR_PAGE_LABELS,
+  pageKeyAccelerator
+} from '../../../shared/sidebar-pages'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 import { RECORD_SHORTCUT_LABEL } from './go-live-copy'
 
@@ -202,9 +207,21 @@ export function shortcutAccelerator(id: ShortcutId): string {
   return SHORTCUT_LIST.find((entry) => entry.id === id)!.accelerators[0]
 }
 
-export function shortcutsByGroup(): Map<ShortcutEntry['group'], ShortcutEntry[]> {
+export function shortcutsFor(guestsShown: boolean): readonly ShortcutEntry[] {
+  return [
+    ...pageKeys(guestsShown).map(({ key, page }) => ({
+      id: `nav-${page}`,
+      accelerators: [pageKeyAccelerator(key)] as const,
+      label: SIDEBAR_PAGE_LABELS[page],
+      group: 'Navigation' as const
+    })),
+    ...SHORTCUTS.filter((entry) => !entry.id.startsWith('nav-'))
+  ]
+}
+
+export function shortcutsByGroup(guestsShown = true): Map<ShortcutEntry['group'], ShortcutEntry[]> {
   const groups = new Map<ShortcutEntry['group'], ShortcutEntry[]>()
-  for (const entry of SHORTCUTS) {
+  for (const entry of shortcutsFor(guestsShown)) {
     const bucket = groups.get(entry.group) ?? []
     bucket.push(entry)
     groups.set(entry.group, bucket)
@@ -213,6 +230,7 @@ export function shortcutsByGroup(): Map<ShortcutEntry['group'], ShortcutEntry[]>
 }
 
 /** A workspace page's shortcut, by the "nav-<tab>" convention, or undefined. */
-export function navShortcutAccelerator(tab: string): string | undefined {
-  return SHORTCUTS.find((candidate) => candidate.id === `nav-${tab}`)?.accelerators[0]
+export function navShortcutAccelerator(tab: string, guestsShown = true): string | undefined {
+  return shortcutsFor(guestsShown).find((candidate) => candidate.id === `nav-${tab}`)
+    ?.accelerators[0]
 }

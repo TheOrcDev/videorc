@@ -1,3 +1,7 @@
+> Current page keys (Q187): number visible sidebar rows. With Guests hidden,
+> Avatar is ⌘7 and Sidekick ⌘8; with Guests shown, Guests is ⌘7, Avatar ⌘8
+> and Sidekick ⌘9. The historical layouts below are superseded by this rule.
+
 # UX / IA Refactor Plan
 
 Owner ask (2026-06-13): rethink every page, where it lives, and how users

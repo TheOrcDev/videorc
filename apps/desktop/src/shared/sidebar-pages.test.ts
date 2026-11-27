@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  guestsVisible,
+  pageKeys,
   PAGE_FIXED_KEYS,
   PAGE_KEYS,
   SIDEBAR_LAYOUT,
@@ -115,5 +117,46 @@ describe('the page keys', () => {
       'L library',
       ', settings'
     ])
+  })
+})
+
+describe('visible page numbering (Q187)', () => {
+  it('renumbers on each availability transition and keeps fixed keys', () => {
+    for (const shown of [false, true, false]) {
+      const keys = pageKeys(shown)
+      expect(keys.filter(({ key }) => /^[7-9]$/.test(key))).toEqual(
+        shown
+          ? [
+              { key: '7', page: 'guests' },
+              { key: '8', page: 'avatar' },
+              { key: '9', page: 'ai' }
+            ]
+          : [
+              { key: '7', page: 'avatar' },
+              { key: '8', page: 'ai' }
+            ]
+      )
+      for (const [page, key] of Object.entries(PAGE_FIXED_KEYS)) {
+        expect(pageKeyFor(page, shown)).toBe(key)
+      }
+      expect(pageKeyFor('guests', shown)).toBe(shown ? '7' : undefined)
+      expect(pageKeyForInput({ key: '9', shift: false, alt: false }, shown)).toBe(
+        shown ? '9' : null
+      )
+      expect(new Set(keys.map(({ key }) => key)).size).toBe(keys.length)
+    }
+  })
+
+  it('fails closed before allowance arrives, while preserving control of an open room', () => {
+    for (const status of [
+      null,
+      {},
+      { allowance: { enabled: false, talkShows: true } },
+      { room: { phase: 'closed' } }
+    ]) {
+      expect(guestsVisible(status)).toBe(false)
+    }
+    expect(guestsVisible({ allowance: { enabled: true, talkShows: true } })).toBe(true)
+    expect(guestsVisible({ room: { phase: 'open' } })).toBe(true)
   })
 })

@@ -257,3 +257,21 @@ describe('installAppMenu', () => {
     expect(electron.setApplicationMenu).toHaveBeenCalledWith(null)
   })
 })
+
+it('reinstalls the visible page names, accelerators and actions as availability changes', () => {
+  for (const guestsShown of [false, true, false]) {
+    installAppMenu(options({ guestsShown }))
+    const template = electron.buildFromTemplate.mock.lastCall![0] as MenuItemConstructorOptions[]
+    const pages = submenu(topLevel(template, 'View'))
+    expect(pages.some((item) => item.label === 'Guests')).toBe(guestsShown)
+    for (const [label, key] of [
+      ['Avatar', guestsShown ? '8' : '7'],
+      ['Sidekick', guestsShown ? '9' : '8']
+    ]) {
+      const item = pages.find((item) => item.label === label)
+      expect(item?.accelerator).toBe(`CmdOrCtrl+${key}`)
+      click(item)
+      expect(actions.showPage).toHaveBeenLastCalledWith(key)
+    }
+  }
+})
