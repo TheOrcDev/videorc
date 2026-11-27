@@ -296,7 +296,7 @@ impl ScenePage {
                     .child(
                         Button::new("scene-stage-open-sources")
                             .label(list_copy::OPEN_SOURCES)
-                            .variant(ButtonVariant::Link)
+                            .variant(ButtonVariant::Outline)
                             .size(ButtonSize::Xs)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.navigate(SceneNavigate::Page(PageId::Sources), cx)
@@ -330,7 +330,7 @@ impl ScenePage {
                         line.child(
                             Button::new("scene-stage-layout-only-action")
                                 .label(note.action_label)
-                                .variant(ButtonVariant::Link)
+                                .variant(ButtonVariant::Outline)
                                 .size(ButtonSize::Xs)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.preview.update(cx, |preview, cx| {

@@ -155,7 +155,7 @@ impl ScenePage {
                     .child(
                         Button::new("scene-gallery-open-sources")
                             .label(copy::OPEN_SOURCES)
-                            .variant(ButtonVariant::Ghost)
+                            .variant(ButtonVariant::Outline)
                             .size(ButtonSize::Xs)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.navigate(SceneNavigate::Page(PageId::Sources), cx)
