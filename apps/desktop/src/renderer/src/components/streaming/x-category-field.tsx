@@ -71,7 +71,7 @@ export function XCategoryField({
             <>
               {' '}
               <Button
-                className="align-baseline"
+                className="align-baseline text-foreground"
                 disabled={disabled}
                 size="xs"
                 type="button"

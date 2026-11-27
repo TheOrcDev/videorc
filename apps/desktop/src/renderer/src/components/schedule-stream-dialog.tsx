@@ -451,6 +451,7 @@ export function ScheduleStreamDialog({
                   <FieldDescription>
                     {`Sign in to ${providerLabel} in Destinations → Setup first.`}{' '}
                     <Button
+                      className="text-foreground"
                       size="xs"
                       variant="outline"
                       onClick={() => {

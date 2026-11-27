@@ -321,7 +321,7 @@ export function ReadyToGoLive({
         <div className="-mt-1 flex flex-col gap-1 pl-6" data-slot="destinations-not-ready">
           {notReady.map(({ target, hint }) => (
             <Button
-              className="max-w-full justify-start self-start"
+              className="max-w-full justify-start self-start text-foreground"
               key={target.id}
               size="xs"
               variant="outline"
