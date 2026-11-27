@@ -101,7 +101,7 @@ export function WatchdogAlertCard({
               data-testid="watchdog-alert-fix"
               size="xs"
               type="button"
-              variant="ghost"
+              variant="outline"
               onClick={() => onFix(alert, fix)}
             >
               {fix.label}
@@ -112,7 +112,7 @@ export function WatchdogAlertCard({
               data-testid="watchdog-alert-quiet"
               size="xs"
               type="button"
-              variant="ghost"
+              variant="outline"
               onClick={() => onSnooze(alert, 'stream')}
             >
               {quiet}
@@ -123,7 +123,7 @@ export function WatchdogAlertCard({
               disabled={acknowledged}
               size="xs"
               type="button"
-              variant="ghost"
+              variant="outline"
               onClick={() => onAcknowledge(alert)}
             >
               {acknowledged ? 'Seen' : quiet}

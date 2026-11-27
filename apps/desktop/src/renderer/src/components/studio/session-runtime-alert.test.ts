@@ -30,6 +30,10 @@ describe('SessionRuntimeAlert', () => {
     expect(markup).toContain('Open Library')
     expect(markup).toContain(revealInFileManagerLabel())
     expect(markup).toContain('Dismiss')
+    // An app's actions are buttons, not text beside the words (owner, 11-27).
+    expect(markup).toMatch(/<button[^>]*data-variant="outline"[^>]*>Open Library</)
+    expect(markup).toMatch(/<button[^>]*data-variant="outline"[^>]*>Dismiss</)
+    expect(markup).not.toContain('data-variant="ghost"')
   })
 
   it('renders microphone loss as degraded without recovery-file actions', () => {

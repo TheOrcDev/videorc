@@ -80,7 +80,7 @@ export function CloudResumeNotice({
               disabled={pending}
               size="xs"
               type="button"
-              variant="ghost"
+              variant="outline"
               onClick={() => setConfirming(true)}
             >
               {END_LIVESTREAM_LABEL}

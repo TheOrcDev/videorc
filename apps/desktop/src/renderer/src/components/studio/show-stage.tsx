@@ -1413,7 +1413,7 @@ function JoinRequests({
           className="self-start"
           size="xs"
           type="button"
-          variant="ghost"
+          variant="outline"
           onClick={() => openWorkspaceTab('guests')}
         >
           {more === 1 ? '1 more wants to join' : `${more} more want to join`}
@@ -1487,7 +1487,7 @@ function StagePeople({
             <Button
               size="xs"
               type="button"
-              variant="ghost"
+              variant="outline"
               onClick={() => openWorkspaceTab('guests')}
             >
               <LinkIcon data-icon="inline-start" />

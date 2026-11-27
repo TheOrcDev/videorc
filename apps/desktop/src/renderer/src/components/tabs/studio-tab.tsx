@@ -420,7 +420,7 @@ function StudioPreviewPanel(): ReactElement {
         <AlertDescription className="min-w-0">
           <p className="line-clamp-3">{previewHealth.detail}</p>
           <div className="flex flex-wrap gap-1 pt-2">
-            <Button size="xs" type="button" variant="ghost" onClick={refreshPreview}>
+            <Button size="xs" type="button" variant="outline" onClick={refreshPreview}>
               Retry preview
             </Button>
           </div>
