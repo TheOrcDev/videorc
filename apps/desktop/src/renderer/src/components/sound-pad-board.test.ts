@@ -7,7 +7,7 @@ import { SoundPadBoard, type SoundPadBoardSound } from './sound-pad-board'
 
 // Plan 189: the pad applies its mode and the board sends play or stop. Play
 // once and While held start on the press; While held stops on the release;
-// a playing Play/stop or Loop pad stops.
+// a second press of a playing pad stops that sound (owner, 2026-11-27).
 
 let root: Root
 let container: HTMLDivElement
@@ -64,7 +64,7 @@ const pointer = (target: Element, type: 'pointerdown' | 'pointerup'): void => {
 }
 
 describe('the sound pads (plan 189)', () => {
-  it('sends play on a press and stop on a playing toggle, loop or a held release', async () => {
+  it('sends play on a press and stop on a playing pad or a held release', async () => {
     const onPlay = vi.fn()
     const onStop = vi.fn()
     await render([], { onPlay, onStop })
@@ -83,11 +83,30 @@ describe('the sound pads (plan 189)', () => {
     await act(async () => {
       pointer(pad('applause'), 'pointerdown')
       pointer(pad('crickets'), 'pointerdown')
-      // Play once restarts (D7): the backend fades the old voice out.
+      // A playing Play once pad stops too: a second press never restarts it.
       pointer(pad('airhorn'), 'pointerdown')
     })
-    expect(onStop.mock.calls).toEqual([['applause'], ['crickets']])
-    expect(onPlay.mock.calls).toEqual([['airhorn']])
+    expect(onStop.mock.calls).toEqual([['applause'], ['crickets'], ['airhorn']])
+    expect(onPlay).not.toHaveBeenCalled()
+  })
+
+  it('names what a press does: Stop for a playing pad, Play for a While held one', async () => {
+    await render(['airhorn', 'applause', 'drumroll'], { onPlay: vi.fn(), onStop: vi.fn() })
+    expect(pad('airhorn').getAttribute('aria-label')).toBe('Stop Airhorn')
+    expect(pad('applause').getAttribute('aria-label')).toBe('Stop Applause')
+    expect(pad('drumroll').getAttribute('aria-label')).toBe('Play Drumroll')
+    expect(pad('crickets').getAttribute('aria-label')).toBe('Play Crickets')
+  })
+
+  it('keeps While held on its press and release while it plays', async () => {
+    const onPlay = vi.fn()
+    const onStop = vi.fn()
+    await render(['drumroll'], { onPlay, onStop })
+    await act(async () => pointer(pad('drumroll'), 'pointerdown'))
+    expect(onPlay.mock.calls).toEqual([['drumroll']])
+    expect(onStop).not.toHaveBeenCalled()
+    await act(async () => pointer(pad('drumroll'), 'pointerup'))
+    expect(onStop.mock.calls).toEqual([['drumroll']])
   })
 
   it('draws progress only for a sound with an end, and the key only where it works', async () => {
