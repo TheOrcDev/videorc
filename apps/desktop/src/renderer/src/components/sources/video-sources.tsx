@@ -150,7 +150,7 @@ export function VideoSourcesView({
               <span className="min-w-0">{screenSceneLine(screen.scene)}</span>
               {screen.onOpenScenes ? (
                 <Button
-                  className="shrink-0"
+                  className="shrink-0 text-foreground"
                   size="xs"
                   variant="outline"
                   onClick={screen.onOpenScenes}

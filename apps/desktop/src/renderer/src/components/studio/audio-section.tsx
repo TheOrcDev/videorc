@@ -464,11 +464,11 @@ function SystemAudioRow({
   // Real buttons under the words: an app's actions are never text links.
   const issueAction =
     needsPermission || (view.issue === 'unavailable' && platform === 'darwin') ? (
-      <Button size="xs" variant="outline" onClick={onOpenPermissions}>
+      <Button className="text-foreground" size="xs" variant="outline" onClick={onOpenPermissions}>
         Open Permissions
       </Button>
     ) : view.issue === 'echo' ? (
-      <Button size="xs" variant="outline" onClick={onResume}>
+      <Button className="text-foreground" size="xs" variant="outline" onClick={onResume}>
         Resume
       </Button>
     ) : null

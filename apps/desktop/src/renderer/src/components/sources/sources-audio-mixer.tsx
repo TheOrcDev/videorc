@@ -754,11 +754,11 @@ export function SystemAudioSettings({
       ? systemAudioIssueCopy(view.issue, platform ?? (macOS ? 'darwin' : undefined))
       : null
   const issueAction = view.permissionRequired ? null : view.issue === 'unavailable' && macOS ? (
-    <Button size="xs" variant="outline" onClick={onOpenPermissions}>
+    <Button className="text-foreground" size="xs" variant="outline" onClick={onOpenPermissions}>
       Open Permissions
     </Button>
   ) : view.issue === 'echo' ? (
-    <Button size="xs" variant="outline" onClick={onResume}>
+    <Button className="text-foreground" size="xs" variant="outline" onClick={onResume}>
       Resume
     </Button>
   ) : null
