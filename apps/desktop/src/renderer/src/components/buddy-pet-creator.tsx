@@ -1054,7 +1054,7 @@ function NotesStep({
           disabled={disabled}
           size="xs"
           type="button"
-          variant="ghost"
+          variant="outline"
           onClick={onOtherPicture}
         >
           Use another picture

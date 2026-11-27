@@ -110,7 +110,7 @@ export function BuddyPersonaSection(): ReactElement | null {
           className="mt-0.5"
           size="xs"
           type="button"
-          variant="ghost"
+          variant="outline"
           onClick={() => setStartOverOpen(true)}
         >
           <ResetIcon data-icon="inline-start" />

@@ -655,7 +655,7 @@ function LineEditor({
           <Button
             size="xs"
             type="button"
-            variant="ghost"
+            variant="outline"
             onClick={() => {
               commit()
               onAddVariant()

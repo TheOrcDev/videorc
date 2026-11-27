@@ -525,7 +525,7 @@ function AlivePanel({
               data-testid="buddy-pack-remove"
               disabled={!wornPack || isBuddyShippedPack(wornPack.packId)}
               type="button"
-              variant="ghost"
+              variant="outline"
               onClick={() => {
                 if (wornPack) onRemove(wornPack)
               }}

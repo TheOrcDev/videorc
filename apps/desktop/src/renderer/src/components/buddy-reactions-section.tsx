@@ -134,7 +134,7 @@ export function BuddyReactionsSection({
                   disabled={!onTry || outcome.kind === 'none'}
                   size="xs"
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   onClick={() => {
                     if (outcome.kind !== 'none') onTry?.(outcome.id)
                   }}

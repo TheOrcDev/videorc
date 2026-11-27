@@ -523,7 +523,7 @@ export function CohostPane({
               disabled={actionPending}
               size="xs"
               type="button"
-              variant="ghost"
+              variant="outline"
               onClick={onRecapDraft}
             >
               Draft a recap
@@ -984,7 +984,7 @@ function AnsweredOnAir({
         disabled={disabled}
         size="xs"
         type="button"
-        variant="ghost"
+        variant="outline"
         onClick={() => onRestore(item.question)}
       >
         Restore
@@ -1066,7 +1066,7 @@ function CohostPromises({
               disabled={disabled || !onDone}
               size="xs"
               type="button"
-              variant="ghost"
+              variant="outline"
               onClick={() => onDone?.(promise)}
             >
               Done
@@ -1076,7 +1076,7 @@ function CohostPromises({
               disabled={disabled || !onDismiss}
               size="xs"
               type="button"
-              variant="ghost"
+              variant="outline"
               onClick={() => onDismiss?.(promise)}
             >
               Dismiss
@@ -1139,7 +1139,7 @@ function CohostSayHiList({
               disabled={disabled || !onGreeted}
               size="xs"
               type="button"
-              variant="ghost"
+              variant="outline"
               onClick={() => onGreeted?.(entry)}
             >
               Greeted
@@ -1255,7 +1255,7 @@ function CohostRecapCard({
             disabled={disabled || !onDismiss}
             size="xs"
             type="button"
-            variant="ghost"
+            variant="outline"
             onClick={onDismiss}
           >
             Dismiss

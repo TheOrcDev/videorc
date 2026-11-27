@@ -113,7 +113,7 @@ export function BuddyReportCard({
               <Button
                 data-testid="buddy-report-markers"
                 type="button"
-                variant="ghost"
+                variant="outline"
                 onClick={() => setMarkersOpen(true)}
               >
                 <MarkerIcon data-icon="inline-start" />

@@ -263,7 +263,7 @@ function LinksThatNeedYou({ community }: { community: CommunityClientState }): R
                   disabled={busy !== null}
                   size="xs"
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   onClick={() => answer(suggestion, false)}
                 >
                   Not the same

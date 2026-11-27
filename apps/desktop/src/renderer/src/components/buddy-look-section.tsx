@@ -197,7 +197,7 @@ export function BuddyLookSection({
                     data-testid="buddy-look-discard"
                     disabled={!controller || busy}
                     type="button"
-                    variant="ghost"
+                    variant="outline"
                     onClick={() => setDeleteOpen(true)}
                   >
                     <DeleteIcon data-icon="inline-start" />

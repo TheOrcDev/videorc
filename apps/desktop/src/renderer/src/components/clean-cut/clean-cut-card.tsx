@@ -379,7 +379,7 @@ export function CleanCutCard({
                     <AlertDescription className="text-xs">{status.detail}</AlertDescription>
                     <AlertAction className="flex items-center gap-1.5">
                       {status.canReview ? (
-                        <Button size="xs" type="button" variant="ghost" onClick={() => review(job)}>
+                        <Button size="xs" type="button" variant="outline" onClick={() => review(job)}>
                           Review
                         </Button>
                       ) : null}
@@ -609,7 +609,7 @@ function StatusActions({
     return (
       <>
         {status.canReview ? (
-          <Button type="button" variant="ghost" onClick={() => onReview(job)}>
+          <Button type="button" variant="outline" onClick={() => onReview(job)}>
             Review
           </Button>
         ) : null}
@@ -637,7 +637,7 @@ function StatusActions({
             <FolderIcon data-icon="inline-start" />
             {revealInFileManagerLabel()}
           </Button>
-          <Button type="button" variant="ghost" onClick={() => onOpenLibrary(output)}>
+          <Button type="button" variant="outline" onClick={() => onOpenLibrary(output)}>
             <LibraryIcon data-icon="inline-start" />
             Open in Library
           </Button>

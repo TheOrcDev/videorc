@@ -487,7 +487,7 @@ export function BuddyOnboarding({
                   data-testid="buddy-onboarding-discard"
                   disabled={!lookController || lookBusy}
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   onClick={() => setDeleteOpen(true)}
                 >
                   <DeleteIcon data-icon="inline-start" />
