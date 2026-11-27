@@ -344,3 +344,6 @@ and bindings together as talk-show availability changes, including an open
 room keeping Guests visible. On Windows and Linux, use Ctrl in place of ⌘.
 Images ⇧⌘G, Sounds ⇧⌘S, Library ⌘0 and Settings ⌘, remain fixed.
 Remote and Stream Deck actions address stable IDs, not sidebar positions.
+
+The temporarily unused ninth page key stays reserved for page navigation,
+so a saved global binding cannot take it when Guests becomes visible.

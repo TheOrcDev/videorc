@@ -119,6 +119,14 @@ export function shortcutRecorderStep(
           message: `${acceleratorInlineLabel(result.accelerator, platform)} is Videorc's shortcut for “${owner.label}”. Pick another.`
         }
       }
+      // Reserve the full page-key vocabulary: a global key saved while
+      // Guests is hidden must not steal Sidekick's key when it reappears.
+      if (appShortcutOwner(result.accelerator, platform, true)) {
+        return {
+          type: 'reject',
+          message: `${acceleratorInlineLabel(result.accelerator, platform)} is reserved for page navigation. Pick another.`
+        }
+      }
       const refusal = validate(result.accelerator)
       return refusal
         ? { type: 'reject', message: refusal }

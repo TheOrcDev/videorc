@@ -209,3 +209,24 @@ it('names the current page when refusing a reserved navigation key', () => {
     )
   }
 })
+
+it('keeps the unused ninth page key reserved across availability changes', () => {
+  for (const platform of ['darwin', 'win32']) {
+    const input = {
+      type: 'keyDown' as const,
+      code: 'Digit9',
+      meta: platform === 'darwin',
+      control: platform !== 'darwin',
+      shift: false,
+      alt: false
+    }
+    expect(shortcutRecorderStep(input, platform, () => null, false)).toMatchObject({
+      type: 'reject',
+      message: expect.stringContaining('reserved for page navigation')
+    })
+    expect(shortcutRecorderStep(input, platform, () => null, true)).toMatchObject({
+      type: 'reject',
+      message: expect.stringContaining('Sidekick')
+    })
+  }
+})
