@@ -17,13 +17,19 @@ use videorc_kit::badge::{Badge, BadgeVariant};
 pub enum Picture {
     Loading,
     Ready(Arc<Image>),
+    /// Decoded route data used by Stream Manager and its paint evidence.
+    Decoded {
+        image: Arc<gpui::RenderImage>,
+        route: String,
+    },
     Failed,
 }
 
 impl Picture {
-    pub fn ready(&self) -> Option<Arc<Image>> {
+    pub fn ready(&self) -> Option<ImageSource> {
         match self {
-            Self::Ready(image) => Some(image.clone()),
+            Self::Ready(image) => Some(image.clone().into()),
+            Self::Decoded { image, .. } => Some(image.clone().into()),
             Self::Loading | Self::Failed => None,
         }
     }
@@ -45,6 +51,18 @@ pub fn picture_from_bytes(bytes: Vec<u8>) -> Picture {
     }
 }
 
+/// Decode with GPUI's own decoder off the UI thread. Retain the authenticated
+/// local route that supplied these exact bytes, never the remote CDN URL.
+pub fn decoded_picture(bytes: Vec<u8>, route: String, renderer: gpui::SvgRenderer) -> Picture {
+    let Picture::Ready(image) = picture_from_bytes(bytes) else {
+        return Picture::Failed;
+    };
+    match image.to_image_data(renderer) {
+        Ok(image) if image.frame_count() > 0 => Picture::Decoded { image, route },
+        _ => Picture::Failed,
+    }
+}
+
 /// Which `chatImages.cache` kind to ask for.
 pub fn cache_kind_for_url(url: &str, as_gif: bool) -> &'static str {
     if as_gif {
@@ -63,6 +81,19 @@ pub fn message_body(
     text_px: f32,
     // Studio compact = 64 px GIF slot; Stream Manager comfortable = 96 px.
     gif_height_px: f32,
+) -> AnyElement {
+    message_body_observed(pieces, gifs, pictures, text_px, gif_height_px, None)
+}
+
+pub type ImageObserver<'a> = dyn Fn(&str, &'static str, AnyElement) -> AnyElement + 'a;
+
+pub fn message_body_observed(
+    pieces: &[Piece],
+    gifs: &[Gif],
+    pictures: &HashMap<String, Picture>,
+    text_px: f32,
+    gif_height_px: f32,
+    observer: Option<&ImageObserver<'_>>,
 ) -> AnyElement {
     let mut line = div()
         .flex()
@@ -93,7 +124,9 @@ pub fn message_body(
                 url,
                 overlays,
             } => {
-                line = line.child(emote_stack(text, url, overlays, pictures, text_px));
+                line = line.child(emote_stack(
+                    text, url, overlays, pictures, text_px, observer,
+                ));
             }
         }
     }
@@ -104,7 +137,8 @@ pub fn message_body(
         .min_w(px(0.))
         .child(line);
     for gif in gifs {
-        col = col.child(gif_block(gif, pictures, gif_height_px));
+        let element = gif_block(gif, pictures, gif_height_px);
+        col = col.child(observe(observer, &gif.url, "comment-gif-image", element));
     }
     col.into_any_element()
 }
@@ -115,8 +149,14 @@ fn emote_stack(
     overlays: &[(String, String)],
     pictures: &HashMap<String, Picture>,
     height_px: f32,
+    observer: Option<&ImageObserver<'_>>,
 ) -> AnyElement {
-    let base = emote_img(text, url, pictures, height_px);
+    let base = observe(
+        observer,
+        url,
+        "comment-emote",
+        emote_img(text, url, pictures, height_px),
+    );
     if overlays.is_empty() {
         return base;
     }
@@ -124,13 +164,17 @@ fn emote_stack(
     for (_name, overlay_url) in overlays {
         if let Some(image) = pictures.get(overlay_url).and_then(Picture::ready) {
             stack = stack.child(
-                div().absolute().inset_0().child(
+                div().absolute().inset_0().child(observe(
+                    observer,
+                    overlay_url,
+                    "comment-emote",
                     img(ImageSource::from(image))
                         .h(px(height_px))
                         .w_auto()
                         .max_w(px(96.))
-                        .object_fit(ObjectFit::Contain),
-                ),
+                        .object_fit(ObjectFit::Contain)
+                        .into_any_element(),
+                )),
             );
         }
     }
@@ -201,4 +245,16 @@ pub fn media_urls(pieces: &[Piece], gifs: &[Gif]) -> Vec<(String, bool)> {
         urls.push((gif.url.clone(), true));
     }
     urls
+}
+
+fn observe(
+    observer: Option<&ImageObserver<'_>>,
+    url: &str,
+    slot: &'static str,
+    element: AnyElement,
+) -> AnyElement {
+    match observer {
+        Some(observe) => observe(url, slot, element),
+        None => element,
+    }
 }

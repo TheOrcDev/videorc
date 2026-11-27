@@ -46,7 +46,7 @@ pub type OnRemove = Rc<dyn Fn(&str, &mut Window, &mut App)>;
     clippy::too_many_arguments,
     reason = "Explicit screen assembly inputs keep independent view state and callbacks visible"
 )]
-pub fn chat_row(
+pub(super) fn chat_row(
     message: &Arc<LiveChatMessage>,
     highlight: RowHighlight,
     live: bool,
@@ -55,6 +55,7 @@ pub fn chat_row(
     operation: Option<&ModerationOperation>,
     requesting: bool,
     pictures: &HashMap<String, Picture>,
+    painted_images: &super::image_proof::PaintedImages,
     on_highlight: OnHighlight,
     on_remove: OnRemove,
 ) -> AnyElement {
@@ -117,7 +118,7 @@ pub fn chat_row(
     let has_person =
         !author.is_empty() && message.event_type != "system" && message.event_type != "moderation";
 
-    let body = row_body(&view, &message.platform, live, pictures);
+    let body = row_body(&view, &message.platform, live, pictures, painted_images);
     let chips = view.row.chips.iter().map(|(label, chip)| {
         Badge::new(*label).variant(match chip {
             StatusChip::Neutral => BadgeVariant::Default,
@@ -193,7 +194,11 @@ fn row_body(
     platform: &str,
     live: bool,
     pictures: &HashMap<String, Picture>,
+    painted_images: &super::image_proof::PaintedImages,
 ) -> AnyElement {
+    let observe = |url: &str, slot, element| {
+        painted_images.observe(&view.row.id, slot, pictures.get(url), element)
+    };
     // While live the time waits for the pointer, like the row's ⋯ (plan 057,
     // D3): a clock on every row is noise mid-stream.
     let group = SharedString::from(format!("chat-row-{}", view.row.id));
@@ -206,6 +211,28 @@ fn row_body(
         Some(image) => Avatar::new(view.row.initials.clone()).lg().image(image),
         None => Avatar::new(view.row.initials.clone()).lg(),
     };
+    let avatar = match view.row.avatar_url.as_deref() {
+        Some(url) => observe(url, "avatar-image", avatar.into_any_element()),
+        None => avatar.into_any_element(),
+    };
+    let affiliation = view.affiliation.as_ref().and_then(|(url, label)| {
+        let image = pictures.get(url)?.ready()?;
+        Some(observe(
+            url,
+            "comment-affiliation",
+            gpui::img(image)
+                .id(SharedString::from(format!(
+                    "chat-affiliation-{}",
+                    view.row.id
+                )))
+                .size(px(16.))
+                .flex_none()
+                .rounded(px(radius::CHIP))
+                .object_fit(gpui::ObjectFit::Cover)
+                .aria_label(label.clone())
+                .into_any_element(),
+        ))
+    });
     let name_line = div()
         .w_full()
         .min_w(px(0.))
@@ -234,6 +261,7 @@ fn row_body(
                 },
             )
         }))
+        .children(affiliation)
         .children(
             view.roles
                 .iter()
@@ -285,12 +313,13 @@ fn row_body(
                     col.child(div().text_size(px(15.)).italic().child(notice))
                 })
                 // P198: emotes and GIFs as pictures (Electron CommentMessageBody).
-                .child(chat_media::message_body(
+                .child(chat_media::message_body_observed(
                     &view.pieces,
                     &view.gifs,
                     pictures,
                     15.,
                     96.,
+                    Some(&observe),
                 )),
         )
         .into_any_element()

@@ -301,6 +301,28 @@ fn event_chip(message: &LiveChatMessage) -> Option<EventChip> {
 }
 
 impl ManagerRow {
+    /// Every image drawn by this row. The bool selects the GIF cache;
+    /// avatars, affiliation badges and emotes use the avatar allowlist.
+    pub fn image_requests(&self) -> Vec<(String, bool)> {
+        let mut urls = Vec::new();
+        if let Some(url) = &self.row.avatar_url {
+            urls.push((url.clone(), false));
+        }
+        if let Some((url, _)) = &self.affiliation {
+            urls.push((url.clone(), false));
+        }
+        for piece in &self.pieces {
+            if let Piece::Emote { url, overlays, .. } = piece {
+                urls.push((url.clone(), false));
+                urls.extend(overlays.iter().map(|(_, url)| (url.clone(), false)));
+            }
+        }
+        urls.extend(self.gifs.iter().map(|gif| (gif.url.clone(), true)));
+        urls.sort();
+        urls.dedup();
+        urls
+    }
+
     pub fn new(
         message: &LiveChatMessage,
         highlight: highlight::RowHighlight,
@@ -435,6 +457,32 @@ mod tests {
             event_type: "message".into(),
             ..LiveChatMessage::default()
         }
+    }
+
+    #[test]
+    fn a_text_only_row_still_loads_its_avatar_and_affiliation_badge() {
+        use crate::chat::model::LiveChatAuthorAffiliation;
+        let mut message = message();
+        message.author_avatar_url = Some("https://pbs.twimg.com/avatar.png".into());
+        message.author_affiliation = Some(LiveChatAuthorAffiliation {
+            badge_url: "https://pbs.twimg.com/badge.png".into(),
+            ..LiveChatAuthorAffiliation::default()
+        });
+        let row = ManagerRow::new(&message, RowHighlight::default(), true, &[]);
+        assert_eq!(
+            row.image_requests(),
+            vec![
+                ("https://pbs.twimg.com/avatar.png".into(), false),
+                ("https://pbs.twimg.com/badge.png".into(), false),
+            ]
+        );
+        message.author_avatar_url = None;
+        message.author_affiliation = None;
+        assert!(
+            ManagerRow::new(&message, RowHighlight::default(), true, &[])
+                .image_requests()
+                .is_empty()
+        );
     }
 
     // `chat-emotes.test.ts`.
