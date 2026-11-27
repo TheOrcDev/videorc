@@ -12,13 +12,16 @@ import { DisabledReason } from '@/components/ui/disabled-reason'
 import type { SoundHotkey, SoundMode } from '@/lib/backend'
 import { createVoiceProgressSource } from '@/lib/sound-progress'
 import { soundPadLabel } from '@/lib/sounds'
-import { pressStops } from '../../../shared/sound-commands'
+import { padPressStops } from '../../../shared/sound-commands'
 
 // Plan 189: the soundboard's pads, one grid for Studio's Soundboard and the
 // Stream Manager's Sounds popover. audiocn's pad only reports presses: it
-// applies its mode (Play once restarts, Play/stop and Loop stop a playing
-// sound, While held stops on release) and calls `onPlay` or `onStop`, which
-// the page sends to the backend. `playing` and the progress come from
+// applies its mode (Play/stop and Loop stop a playing sound, While held stops
+// on release) and the board calls `onPlay` or `onStop`, which the page sends
+// to the backend. A second press of a playing pad stops that sound in every
+// mode but While held (`padPressStops`): audiocn's Play once would restart
+// it, so the board turns that press into a stop. `playing` and the progress
+// come from
 // `sounds.playback`. The grid's own hotkeys stay off: Studio listens for the
 // keys once, for the whole page (soundboard-section.tsx).
 
@@ -93,6 +96,7 @@ function BoardPad({
   onStop: (id: string) => void
 }): ReactElement {
   const playing = voice !== undefined
+  const stops = padPressStops(sound.mode, playing)
   const startedAtMs = voice?.startedAtMs
   const durationMs = voice?.durationMs
   // A loop shows no progress: it has no end.
@@ -109,7 +113,7 @@ function BoardPad({
     // the section's line, and this wrapper's tooltip on hover.
     <DisabledReason className="grid" reason={disabledReason} tabIndex={-1}>
       <SoundPad
-        aria-label={soundPadLabel(sound.name, pressStops(sound.mode, playing))}
+        aria-label={soundPadLabel(sound.name, stops)}
         className="rounded-row"
         data-videorc-sound-pad={sound.id}
         disabled={disabledReason !== null}
@@ -118,7 +122,7 @@ function BoardPad({
         playing={playing}
         size="sm"
         onStop={() => onStop(sound.id)}
-        onTrigger={() => onPlay(sound.id)}
+        onTrigger={() => (stops ? onStop(sound.id) : onPlay(sound.id))}
       >
         <SoundPadLabel>{sound.name}</SoundPadLabel>
         {sound.hotkey ? <SoundPadShortcut /> : null}

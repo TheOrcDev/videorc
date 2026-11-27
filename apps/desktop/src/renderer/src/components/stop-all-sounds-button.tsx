@@ -40,7 +40,7 @@ export function StopAllSoundsButton({
         <Button
           disabled={!playing || disabledReason !== null}
           size={size}
-          variant="ghost"
+          variant="outline"
           onClick={onStopAll}
         >
           {/* Filled, like Stop recording: the outline square read as a checkbox. */}
