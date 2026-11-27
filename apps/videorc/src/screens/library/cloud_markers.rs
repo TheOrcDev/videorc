@@ -218,7 +218,7 @@ impl LibraryScreen {
             div().child(
                 Button::new("cloud-markers-refresh")
                     .label(REFRESH)
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .on_click(cx.listener(|this, _, _, cx| this.read_markers(cx))),
             ),
@@ -263,7 +263,7 @@ impl LibraryScreen {
                             row.id
                         )))
                         .label(REMOVE)
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Xs)
                         .disabled(state.pending)
                         .on_click(move |_, _, cx| {

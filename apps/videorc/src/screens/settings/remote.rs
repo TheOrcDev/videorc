@@ -276,10 +276,10 @@ impl SettingsScreen {
                 phones = phones.item(div()
                         .child(ListRow::new(("phone", index), name.clone())
                             .child(Button::new(("rename-phone", index)).label("Rename…")
-                                .variant(ButtonVariant::Ghost).disabled(self.disabled())
+                                .variant(ButtonVariant::Outline).disabled(self.disabled())
                                 .on_click(cx.listener(move |this, _, window, cx| this.rename_phone(edit.clone(), window, cx))))
                             .child(Button::new(("remove-phone", index)).label("Remove…")
-                                .variant(ButtonVariant::Ghost).disabled(self.disabled())
+                                .variant(ButtonVariant::Outline).disabled(self.disabled())
                                 .on_click(cx.listener(move |this, _, window, cx| this.ask(Confirmation {
                                     title: format!("Remove {name}?"), description: "It's disconnected now and needs a new pairing to come back. Your Stream Deck isn't affected.".into(),
                                     label: "Remove phone", method: "remote.lan.devices.revoke", params: json!({"id":id})
@@ -360,7 +360,7 @@ impl SettingsScreen {
                             ListRow::new(("agent", index), name.clone()).child(
                                 Button::new(("remove-agent", index))
                                     .label(agents::copy::REMOVE_MENU)
-                                    .variant(ButtonVariant::Ghost)
+                                    .variant(ButtonVariant::Outline)
                                     .disabled(self.disabled())
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.ask(

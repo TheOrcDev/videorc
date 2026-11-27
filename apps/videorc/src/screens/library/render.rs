@@ -511,7 +511,7 @@ impl Render for LibraryScreen {
                     )
                     .child(
                         Button::new("library-clear-selected")
-                            .variant(ButtonVariant::Ghost)
+                            .variant(ButtonVariant::Outline)
                             .label(copy::CLEAR_SELECTION)
                             .on_click(cx.listener(|this, _, _, cx| this.select_all(false, cx))),
                     )

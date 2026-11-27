@@ -1353,7 +1353,7 @@ impl OutputPanel {
         if let Some(check) = line.check_label {
             let mut button = Button::new("output-performance-run")
                 .label(check)
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .size(videorc_kit::button::ButtonSize::Xs)
                 .disabled(model.session_locked || !model.connected)
                 .on_click(
@@ -1683,7 +1683,7 @@ impl OutputPanel {
             buttons = buttons.child(
                 Button::new("output-cloud-clips-disable")
                     .label(copy::DISABLE)
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .disabled(state.busy)
                     .on_click(cx.listener(|this, _, _, cx| this.disable_cloud_clips(cx))),
             );
@@ -2055,7 +2055,7 @@ impl Render for OutputPanel {
                             // in an xs button.
                             Button::new("output-videorc-camera-copy")
                                 .accessibility_label(copy_label)
-                                .variant(ButtonVariant::Ghost)
+                                .variant(ButtonVariant::Outline)
                                 .size(videorc_kit::button::ButtonSize::Xs)
                                 .icon(IconName::Copy)
                                 .label(copy_label)
@@ -2114,7 +2114,7 @@ impl Render for OutputPanel {
             folder_actions = folder_actions.child(
                 Button::new("recordings-default")
                     .label(folder_copy::USE_DEFAULT)
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .on_click(cx.listener(|this, _, _, cx| this.use_default_folder(cx))),
             );
         }

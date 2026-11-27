@@ -315,7 +315,7 @@ impl SettingsScreen {
             .footer(
                 Button::new("obs-retry")
                     .label(c::TRY_AGAIN)
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .disabled(self.busy)
                     .on_click(cx.listener(|this, _, window, cx| this.open_obs(window, cx))),
             )
