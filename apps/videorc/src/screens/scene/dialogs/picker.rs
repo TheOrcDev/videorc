@@ -49,6 +49,7 @@ use super::super::{now_iso, platform};
 use super::SceneDialogs;
 use crate::app::hotkeys::node_platform;
 use crate::app::permissions::PermissionsGlobal;
+use crate::screens::dialogs::after_open_change;
 
 /// Electron's app id: Videorc's own windows are never offered.
 const OWN_BUNDLE_IDS: [&str; 1] = ["dev.theorcdev.videorc"];
@@ -1021,11 +1022,13 @@ impl SceneDialogs {
         Dialog::new("scene-picker-dialog", &self.picker, title)
             .size(DialogSize::Lg)
             .description(description)
-            .on_open_change(move |open, _, _, cx| {
+            .on_open_change(move |open, _, window, cx| {
                 if !open {
-                    let _ = page.update(cx, |page, cx| {
-                        page.picking = None;
-                        cx.notify();
+                    after_open_change(&page, window, cx, |page, _, cx| {
+                        if !page.picker.is_open() {
+                            page.picking = None;
+                            cx.notify();
+                        }
                     });
                 }
             })
