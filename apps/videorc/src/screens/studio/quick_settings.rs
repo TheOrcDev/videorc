@@ -235,11 +235,12 @@ impl QuickSettingsSection {
     /// picture's polling and drops its frame.
     fn set_popover_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.popover_open = open;
-        if !open && let Some(feed) = self.viewer.take() {
-            if let Some((_, frame)) = feed.frame {
-                cx.drop_image(frame, Some(window));
-            }
-            // `feed.task` is dropped here: the polling stops.
+        // The taken feed drops with its `task` either way: the polling stops.
+        if !open
+            && let Some(feed) = self.viewer.take()
+            && let Some((_, frame)) = feed.frame
+        {
+            cx.drop_image(frame, Some(window));
         }
         cx.notify();
     }
