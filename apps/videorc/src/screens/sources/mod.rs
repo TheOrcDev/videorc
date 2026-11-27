@@ -1047,6 +1047,20 @@ impl SourcesPanel {
         }
     }
 
+    /// The System audio issue's "Open Permissions": Settings on its
+    /// Permissions tab, as the Studio's row opens it.
+    fn open_permissions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(shell) = self.shell.as_ref() {
+            let _ = shell.update(cx, |shell, cx| {
+                shell.open_settings(
+                    Some(videorc_app_core::settings_page::SettingsTab::Permissions),
+                    window,
+                    cx,
+                );
+            });
+        }
+    }
+
     /// P283: Open Scenes brings the Studio's Scenes section into view.
     fn open_studio_scenes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(shell) = self.shell.as_ref() {
@@ -1117,16 +1131,22 @@ impl SourcesPanel {
                 Alert::new("device-problem")
                     .variant(AlertVariant::Quiet)
                     .title(page_copy::DEVICE_PROBLEM)
-                    .action(
-                        Button::new("open-health")
-                            .label(OPEN_HEALTH_LABEL)
-                            .size(ButtonSize::Xs)
-                            .variant(ButtonVariant::Ghost)
-                            .on_click(move |_, window, cx| {
-                                entity.update(cx, |panel, cx| {
-                                    panel.open_page(PageId::Diagnostics, window, cx);
-                                });
-                            }),
+                    // Under the words, in flow, as Electron's sits
+                    // (`AlertDescription`).
+                    .description(
+                        div().flex().pt(px(6.)).child(
+                            Button::new("open-health")
+                                .label(OPEN_HEALTH_LABEL)
+                                .size(ButtonSize::Xs)
+                                // A real button (owner, 2026-11-27): an app's
+                                // actions are never text links.
+                                .variant(ButtonVariant::Outline)
+                                .on_click(move |_, window, cx| {
+                                    entity.update(cx, |panel, cx| {
+                                        panel.open_page(PageId::Diagnostics, window, cx);
+                                    });
+                                }),
+                        ),
                     ),
             );
         }
@@ -1235,12 +1255,14 @@ impl SourcesPanel {
                             .child(SharedString::from(scene.line.clone())),
                     )
                     .child(
-                        // The 24 px Xs button centred on the 16 px first line.
-                        div().flex_none().mr(px(-8.)).mt(px(-4.)).child(
+                        // The 24 px Xs button centred on the 16 px first
+                        // line: a real button, never a text link (owner,
+                        // 2026-11-27), so its edge is the column's.
+                        div().flex_none().mt(px(-4.)).child(
                             Button::new(format!("{picker_id}-open-scenes"))
                                 .label(scene.open_label)
                                 .size(ButtonSize::Xs)
-                                .variant(ButtonVariant::Ghost)
+                                .variant(ButtonVariant::Outline)
                                 .on_click(move |_, window, cx| {
                                     entity.update(cx, |panel, cx| {
                                         panel.open_studio_scenes(window, cx);
@@ -1495,7 +1517,9 @@ impl SourcesPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let more = self.ui.more.contains("system");
-        let off = system.row.permission_required;
+        // Off is the row alone, with or without the permission; turned on
+        // without it, the row dims under its "Needs permission" chip.
+        let off = system.row.permission_required && system.row.checked;
         let mut row = ListRow::new("system-title", audio_mixer::copy::SYSTEM_AUDIO)
             .icon(source_icon(IconName::Desktop, off, t));
         if let Some(chip) = system.chip.as_ref() {
@@ -1574,24 +1598,28 @@ impl SourcesPanel {
                     IssueAction::Resume => audio_mixer::copy::RESUME,
                 };
                 let entity = cx.entity();
-                alert = alert.action(
-                    Button::new("system-issue-action")
-                        .label(label)
-                        .size(ButtonSize::Xs)
-                        .variant(ButtonVariant::Ghost)
-                        .on_click(move |_, window, cx| {
-                            entity.update(cx, |panel, cx| match action {
-                                IssueAction::OpenPermissions => {
-                                    panel.open_page(PageId::Settings, window, cx);
-                                }
-                                IssueAction::Resume => {
-                                    let studio = panel.studio.clone();
-                                    panel.run_studio(async move {
-                                        studio.resume_system_audio().await;
-                                    });
-                                }
-                            });
-                        }),
+                // Under the words, in flow: `Alert::action` keeps 72 px for its
+                // control, which "Open Permissions" overran onto the text.
+                alert = alert.description(
+                    div().flex().pt(px(6.)).child(
+                        Button::new("system-issue-action")
+                            .label(label)
+                            .size(ButtonSize::Xs)
+                            .variant(ButtonVariant::Outline)
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |panel, cx| match action {
+                                    IssueAction::OpenPermissions => {
+                                        panel.open_permissions(window, cx);
+                                    }
+                                    IssueAction::Resume => {
+                                        let studio = panel.studio.clone();
+                                        panel.run_studio(async move {
+                                            studio.resume_system_audio().await;
+                                        });
+                                    }
+                                });
+                            }),
+                    ),
                 );
             }
             body = body.child(alert);
