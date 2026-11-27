@@ -19,6 +19,10 @@ use videorc_app_core::resources::{
 };
 use videorc_app_core::scenes::background::{BUNDLED_BACKGROUNDS, bundled_background_name};
 use videorc_app_core::studio::StudioBackend;
+use videorc_app_core::studio::scene_editor::{
+    BACKGROUND_NOT_APPLIED, BACKGROUND_NOT_APPLIED_CODE, BACKGROUND_TRY_AGAIN,
+};
+use videorc_app_core::studio::scene_switch::SwitchRefusal;
 use videorc_app_core::{BackendClient, BackendState, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
@@ -85,7 +89,7 @@ pub struct ImagesPanel {
     background_importing: bool,
     background_pending: Option<String>,
     background_active: Option<Value>,
-    background_failed: bool,
+    background_refusal: Option<SwitchRefusal>,
     background_retry: Option<Value>,
     backgrounds: Vec<ImportedBackground>,
     load_epoch: u64,
@@ -132,7 +136,7 @@ impl ImagesPanel {
             background_importing: false,
             background_pending: None,
             background_active: None,
-            background_failed: false,
+            background_refusal: None,
             background_retry: None,
             backgrounds: Vec::new(),
             load_epoch: 0,
@@ -396,6 +400,14 @@ impl ImagesPanel {
         }
     }
 
+    fn open_sources(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(shell) = self.shell.clone() {
+            let _ = shell.update(cx, |shell, cx| {
+                shell.open_page(PageId::Sources, window, cx);
+            });
+        }
+    }
+
     fn place_on_scene(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(shell) = self.shell.clone() {
             let _ = shell.update(cx, |shell, cx| {
@@ -557,18 +569,25 @@ impl ImagesPanel {
                 .unwrap_or("none")
                 .to_string(),
         );
-        self.background_failed = false;
+        self.background_refusal = None;
         self.background_retry = background.clone();
         cx.notify();
         let studio = self.studio.clone();
         let runtime = self.runtime.clone();
         cx.spawn(async move |this, cx| {
             let result = runtime
-                .spawn(async move { studio.set_working_background(background.as_ref()).await })
+                .spawn(async move { studio.apply_working_background(background.as_ref()).await })
                 .await;
             let _ = this.update(cx, |panel, cx| {
                 panel.background_pending = None;
-                panel.background_failed = !matches!(result, Ok(true));
+                panel.background_refusal = match result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(refusal)) => Some(refusal),
+                    Err(_) => Some(SwitchRefusal {
+                        code: BACKGROUND_NOT_APPLIED_CODE.to_string(),
+                        reason: BACKGROUND_TRY_AGAIN.to_string(),
+                    }),
+                };
                 cx.notify();
             });
         })
@@ -908,26 +927,38 @@ impl Render for ImagesPanel {
             ));
         }
         let mut background_feedback = div().flex().flex_col().gap(px(8.));
-        if self.background_failed {
+        if let Some(refusal) = &self.background_refusal {
             let entity = entity.clone();
+            // A layout that needs a source nobody picked: trying again can't
+            // help, so the button goes where the streamer picks one.
+            let needs_source = match refusal.code.as_str() {
+                "layout-screen-not-selected" => Some("Choose a screen"),
+                "layout-camera-not-selected" => Some("Open Sources"),
+                _ => None,
+            };
+            let action = match needs_source {
+                Some(label) => Button::new("images-background-open-sources")
+                    .label(label)
+                    .variant(ButtonVariant::Outline)
+                    .on_click(move |_, window, cx| {
+                        entity.update(cx, |panel, cx| panel.open_sources(window, cx));
+                    }),
+                None => Button::new("images-background-retry")
+                    .label("Retry")
+                    .variant(ButtonVariant::Outline)
+                    .disabled(offline)
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |panel, cx| {
+                            panel.apply_background(panel.background_retry.clone(), cx)
+                        });
+                    }),
+            };
             background_feedback = background_feedback.child(
                 Alert::new("images-background-failed")
                     .variant(AlertVariant::Warning)
-                    .title("Couldn't apply the background")
-                    .description(
-                        "Check your scene, then try again. If it keeps happening, open Health.",
-                    )
-                    .action(
-                        Button::new("images-background-retry")
-                            .label("Retry")
-                            .variant(ButtonVariant::Outline)
-                            .disabled(offline)
-                            .on_click(move |_, _, cx| {
-                                entity.update(cx, |panel, cx| {
-                                    panel.apply_background(panel.background_retry.clone(), cx)
-                                });
-                            }),
-                    ),
+                    .title(BACKGROUND_NOT_APPLIED)
+                    .description(SharedString::from(refusal.reason.clone()))
+                    .action(action),
             );
         }
         if let Some(background) = &self.background_active {

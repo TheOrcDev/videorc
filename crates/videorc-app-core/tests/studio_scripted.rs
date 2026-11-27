@@ -6482,6 +6482,53 @@ async fn images_background_refusal_keeps_the_selection_and_explains_why() {
     );
 }
 
+/// #2491 owner run: a fresh profile's Screen + camera scene with no screen
+/// picked refuses every background. The Images page gets the reason in the
+/// streamer's words and the code it picks its button by, never the
+/// backend's own sentence.
+#[tokio::test]
+async fn images_background_without_a_screen_says_to_pick_one() {
+    let (backend, studio) = scenes_studio(json!({
+        "sources": {"captureOff": true, "cameraOff": true}
+    }))
+    .await;
+    backend.with(|script| {
+        script.apply_failures.push_back((
+            RpcError::new(
+                "scene.layout.apply_preview",
+                "layout-screen-not-selected",
+                "Layout preset ScreenCamera needs a screen or window, but none is selected.",
+            ),
+            false,
+        ))
+    });
+    let refusal = studio
+        .apply_working_background(Some(&json!({"assetId": "live-silk-satin"})))
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.code, "layout-screen-not-selected");
+    assert_eq!(
+        refusal.reason,
+        "This scene needs a screen or window. Pick one in Sources, or choose a camera-only scene."
+    );
+    settled(&studio).await;
+    assert!(studio.snapshot().scenes.working_background.is_none());
+
+    // The next background that lands is no refusal, and an invalid one
+    // names itself.
+    assert_eq!(
+        studio
+            .apply_working_background(Some(&json!({"assetId": "builtin-bg-01"})))
+            .await,
+        Ok(())
+    );
+    let invalid = studio
+        .apply_working_background(Some(&json!({"assetId": "../missing"})))
+        .await
+        .unwrap_err();
+    assert_eq!(invalid.code, "background-invalid");
+}
+
 #[tokio::test]
 async fn images_invalid_background_is_refused_with_an_answer() {
     let (backend, studio) =

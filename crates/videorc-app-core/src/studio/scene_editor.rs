@@ -24,7 +24,7 @@ use videorc_protocol::{Scene, SceneSource, SceneSourceKind};
 use super::capture_config;
 use super::families::{PrivacySettings, save_privacy_settings};
 use super::js_value::string;
-use super::scene_switch::{ApplyOptions, PresetOptions, TransactionOptions};
+use super::scene_switch::{ApplyOptions, PresetOptions, SwitchRefusal, TransactionOptions};
 use super::settings::{SettingWrite, keys};
 use super::{Connection, Inner, Studio, StudioBackend};
 use crate::client::RpcError;
@@ -106,6 +106,15 @@ const BANNER_REFUSAL_TOAST_ID: &str = "banner-refusal";
 pub const EDITING_UNAVAILABLE: &str = "Scene editing is unavailable. Reconnect and try again.";
 pub const NOT_APPLIED: &str = "Scene transform wasn't applied.";
 pub const SOURCE_GONE: &str = "The edited source is no longer available.";
+/// The Images page's background refusal (#2491): the title, and the
+/// reasons when the switch itself gave none.
+pub const BACKGROUND_NOT_APPLIED: &str = "Couldn't apply the background";
+pub const BACKGROUND_UNAVAILABLE: &str =
+    "This background isn't available. Choose another background or import the image again.";
+pub const BACKGROUND_TRY_AGAIN: &str =
+    "Check your scene, then try again. If it keeps happening, open Health.";
+pub const BACKGROUND_INVALID_CODE: &str = "background-invalid";
+pub const BACKGROUND_NOT_APPLIED_CODE: &str = "background-not-applied";
 /// `setSceneSourceVisible`'s own sentence.
 pub const VISIBILITY_NOT_ACKNOWLEDGED: &str = "Source visibility wasn't acknowledged.";
 
@@ -1093,6 +1102,17 @@ impl<B: StudioBackend> Studio<B> {
     /// working look with `background` (a saved background, or `None` for
     /// none) as one quiet transaction. False when it does not resolve.
     pub async fn set_working_background(self: &Arc<Self>, background: Option<&Value>) -> bool {
+        self.apply_working_background(background).await.is_ok()
+    }
+
+    /// [`Self::set_working_background`] with the reason a refused change
+    /// gives, for the Images page to say why next to the tiles (#2491):
+    /// "This scene needs a screen or window…" when the layout draws a
+    /// screen and none is picked.
+    pub async fn apply_working_background(
+        self: &Arc<Self>,
+        background: Option<&Value>,
+    ) -> Result<(), SwitchRefusal> {
         let layout = {
             let mut guard = self.lock();
             let inner = &mut *guard;
@@ -1107,12 +1127,15 @@ impl<B: StudioBackend> Studio<B> {
                         .logger
                         .warn("[background] refused invalid saved background");
                     self.post(vec![NoticeCommand::Show(
-                        ToastRequest::warning("Couldn't apply the background")
+                        ToastRequest::warning(BACKGROUND_NOT_APPLIED)
                             .id("background-invalid")
-                            .description("This background isn't available. Choose another background or import the image again.")
+                            .description(BACKGROUND_UNAVAILABLE)
                             .finish(),
                     )]);
-                    return false;
+                    return Err(SwitchRefusal {
+                        code: BACKGROUND_INVALID_CODE.to_string(),
+                        reason: BACKGROUND_UNAVAILABLE.to_string(),
+                    });
                 }
             },
             None => None,
@@ -1124,8 +1147,8 @@ impl<B: StudioBackend> Studio<B> {
                 .and_then(|value| value["assetId"].as_str())
                 .unwrap_or("none"),
         ));
-        let accepted = self
-            .request_layout_transaction(
+        let result = self
+            .request_layout_transaction_explained(
                 layout,
                 TransactionOptions {
                     quiet: true,
@@ -1134,10 +1157,21 @@ impl<B: StudioBackend> Studio<B> {
                 },
             )
             .await;
-        self.config
-            .logger
-            .info(format!("[background] apply accepted={accepted}"));
-        accepted
+        match &result {
+            Ok(()) => self.config.logger.info("[background] applied"),
+            Err(refusal) => self.config.logger.warn(format!(
+                "[background] not applied: {}",
+                refusal
+                    .as_ref()
+                    .map_or("no refusal reported", |refusal| refusal.code.as_str()),
+            )),
+        }
+        result.map_err(|refusal| {
+            refusal.unwrap_or_else(|| SwitchRefusal {
+                code: BACKGROUND_NOT_APPLIED_CODE.to_string(),
+                reason: BACKGROUND_TRY_AGAIN.to_string(),
+            })
+        })
     }
 
     /// `applyWorkingBackgroundStyle({ visibilityPercent })` (Screen size):
