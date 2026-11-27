@@ -276,7 +276,7 @@ pub fn picker_body(
                 Button::new("camera-background-settings")
                     .label(SETTINGS_BUTTON)
                     .size(ButtonSize::Xs)
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .on_click(move |_, window, cx| on_settings(window, cx)),
             ),
     )
