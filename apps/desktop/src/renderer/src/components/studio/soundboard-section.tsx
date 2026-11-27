@@ -10,17 +10,18 @@ import { Empty, EmptyContent, EmptyTitle } from '@/components/ui/empty'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useSoundboard } from '@/hooks/use-soundboard'
 import { useStudioRecordingState, useStudioShell } from '@/hooks/use-studio'
-import type { Sound } from '@/lib/backend'
+import type { Sound, SoundVoice } from '@/lib/backend'
 import { soundForKey, soundKeyBlocked, soundKeyDigit } from '@/lib/sound-keys'
 import { soundboardDescription } from '@/lib/sounds'
 import { connectionBlockedReason } from '@/lib/state-labels'
 import { sessionOwnsTransport } from '../../../../shared/capture-state'
+import { padPressStops } from '../../../../shared/sound-commands'
 
 /**
  * Studio → Soundboard (plan 189 S6): the pads, under Scenes. Studio plays,
  * the Sounds page manages and Sources → Sounds holds the level (D1). A pad
  * plays on its own mode; its key, 1 to 9, presses it while Studio is the page
- * in front. Nothing toasts when a sound plays: the pad's ring and progress
+ * in front. A second press of a playing pad, or of its key, stops that sound. Nothing toasts when a sound plays: the pad's ring and progress
  * are the confirmation.
  */
 export function SoundboardSection(): ReactElement {
@@ -32,7 +33,13 @@ export function SoundboardSection(): ReactElement {
   // A buffer-only Clips session (plan 181) is not a recording: idle presses
   // stay off the ring, so only the streamer hears them.
   const sessionActive = sessionOwnsTransport(recording)
-  useSoundKeys(board.sounds, board.press, board.stop, disconnectedReason === null)
+  useSoundKeys(
+    board.sounds,
+    board.voiceBySound,
+    board.press,
+    board.stop,
+    disconnectedReason === null
+  )
 
   return (
     <PanelSection
@@ -87,12 +94,14 @@ export function SoundboardSection(): ReactElement {
 
 /**
  * 1 to 9 press the sound with that key while this page is up (plan 189):
- * one listener for the page, so the pad grid's own hotkeys stay off. A While
+ * one listener for the page, so the pad grid's own hotkeys stay off. Like
+ * the pad, the key stops a sound that is playing (`padPressStops`). A While
  * held sound stops when its key comes up, or when the window loses the
  * keys (blur) or the page goes away.
  */
 function useSoundKeys(
   sounds: readonly Sound[],
+  voiceBySound: ReadonlyMap<string, SoundVoice>,
   press: (id: string) => Promise<boolean>,
   stop: (id: string) => Promise<boolean>,
   enabled: boolean
@@ -104,7 +113,7 @@ function useSoundKeys(
     if (!sound) return
     event.preventDefault()
     held.set(heldKey(event), sound)
-    void press(sound.id)
+    void (padPressStops(sound.mode, voiceBySound.has(sound.id)) ? stop : press)(sound.id)
   })
   const release = useEffectEvent((sound: Sound): void => {
     if (sound.mode === 'hold') void stop(sound.id)
