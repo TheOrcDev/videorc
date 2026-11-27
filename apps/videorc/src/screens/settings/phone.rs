@@ -2,6 +2,7 @@
 //! with the kit's [`videorc_kit::qr_code::QrCode`].
 
 use super::*;
+use crate::screens::dialogs::after_open_change;
 use gpui::{AnyElement, AppContext, ClipboardItem};
 use videorc_app_core::settings_page::remote::{
     PAIRING_TROUBLE_HINT_AFTER_MS, PHONE_NAME_MAX_CHARS, RemoteLanDevice, RemoteLanPairing,
@@ -375,7 +376,9 @@ impl SettingsScreen {
                 let entity = entity.clone();
                 move |open, _, window, cx| {
                     if !open {
-                        entity.update(cx, |this, cx| this.close_phone_pairing(window, cx));
+                        after_open_change(&entity.downgrade(), window, cx, |this, window, cx| {
+ this.close_phone_pairing(window, cx)
+ });
                     }
                 }
             })

@@ -29,6 +29,25 @@ pub struct OpenPage(pub PageId);
 
 impl EventEmitter<OpenPage> for DialogsHost {}
 
+/// Runs a Dialog's `on_open_change` work on its owner once the current
+/// update ends. The handle's `close()` calls `on_open_change` synchronously,
+/// and an owner usually closes its own dialog from inside its own update (a
+/// Cancel listener, a spawned job's `update_in`): updating the owner there
+/// again is gpui's double-lease panic (the owner's screen-picker crash,
+/// 2026-11-27). Every `on_open_change` that touches its owner goes through
+/// here; `on_open_change_defers_its_owner_update` guards it.
+pub fn after_open_change<T: 'static>(
+    owner: &gpui::WeakEntity<T>,
+    window: &Window,
+    cx: &mut gpui::App,
+    change: impl FnOnce(&mut T, &mut Window, &mut Context<T>) + 'static,
+) {
+    let owner = owner.clone();
+    window.defer(cx, move |window, cx| {
+        let _ = owner.update(cx, |owner, cx| change(owner, window, cx));
+    });
+}
+
 /// ConfirmDialog's destructive vs consequential (replace) answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmVariant {
@@ -123,5 +142,89 @@ impl Render for DialogsHost {
             .child(self.end_livestream_dialog(cx))
             .child(self.confirm_dialog(cx))
             .child(self.start_blocked_dialog(cx))
+    }
+}
+
+#[cfg(test)]
+mod open_change_guard {
+    use std::path::{Path, PathBuf};
+
+    fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// The Dialog callback: `on_open_change(` up to the first `})` that
+    /// closes it, at most 16 lines.
+    fn callback(lines: &[&str], start: usize) -> String {
+        let indent = lines[start].len() - lines[start].trim_start().len();
+        let mut body = String::new();
+        for line in lines.iter().skip(start).take(16) {
+            body.push_str(line);
+            body.push('\n');
+            let trimmed = line.trim_start();
+            if body.lines().count() > 1
+                && line.len() - trimmed.len() == indent
+                && trimmed.starts_with("})")
+            {
+                break;
+            }
+        }
+        body
+    }
+
+    /// The owner's screen-picker crash (2026-11-27): a Dialog's
+    /// `on_open_change` that updates its owner in place panics with gpui's
+    /// double lease when the owner closes the dialog from its own update.
+    /// Each Dialog callback (four arguments: open, reason, window, cx) that
+    /// updates an entity defers it ([`super::after_open_change`] or a
+    /// `defer`). Popover callbacks take three and are not Dialogs.
+    #[test]
+    fn on_open_change_defers_its_owner_update() {
+        let mut files = Vec::new();
+        sources(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let dialog_callback = |text: &str| {
+            text.lines().take(3).any(|line| {
+                line.split('|')
+                    .nth(1)
+                    .is_some_and(|args| args.split(',').count() == 4)
+            })
+        };
+        let mut checked = 0;
+        let mut offenders = Vec::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                if !line.trim_start().starts_with(".on_open_change(") {
+                    continue;
+                }
+                let body = callback(&lines, index);
+                if !dialog_callback(&body) {
+                    continue;
+                }
+                checked += 1;
+                if body.contains(".update(cx")
+                    && !body.contains("after_open_change(")
+                    && !body.contains("defer(")
+                {
+                    offenders.push(format!("{}:{}", file.display(), index + 1));
+                }
+            }
+        }
+        assert!(checked >= 13, "found only {checked} Dialog callbacks");
+        assert!(
+            offenders.is_empty(),
+            "Dialog on_open_change updates its owner in place (double lease): {offenders:?}"
+        );
     }
 }

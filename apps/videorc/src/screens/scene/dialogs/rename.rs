@@ -14,6 +14,7 @@ use videorc_kit::tokens::text;
 
 use super::super::model::copy;
 use super::{Deleting, Renaming, SceneDialogs};
+use crate::screens::dialogs::after_open_change;
 
 /// `maxLength={80}` on the name field.
 pub(super) const NAME_MAX_CHARS: usize = 80;
@@ -101,11 +102,13 @@ impl SceneDialogs {
         };
         Dialog::new("rename-scene-dialog", &self.rename, copy::RENAME_TITLE)
             .size(DialogSize::Sm)
-            .on_open_change(move |open, _, _, cx| {
+            .on_open_change(move |open, _, window, cx| {
                 if !open {
-                    let _ = page.update(cx, |page, cx| {
-                        page.renaming = None;
-                        cx.notify();
+                    after_open_change(&page, window, cx, |page, _, cx| {
+                        if !page.rename.is_open() {
+                            page.renaming = None;
+                            cx.notify();
+                        }
                     });
                 }
             })
@@ -208,11 +211,13 @@ impl SceneDialogs {
                 &deleting.name,
                 deleting.next.as_deref(),
             ))
-            .on_open_change(move |open, _, _, cx| {
+            .on_open_change(move |open, _, window, cx| {
                 if !open {
-                    let _ = page.update(cx, |page, cx| {
-                        page.deleting = None;
-                        cx.notify();
+                    after_open_change(&page, window, cx, |page, _, cx| {
+                        if !page.delete.is_open() {
+                            page.deleting = None;
+                            cx.notify();
+                        }
                     });
                 }
             })
