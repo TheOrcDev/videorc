@@ -188,9 +188,15 @@ const htmlPath = resolve(
 // times from bundled tz data (~1.9 KB), #1833/#1840's UI settings store read
 // before first paint (~1.6 KB), #1816's account avatar bytes (~0.85 KB). Moving
 // `offsetTimeZone` out of schedule-time.ts cut 322; main then measured 338,622.
+// Raised 2026-11-27 (owner-approved via coordinator, #2483): eager gzip
+// 339,000 -> 340,000. Main 5e59e94f4 measured 1,048,050 / 338,835; #2483's
+// sidebar keys that follow the visible rows (Q187) measure 1,047,944 /
+// 339,124: fewer raw bytes, but the new keys code gzips worse. Cuts tried
+// (flatMap shape -5, renderer-local guestsVisible -39, prop-drilling +23)
+// could not free the 124 bytes. Raw and the entry ceilings hold.
 const budget = {
   maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 1_060_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 339_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 340_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 549_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 169_000)
 }
