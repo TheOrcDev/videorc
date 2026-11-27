@@ -8,6 +8,8 @@ pub mod front_app;
 
 use gpui::Window;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use videorc_app_core::desktop::permissions::{MediaAccessPermission, MediaAccessStatus};
+use windows::Devices::Enumeration::{DeviceAccessInformation, DeviceAccessStatus, DeviceClass};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Globalization::{
     GetLocaleInfoEx, GetUserDefaultLocaleName, LOCALE_STIMEFORMAT,
@@ -263,5 +265,79 @@ impl Platform for WindowsOs {
 
     fn bundle_id(&self) -> Option<String> {
         None
+    }
+
+    /// Electron's `getMediaAccessStatus` on Windows: the camera and
+    /// microphone privacy switches as `DeviceAccessInformation` reads them
+    /// for this app. Windows keeps no per-app screen grant, so the screen is
+    /// `not-applicable` (Electron's snapshot never reads it off macOS).
+    fn media_access(&self, permission: MediaAccessPermission) -> OsResult<MediaAccessStatus> {
+        let class = match permission {
+            MediaAccessPermission::Camera => DeviceClass::VideoCapture,
+            MediaAccessPermission::Microphone => DeviceClass::AudioCapture,
+            MediaAccessPermission::Screen => return Ok(MediaAccessStatus::NotApplicable),
+        };
+        let status = DeviceAccessInformation::CreateFromDeviceClass(class)
+            .and_then(|info| info.CurrentStatus())
+            .map_err(|error| format!("DeviceAccessInformation: {error}"))?;
+        Ok(media_access_status(status))
+    }
+}
+
+/// Electron's `ConvertDeviceAccessStatus`: never asked, allowed, turned off
+/// by a policy or the device-wide switch, or turned off by the user.
+fn media_access_status(status: DeviceAccessStatus) -> MediaAccessStatus {
+    match status {
+        DeviceAccessStatus::Unspecified => MediaAccessStatus::NotDetermined,
+        DeviceAccessStatus::Allowed => MediaAccessStatus::Granted,
+        DeviceAccessStatus::DeniedBySystem => MediaAccessStatus::Restricted,
+        DeviceAccessStatus::DeniedByUser => MediaAccessStatus::Denied,
+        _ => MediaAccessStatus::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_access_reads_as_electron_words() {
+        let cases = [
+            (
+                DeviceAccessStatus::Unspecified,
+                MediaAccessStatus::NotDetermined,
+            ),
+            (DeviceAccessStatus::Allowed, MediaAccessStatus::Granted),
+            (
+                DeviceAccessStatus::DeniedBySystem,
+                MediaAccessStatus::Restricted,
+            ),
+            (DeviceAccessStatus::DeniedByUser, MediaAccessStatus::Denied),
+            (DeviceAccessStatus(99), MediaAccessStatus::Unknown),
+        ];
+        for (status, words) in cases {
+            assert_eq!(media_access_status(status), words);
+        }
+    }
+
+    #[test]
+    fn the_screen_keeps_no_grant_on_windows() {
+        assert_eq!(
+            WindowsOs.media_access(MediaAccessPermission::Screen),
+            Ok(MediaAccessStatus::NotApplicable)
+        );
+    }
+
+    /// This PC's real switches: whatever they are, the read answers one of
+    /// Electron's words, never `unknown`, so first-run's rows can load.
+    #[test]
+    fn camera_and_microphone_are_read_from_the_os() {
+        for permission in [
+            MediaAccessPermission::Camera,
+            MediaAccessPermission::Microphone,
+        ] {
+            let status = WindowsOs.media_access(permission).expect("read");
+            assert_ne!(status, MediaAccessStatus::Unknown, "{permission:?}");
+        }
     }
 }

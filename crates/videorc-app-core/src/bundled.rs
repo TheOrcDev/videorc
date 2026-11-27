@@ -175,10 +175,36 @@ pub fn run_root(
 }
 
 /// The package's FFmpeg, for [`BUNDLED_FFMPEG_PATH_ENV`]: `None` outside a
-/// package, or when the package has none (the backend then runs the
-/// `ffmpeg` on `PATH`, as a dev build does).
+/// package (a dev build: [`workspace_ffmpeg`]), or when the package has none
+/// (the backend then runs the `ffmpeg` on `PATH`).
 pub fn bundled_ffmpeg(resources: &Path) -> Option<PathBuf> {
     let ffmpeg = resources.join(FFMPEG_IN_RESOURCES);
+    ffmpeg.is_file().then_some(ffmpeg)
+}
+
+/// A dev build's FFmpeg on Windows and Linux: the platform's pinned vendor
+/// build in the checkout (`pnpm ffmpeg:fetch:windows`, `…:linux`), so a dev
+/// run uses the exact binary a package ships, as Electron's dev main does
+/// (`resolvePackagedFfmpegBinDir`). `None` on macOS, which keeps `PATH`, and
+/// when it hasn't been fetched.
+pub fn workspace_ffmpeg(workspace_root: &Path) -> Option<PathBuf> {
+    let platform = if cfg!(windows) {
+        "windows-x64"
+    } else if cfg!(target_os = "linux") {
+        "linux-x64"
+    } else {
+        return None;
+    };
+    let bin = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    let ffmpeg = workspace_root
+        .join("vendor/ffmpeg")
+        .join(platform)
+        .join("bin")
+        .join(bin);
     ffmpeg.is_file().then_some(ffmpeg)
 }
 
@@ -297,6 +323,26 @@ mod tests {
         std::fs::create_dir_all(ffmpeg.parent().unwrap()).unwrap();
         std::fs::write(&ffmpeg, b"").unwrap();
         assert_eq!(bundled_ffmpeg(&root), Some(ffmpeg));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_dev_build_takes_the_checkouts_pinned_ffmpeg_off_macos() {
+        let root = std::env::temp_dir().join(format!("videorc-dev-ffmpeg-{}", std::process::id()));
+        assert_eq!(workspace_ffmpeg(&root), None);
+        let vendored = if cfg!(windows) {
+            Some("vendor/ffmpeg/windows-x64/bin/ffmpeg.exe")
+        } else if cfg!(target_os = "linux") {
+            Some("vendor/ffmpeg/linux-x64/bin/ffmpeg")
+        } else {
+            None
+        };
+        if let Some(vendored) = vendored {
+            let ffmpeg = root.join(vendored);
+            std::fs::create_dir_all(ffmpeg.parent().unwrap()).unwrap();
+            std::fs::write(&ffmpeg, b"").unwrap();
+            assert_eq!(workspace_ffmpeg(&root), Some(ffmpeg));
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -7940,6 +7940,7 @@ dependencies = [
  "block2 0.6.2",
  "chrono",
  "dispatch2",
+ "dunce",
  "futures-util",
  "global-hotkey",
  "gpui-base",
@@ -7964,6 +7965,7 @@ dependencies = [
  "videorc-kit",
  "videorc-preview",
  "videorc-protocol",
+ "windows 0.62.2",
  "windows-sys 0.61.2",
  "x11rb",
 ]
@@ -7974,6 +7976,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "dunce",
  "futures-util",
  "getrandom 0.4.2",
  "jiff",
