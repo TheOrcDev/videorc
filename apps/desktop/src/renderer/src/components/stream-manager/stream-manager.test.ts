@@ -555,10 +555,17 @@ it('uses confirmed whole-session stats only for the visible session owner', () =
           : {})
       })
     )
+  const expectedUsd20 = new Intl.NumberFormat(undefined, {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0
+  }).format(20)
+  const expectedHistoryChat = `${(6_003).toLocaleString()} messages, ${(6_002).toLocaleString()} chatters`
   const current = renderStats('s1')
   expect(current).toContain('aria-label="7 new supporters this stream"')
-  expect(current).toContain('aria-label="Tips this stream: $20"')
-  expect(renderStats('s1', true)).toContain('aria-label="6,003 messages, 6,002 chatters"')
+  expect(current).toContain(`aria-label="Tips this stream: ${expectedUsd20}"`)
+  expect(renderStats('s1', true)).toContain(`aria-label="${expectedHistoryChat}"`)
   expect(renderStats('s2')).not.toContain('7 new supporters this stream')
-  expect(renderStats('s2', true)).not.toContain('6,003 messages, 6,002 chatters')
+  expect(renderStats('s2', true)).not.toContain(expectedHistoryChat)
 })
