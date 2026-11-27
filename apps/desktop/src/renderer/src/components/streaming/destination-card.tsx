@@ -686,7 +686,7 @@ export function DestinationCard({
                   <Button
                     className="w-fit"
                     disabled={disabled}
-                    variant="ghost"
+                    variant="outline"
                     onClick={() => void onRestorePreviousStreamKey(target.id)}
                   >
                     <ResetIcon />
@@ -1342,7 +1342,7 @@ function OAuthAccountPanel({
             </Badge>
             <Button
               disabled={disabled || xNativeCapabilityLoading}
-              variant="ghost"
+              variant="outline"
               onClick={() => void onRefreshXNativeCapability(account.accountId)}
             >
               <SyncIcon data-icon="inline-start" weight="bold" />

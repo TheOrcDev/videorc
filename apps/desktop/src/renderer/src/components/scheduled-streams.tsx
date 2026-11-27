@@ -219,7 +219,7 @@ export function ScheduledStreams(): ReactElement {
               </span>
             ) : null}
             <Button
-              variant="ghost"
+              variant="outline"
               disabled={state.busy || refreshing}
               onClick={() => {
                 void refresh().catch(() => undefined)
