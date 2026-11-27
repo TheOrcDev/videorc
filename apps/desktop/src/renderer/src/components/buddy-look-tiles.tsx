@@ -291,7 +291,7 @@ export function BuddyPoseTile({
             disabled={redo.disabled || working}
             size="xs"
             type="button"
-            variant="ghost"
+            variant="outline"
             onClick={redo.run}
             onKeyDown={(event) => {
               if (redo.disabled || working || event.metaKey || event.ctrlKey || event.altKey) return

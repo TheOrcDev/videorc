@@ -954,7 +954,7 @@ export function CleanCutReview({
         {status.kind === 'ready' && changes === 0 && data?.job.outputSessionId ? (
           <Button
             type="button"
-            variant="ghost"
+            variant="outline"
             onClick={() =>
               data.job.outputSessionId && onOpenLibrarySession(data.job.outputSessionId)
             }

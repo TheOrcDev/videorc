@@ -1206,7 +1206,7 @@ function CohostWelcomeBackList({
               disabled={disabled || !onWave}
               size="xs"
               type="button"
-              variant="ghost"
+              variant="outline"
               onClick={() => onWave?.(entry)}
             >
               Wave

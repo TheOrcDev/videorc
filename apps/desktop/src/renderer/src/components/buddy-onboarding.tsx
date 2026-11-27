@@ -497,7 +497,7 @@ export function BuddyOnboarding({
                   data-testid="buddy-onboarding-start-new"
                   disabled={lookBusy}
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   onClick={startNew}
                 >
                   <ResetIcon data-icon="inline-start" />
@@ -851,7 +851,7 @@ function DescribeStep({
                   disabled={disabled}
                   size="xs"
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   onClick={onClear}
                 >
                   <CloseIcon data-icon="inline-start" />

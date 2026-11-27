@@ -150,7 +150,7 @@ export function SoundsSection(): ReactElement {
               className="self-start"
               data-testid="sound-restore-starters"
               disabled={offline || board.restoring}
-              variant="ghost"
+              variant="outline"
               onClick={() => void board.restoreStarters()}
             >
               {board.restoring ? (

@@ -303,7 +303,7 @@ export function BuddyAvatarSection({
                   data-testid="buddy-test-open"
                   size="xs"
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   onClick={openTest}
                 >
                   <PlayIcon data-icon="inline-start" />
