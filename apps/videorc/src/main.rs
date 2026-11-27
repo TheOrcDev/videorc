@@ -1183,10 +1183,10 @@ fn main() -> Result<()> {
         // View → the pages and ⌘1–⌘0 (P1499–P1503, P1559): the page as its
         // sidebar row opens it, from any window; the main window comes up.
         let show_page = move |key: videorc_app_core::desktop::menu::PageKey, cx: &mut App| {
-            let Some(page) = PageId::from_menu_key(key) else {
-                return;
-            };
             let _ = main_window.update(cx, |shell, window, cx| {
+                let Some(page) = PageId::from_menu_key(key, shell.guests_shown(cx)) else {
+                    return;
+                };
                 shell.open_page(page, window, cx);
                 window.activate_window();
             });

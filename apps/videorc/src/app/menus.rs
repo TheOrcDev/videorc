@@ -266,10 +266,15 @@ fn items(cx: &App, entries: &[MenuEntry], bindings: &mut Vec<KeyBinding>) -> Vec
 
 /// The menu bar for this platform (`None` off macOS, where the window
 /// carries no menu bar, as Electron's).
-pub fn menu_bar(cx: &App, windows: &[WindowId]) -> Option<MenuBar> {
-    let mut availability = nav::menu_availability(windows);
+pub fn menu_bar(cx: &App, windows: &[WindowId], guests_shown: bool) -> Option<MenuBar> {
+    let mut availability = nav::menu_availability(windows, guests_shown);
     availability.pages.insert(PageKey::Settings);
-    let template = app_menu_template(MenuPlatform::current(), APP_NAME, &availability)?;
+    let template = app_menu_template(
+        MenuPlatform::current(),
+        APP_NAME,
+        &availability,
+        guests_shown,
+    )?;
     let mut bindings = Vec::new();
     let mut menus = Vec::new();
     for entry in &template {
@@ -292,10 +297,12 @@ pub fn menu_bar(cx: &App, windows: &[WindowId]) -> Option<MenuBar> {
 /// runs the window chords (`shell-shortcuts.ts`); here the macOS template's
 /// page and window items are bound without a menu (Ctrl on these
 /// platforms). The app menu's roles (Hide, Minimize, Zoom…) stay macOS's.
-pub fn menu_less_bindings(cx: &App, windows: &[WindowId]) -> Vec<KeyBinding> {
-    let mut availability = nav::menu_availability(windows);
+pub fn menu_less_bindings(cx: &App, windows: &[WindowId], guests_shown: bool) -> Vec<KeyBinding> {
+    let mut availability = nav::menu_availability(windows, guests_shown);
     availability.pages.insert(PageKey::Settings);
-    let Some(template) = app_menu_template(MenuPlatform::Mac, APP_NAME, &availability) else {
+    let Some(template) =
+        app_menu_template(MenuPlatform::Mac, APP_NAME, &availability, guests_shown)
+    else {
         return Vec::new();
     };
     let mut bindings = Vec::new();
@@ -338,6 +345,14 @@ fn windows() -> Vec<WindowId> {
     vec![WindowId::Preview, WindowId::StreamManager, WindowId::Notes]
 }
 
+/// Only the menu labels change. Digit actions are bound once and resolve
+/// against current availability when fired, including from auxiliary windows.
+pub fn refresh_page_menu(guests_shown: bool, cx: &mut App) {
+    if let Some(bar) = menu_bar(cx, &windows(), guests_shown) {
+        cx.set_menus(bar.menus);
+    }
+}
+
 /// The roles' handlers, and the commands that work now. Pages and windows
 /// get theirs as they are ported.
 pub fn install(cx: &mut App) {
@@ -359,12 +374,12 @@ pub fn install(cx: &mut App) {
             Some("!Dialog && !Popover && !Select && !Menu && !Input"),
         ),
     ]);
-    if let Some(bar) = menu_bar(cx, &windows()) {
+    if let Some(bar) = menu_bar(cx, &windows(), true) {
         cx.bind_keys(bar.bindings);
-        cx.set_menus(bar.menus);
+        refresh_page_menu(false, cx);
     } else {
         cx.bind_keys([KeyBinding::new(secondary!("q"), Quit, None)]);
-        cx.bind_keys(menu_less_bindings(cx, &windows()));
+        cx.bind_keys(menu_less_bindings(cx, &windows(), true));
     }
     cx.on_action(|_: &ShowStreamManager, cx| {
         crate::screens::stream_manager::window::show(cx);
