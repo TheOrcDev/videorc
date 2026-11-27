@@ -70,6 +70,8 @@ pub mod audio_mixer;
 pub mod audio_section;
 pub mod backend;
 pub mod camera_background;
+pub mod camera_background_art;
+pub mod camera_background_frames;
 pub mod camera_background_migration;
 pub mod camera_background_view;
 pub mod camera_frame_rate;

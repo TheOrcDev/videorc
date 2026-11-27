@@ -13,6 +13,7 @@ use videorc_app_core::editor::inspector::{
     copy as inspector_copy,
 };
 use videorc_app_core::nav::PageId;
+use videorc_app_core::studio::camera_background_art::{Art, choice_art};
 use videorc_app_core::studio::camera_background_view::{
     BLUR_STRENGTH_LABEL, BackgroundSectionView, CHOOSE_IMAGE_DESCRIPTION, CHOOSE_IMAGE_EMPTY,
     CHOOSE_IMAGE_LABEL, CHOOSE_IMAGE_TITLE, Choice, ChoiceId, DONE_LABEL, KEY_EDGES,
@@ -22,15 +23,15 @@ use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::chrome::focus_ring;
 use videorc_kit::dialog::{Dialog, DialogSize};
 use videorc_kit::empty::Empty;
-use videorc_kit::icon::{IconName, icon};
+use videorc_kit::icon::IconName;
 use videorc_kit::label::Label;
 use videorc_kit::panel_section::PanelSection;
 use videorc_kit::section_label::SectionLabel;
 use videorc_kit::segmented_control::{Segment, SegmentedControl};
 use videorc_kit::settings_row::SettingsRow;
 use videorc_kit::switch::Switch;
-use videorc_kit::theme::{self, TypeScale, faded_over, hsla};
-use videorc_kit::tokens::{Theme, radius, text};
+use videorc_kit::theme;
+use videorc_kit::tokens::{Theme, radius};
 use videorc_protocol::SceneSourceKind;
 
 use super::controls::{Field, Knob};
@@ -38,7 +39,7 @@ use super::editor::copy;
 use super::inspector::{adjust_icon, meta_line};
 use super::model::copy as list_copy;
 use super::{SceneNavigate, ScenePage};
-use crate::screens::studio::background::image_tiles;
+use crate::screens::studio::background::{image_tiles, tile_card, tile_label};
 
 /// What a camera row's pick does.
 type Pick = fn(&ScenePage, &str);
@@ -62,7 +63,9 @@ struct Tile {
     label: SharedString,
     selected: bool,
     disabled: bool,
-    mark: Option<IconName>,
+    /// Its picture (the Orc over the pick's layer); none for Choose image…,
+    /// which shows the image icon.
+    art: Option<Art>,
     /// The tile Background settings focuses (the chosen one, else the
     /// first that can be chosen).
     focus: bool,
@@ -362,9 +365,11 @@ impl ScenePage {
         sections
     }
 
-    /// One background tile (`MediaCard` with its name under it).
-    // TODO(kit): MediaCard with the Orc art (room, blur, picture, screen),
-    // radio semantics and the roving focus of the tiles (Arrow keys).
+    /// One background tile (`camera-background-tiles.tsx`): the kit's
+    /// `MediaCard` with the Orc art and its name under it, as the Studio
+    /// popover draws them (`tile_card`, `tile_label`).
+    // TODO(kit): radio semantics and the roving focus of the tiles (Arrow
+    // keys).
     fn background_tile(
         &self,
         tile: Tile,
@@ -377,56 +382,36 @@ impl ScenePage {
             label,
             selected,
             disabled,
-            mark,
+            art,
             focus,
         } = tile;
-        let ground = t.glass_solid;
-        let fade = |color| {
-            if disabled {
-                faded_over(color, ground, 0.5)
-            } else {
-                color
-            }
-        };
-        let rim = if selected { t.ring } else { t.border };
-        let ink = if selected {
-            t.foreground
-        } else {
-            t.muted_foreground
-        };
+        let choose = art.is_none();
         let ring = focus_ring(t);
         let mut picture = div()
             .id(SharedString::from(format!("{id}-picture")))
-            .w_full();
+            .w_full()
+            .rounded(px(radius::ROW));
         if focus {
             picture = picture
                 .track_focus(&self.background_focus)
                 .focus(move |style| style.shadow(vec![ring]));
         }
         let mut tile = div()
-            .id(id)
+            .id(id.clone())
+            .group(id.clone())
             .flex()
             .flex_col()
             .gap(px(4.))
             .min_w_0()
-            .child(
-                picture
-                    .aspect_ratio(16. / 10.)
-                    .rounded(px(radius::ROW))
-                    .border_1()
-                    .border_color(hsla(fade(rim)))
-                    .bg(hsla(fade(t.muted)))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .children(mark.map(|mark| icon(mark, 16., hsla(fade(t.muted_foreground))))),
-            )
-            .child(
-                div()
-                    .type_scale(text::LABEL)
-                    .text_color(hsla(fade(ink)))
-                    .child(label),
-            );
+            .child(picture.child(tile_card(
+                SharedString::from(format!("{id}-card")),
+                art.as_ref(),
+                selected,
+                disabled,
+                id,
+                t,
+            )))
+            .child(tile_label(label, selected, disabled, choose, t));
         if !disabled {
             let on_pick = Rc::new(on_pick);
             let on_key = on_pick.clone();
@@ -486,7 +471,7 @@ impl ScenePage {
                     label: SharedString::from(choice.label.clone()),
                     selected: view.selected.as_ref() == Some(&choice.id),
                     disabled: choice.disabled_reason.is_some(),
-                    mark: None,
+                    art: Some(choice_art(&choice.id, choice.picture.as_deref())),
                     focus: focus_id.as_ref() == Some(&choice.id),
                 },
                 t,
@@ -505,7 +490,7 @@ impl ScenePage {
                     label: SharedString::from(CHOOSE_IMAGE_LABEL),
                     selected: false,
                     disabled: false,
-                    mark: Some(IconName::ImageSquare),
+                    art: None,
                     focus: false,
                 },
                 t,
