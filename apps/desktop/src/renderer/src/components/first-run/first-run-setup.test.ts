@@ -327,6 +327,9 @@ describe('FirstRunSetup', () => {
     expect(markup).toContain('Back to permissions')
     // A button under the title, not ghost text (owner, 11-27).
     expect(markup).toMatch(/<button[^>]*data-variant="outline"[^>]*>Back to permissions</)
+    expect(markup).toMatch(
+      /<button[^>]*class="[^"]*text-foreground[^"]*"[^>]*>Back to permissions</
+    )
     expect(markup).not.toContain('data-mic-level-meter=""')
   })
 

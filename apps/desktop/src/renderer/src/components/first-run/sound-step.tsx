@@ -191,7 +191,12 @@ export function SoundStep(): ReactElement {
             <Alert data-first-run-sound-blocked="" variant="warning">
               <AlertTitle>Videorc can't hear your microphone yet.</AlertTitle>
               <AlertDescription className="pt-1.5">
-                <Button size="xs" variant="outline" onClick={() => frame.goTo('permissions')}>
+                <Button
+                  className="text-foreground"
+                  size="xs"
+                  variant="outline"
+                  onClick={() => frame.goTo('permissions')}
+                >
                   Back to permissions
                 </Button>
               </AlertDescription>
