@@ -436,13 +436,17 @@ impl FirstRunScreen {
             .and_then(|value| fr::parse_record(Some(value)))
             .and_then(|record| record.goal);
         self.step = fr::steps_for(self.goal, platform)[0];
+        let was_open = self.open;
         self.open = true;
         self.focused_step = None;
         self.opened_at = Some(Instant::now());
         self.samples.clear();
         self.studio.set_clips_first_run_setup_open(true);
         self.prepare_poster(cx);
-        self.reset_backdrop();
+        // A setup already open keeps its moving picture.
+        if !was_open {
+            self.reset_backdrop();
+        }
         cx.notify();
     }
 
@@ -455,6 +459,7 @@ impl FirstRunScreen {
             .into_iter()
             .find(|candidate| *candidate >= step)
             .unwrap_or(Step::Permissions);
+        let was_open = self.open;
         self.open = true;
         self.focused_step = None;
         self.opened_at = Some(Instant::now());
@@ -466,7 +471,10 @@ impl FirstRunScreen {
         }
         self.persist_step();
         self.prepare_poster(cx);
-        self.reset_backdrop();
+        // A setup already open keeps its moving picture.
+        if !was_open {
+            self.reset_backdrop();
+        }
         cx.notify();
     }
 
