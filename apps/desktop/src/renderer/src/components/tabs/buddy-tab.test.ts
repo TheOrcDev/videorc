@@ -465,6 +465,9 @@ describe('Overview and Chat tabs (plan 150 S3, S4, plan 239)', () => {
   it('opens the tab that holds a power when its row is pressed', async () => {
     await render({ tab: 'live' })
     const voice = document.querySelector('[data-power-tab="voice"] button') as HTMLButtonElement
+    // The way to the tab is a button, not ghost text (owner, 11-27).
+    expect(voice.dataset.variant).toBe('outline')
+    expect(voice.className).toContain('text-foreground')
     await act(async () => voice.click())
     expect(calls.onTabChange).toHaveBeenLastCalledWith('voice')
     const chat = document.querySelector('[data-power-tab="chat"] button') as HTMLButtonElement
