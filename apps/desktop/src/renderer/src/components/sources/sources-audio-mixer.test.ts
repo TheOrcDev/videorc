@@ -10,7 +10,11 @@ import { createFrameEmitter } from '@/lib/audio/frame-source'
 import type { MeterFrame } from '@/lib/audio/types'
 import { defaultCaptureConfig } from '@/lib/capture'
 import type { MeterInput } from '@/lib/mic-meter-input'
-import { systemAudioSwitchView, type SystemAudioSwitchInput } from '@/lib/system-audio'
+import {
+  systemAudioRowView,
+  systemAudioSwitchView,
+  type SystemAudioSwitchInput
+} from '@/lib/system-audio'
 import {
   applySyncChange,
   keepMicrophoneReadyHint,
@@ -35,8 +39,8 @@ function render(
     open = false
   }: { macOS?: boolean; echoGuard?: boolean; meter?: MeterInput; open?: boolean } = {}
 ): string {
-  const view = systemAudioSwitchView({
-    device: { status: 'available' },
+  const switchInput = {
+    device: { status: 'available' as const },
     requested: false,
     sessionActive: false,
     audioBusActive: false,
@@ -44,7 +48,8 @@ function render(
     joining: false,
     issue: null,
     ...input
-  })
+  }
+  const view = systemAudioRowView(systemAudioSwitchView(switchInput), switchInput.requested)
   return renderToStaticMarkup(
     createElement(
       TooltipProvider,
@@ -191,14 +196,33 @@ describe('Sources System audio row (plans 069, 173)', () => {
     expect(echo).toMatch(/<span[^>]*role="switch"/)
   })
 
-  it('locks the row with one reason without Screen Recording permission', () => {
-    const markup = render({ device: { status: 'permission-required' } }, { open: true })
+  it('is only the row while off without Screen Recording permission', () => {
+    const markup = render({ device: { status: 'permission-required' } })
+    expect(markup).not.toContain('Needs permission')
+    expect(markup).not.toContain('Turn it on above')
+    expect(markup).not.toContain('Open Permissions')
+    expect(markup).not.toContain('aria-label="System audio gain"')
+    const onSwitch = markup.match(/<span[^>]*aria-label="System audio"[^>]*>/)?.[0]
+    expect(onSwitch).toContain('aria-checked="false"')
+    expect(onSwitch).not.toContain('aria-disabled="true"')
+    expect(markup).not.toMatch(/<section(?=[^>]*data-slot="source-item")[^>]*data-disabled="true"/)
+  })
+
+  it('says one reason when turned on without Screen Recording permission', () => {
+    const markup = render(
+      { device: { status: 'permission-required' }, requested: true },
+      { open: true }
+    )
     // The page's Screen Recording alert has the fix; the row says why only.
     expect(markup).toContain('Uses the Screen Recording permission. Turn it on above.')
     expect(markup).not.toContain('Open Permissions')
     expect(markup).toContain('>Needs permission<')
+    // Nothing to level or mix until the permission is there.
+    expect(markup).not.toContain('aria-label="System audio gain"')
+    expect(markup).not.toContain('Level shows while you record')
     const onSwitch = markup.match(/<span[^>]*aria-label="System audio"[^>]*>/)?.[0]
-    expect(onSwitch).toContain('aria-disabled="true"')
+    expect(onSwitch).toContain('aria-checked="true"')
+    expect(onSwitch).not.toContain('aria-disabled="true"')
     expect(markup).toMatch(/<section(?=[^>]*data-slot="source-item")[^>]*data-disabled="true"/)
     const echo = markup.slice(markup.indexOf('data-videorc-echo-guard'))
     expect(echo.match(/<span[^>]*role="switch"[^>]*>/)?.[0]).toContain('aria-disabled="true"')

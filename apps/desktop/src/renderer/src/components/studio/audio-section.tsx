@@ -12,7 +12,6 @@ import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { MuteToggle } from '@/components/ui/channel-toggle'
-import { DisabledReason } from '@/components/ui/disabled-reason'
 import { Mixer, MixerChannels } from '@/components/ui/mixer'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
 import { ShortcutTooltip } from '@/components/ui/shortcut-tooltip'
@@ -40,6 +39,9 @@ import {
   systemAudioIdleReason,
   systemAudioIssueCopy,
   systemAudioRowDevice,
+  systemAudioRowNeedsPermission,
+  systemAudioRowView,
+  systemAudioRowWorking,
   systemAudioSwitchView,
   type SystemAudioSwitchView
 } from '@/lib/system-audio'
@@ -107,15 +109,18 @@ export function AudioSection(): ReactElement {
   // applies them live (use-studio's live audio processing sync).
   const setAudio = (update: (current: AudioSettings) => AudioSettings): void =>
     setCaptureConfig((current) => ({ ...current, audio: update(current.audio) }))
-  const systemAudio = systemAudioSwitchView({
-    device: systemAudioRowDevice(deviceList, platform),
-    requested: audio.systemAudioEnabled,
-    sessionActive: isSessionActive,
-    audioBusActive,
-    confirmed: systemAudioConfirmed,
-    joining: systemAudioJoining,
-    issue: systemAudioIssue
-  })
+  const systemAudio = systemAudioRowView(
+    systemAudioSwitchView({
+      device: systemAudioRowDevice(deviceList, platform),
+      requested: audio.systemAudioEnabled,
+      sessionActive: isSessionActive,
+      audioBusActive,
+      confirmed: systemAudioConfirmed,
+      joining: systemAudioJoining,
+      issue: systemAudioIssue
+    }),
+    audio.systemAudioEnabled
+  )
 
   const microphone: MicrophoneRowProps = {
     devices: microphones,
@@ -444,21 +449,26 @@ function SystemAudioRow({
   onOpenPermissions,
   onResume
 }: SystemAudioRowProps): ReactElement {
-  // Sources' state words. Its permission hint points at the Sources page's
-  // alert; here the row's own line says it, with the way to the fix.
-  const status = systemAudioStatus(view, sessionActive)
-  const issueCopy = view.permissionRequired
+  // Off is only the row (owner, 2026-11-27): no chip, Gain or warning for a
+  // feature that is off, with or without the permission. On without it, the
+  // row's own warning says what is missing, so no "Needs permission" chip
+  // squeezes the name to "System…".
+  const needsPermission = systemAudioRowNeedsPermission(view)
+  const working = systemAudioRowWorking(view)
+  const status = view.permissionRequired ? null : systemAudioStatus(view, sessionActive)
+  const issueCopy = needsPermission
     ? SYSTEM_AUDIO_PERMISSION_REASON
-    : view.issue
+    : view.issue && !view.permissionRequired
       ? systemAudioIssueCopy(view.issue, platform)
       : null
+  // Real buttons under the words: an app's actions are never text links.
   const issueAction =
-    view.permissionRequired || (view.issue === 'unavailable' && platform === 'darwin') ? (
-      <Button className="-ml-2" size="xs" variant="ghost" onClick={onOpenPermissions}>
+    needsPermission || (view.issue === 'unavailable' && platform === 'darwin') ? (
+      <Button size="xs" variant="outline" onClick={onOpenPermissions}>
         Open Permissions
       </Button>
     ) : view.issue === 'echo' ? (
-      <Button className="-ml-2" size="xs" variant="ghost" onClick={onResume}>
+      <Button size="xs" variant="outline" onClick={onResume}>
         Resume
       </Button>
     ) : null
@@ -476,22 +486,17 @@ function SystemAudioRow({
     <SourceItem
       bodyClassName={AUDIO_ROW_BODY}
       control={
-        view.permissionRequired ? (
-          <DisabledReason reason={SYSTEM_AUDIO_PERMISSION_REASON}>{toggle}</DisabledReason>
-        ) : (
-          <ShortcutTooltip accelerator={toggleShortcut} label="System audio" platform={platform}>
-            {toggle}
-          </ShortcutTooltip>
-        )
+        <ShortcutTooltip accelerator={toggleShortcut} label="System audio" platform={platform}>
+          {toggle}
+        </ShortcutTooltip>
       }
       data-videorc-studio-system-audio=""
-      disabled={view.permissionRequired}
       icon={DesktopIcon}
       id="studio-system-audio"
       status={status ? { label: status.label, tone: status.tone } : null}
       title="System audio"
     >
-      {view.checked ? (
+      {working ? (
         <>
           {/* The meter rests with no reading and comes back with the bus. */}
           <div className="flex min-w-0" data-videorc-studio-system-audio-level="">
@@ -504,22 +509,18 @@ function SystemAudioRow({
           {idleLine}
         </>
       ) : null}
-      {view.checked || view.permissionRequired ? (
-        <SystemAudioGainFader
-          disabled={view.permissionRequired}
-          gainDb={gainDb}
-          onGainChange={onGainChange}
-        />
-      ) : null}
+      {working ? <SystemAudioGainFader gainDb={gainDb} onGainChange={onGainChange} /> : null}
       {issueCopy ? (
         <Alert
           data-videorc-studio-system-audio-issue={
-            view.permissionRequired ? 'permission' : (view.issue ?? undefined)
+            needsPermission ? 'permission' : (view.issue ?? undefined)
           }
           variant="warning"
         >
           <AlertTitle>{issueCopy}</AlertTitle>
-          {issueAction ? <AlertDescription className="pt-1">{issueAction}</AlertDescription> : null}
+          {issueAction ? (
+            <AlertDescription className="pt-1.5">{issueAction}</AlertDescription>
+          ) : null}
         </Alert>
       ) : null}
     </SourceItem>

@@ -140,7 +140,8 @@ export function VideoSourcesView({
           />
           {screen.facts ? <SourceFacts>{screen.facts}</SourceFacts> : null}
           {/* Whose screen this is (D2), and the way to scenes' home (D8):
-              the action keeps the line's end, however the words wrap. */}
+              the action keeps the line's end, however the words wrap. A real
+              button, never a text link (owner, 2026-11-27). */}
           {screen.scene ? (
             <p
               className="flex items-baseline justify-between gap-3 text-xs text-muted-foreground"
@@ -149,9 +150,9 @@ export function VideoSourcesView({
               <span className="min-w-0">{screenSceneLine(screen.scene)}</span>
               {screen.onOpenScenes ? (
                 <Button
-                  className="-mr-2 shrink-0"
+                  className="shrink-0"
                   size="xs"
-                  variant="ghost"
+                  variant="outline"
                   onClick={screen.onOpenScenes}
                 >
                   Open Scenes

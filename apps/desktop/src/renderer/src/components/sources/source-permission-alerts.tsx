@@ -70,7 +70,7 @@ export function SourcePermissionAlertsView({
                 {alert.actionLabel}
               </Button>
               {alert.revealLabel ? (
-                <Button variant="ghost" onClick={onReveal}>
+                <Button variant="outline" onClick={onReveal}>
                   <FolderIcon data-icon="inline-start" />
                   {alert.revealLabel}
                 </Button>
@@ -82,8 +82,8 @@ export function SourcePermissionAlertsView({
       {deviceProblem ? (
         <Alert data-videorc-device-problem="" variant="quiet">
           <AlertTitle>Videorc couldn&apos;t check every device.</AlertTitle>
-          <AlertDescription className="pt-1">
-            <Button className="-ml-2" size="xs" variant="ghost" onClick={onOpenHealth}>
+          <AlertDescription className="pt-1.5">
+            <Button size="xs" variant="outline" onClick={onOpenHealth}>
               {OPEN_HEALTH_LABEL}
             </Button>
           </AlertDescription>
