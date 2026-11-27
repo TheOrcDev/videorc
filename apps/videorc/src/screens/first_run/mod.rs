@@ -502,6 +502,8 @@ impl FirstRunScreen {
         }
     }
 
+    // Only the macOS player sends events so far.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn on_backdrop(&mut self, run: u64, event: backdrop::Event, cx: &mut Context<Self>) {
         if run != self.backdrop_run || !self.open {
             return;
