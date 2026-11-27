@@ -488,3 +488,37 @@ fn cancelling_a_scheduled_stream_asks_as_upcoming_asks() {
     assert_eq!(view.cancel.as_deref(), Some("Keep draft"));
     assert!(view.destructive);
 }
+
+#[test]
+fn clips_alone_leave_destinations_editable_but_output_and_pending_transitions_lock_them() {
+    use crate::studio::session::SessionPhase;
+    use crate::studio::test_support::ready_snapshot;
+    use videorc_protocol::RecordingState;
+
+    let capture = config();
+    let platforms = PlatformsState::default();
+    let mut snapshot = ready_snapshot();
+    snapshot.session.phase = SessionPhase::Recording;
+    snapshot.session.status.state = RecordingState::Recording;
+    snapshot.session.status.replay_only = true;
+    let check = |snapshot: &crate::studio::StudioSnapshot, locked: bool| {
+        let mut setup = input(&capture, &platforms);
+        setup.session_active = session_locks_setup(&snapshot.session);
+        let view = setup_view(&setup, &PageMemory::default());
+        assert_eq!(view.controls_disabled, locked);
+        assert_eq!(view.notices.session_lock.is_some(), locked);
+        assert_eq!(card(&view, "custom").disabled, locked);
+    };
+    check(&snapshot, false);
+    snapshot.session.start_pending = true;
+    check(&snapshot, true);
+    snapshot.session.start_pending = false;
+    snapshot.session.stop_pending = true;
+    check(&snapshot, true);
+    snapshot.session.stop_pending = false;
+    snapshot.session.status.replay_only = false;
+    check(&snapshot, true);
+    snapshot.session.phase = SessionPhase::Idle;
+    snapshot.session.status.state = RecordingState::Idle;
+    check(&snapshot, false);
+}
