@@ -123,7 +123,9 @@ impl StillReason {
 /// The canvas for a box of points (`backdropCanvasSize`): device pixels,
 /// long side capped. `None` for an empty box.
 pub fn canvas_size(box_width: f64, box_height: f64, scale_factor: f64) -> Option<(u32, u32)> {
-    if !(box_width > 0.0) || !(box_height > 0.0) {
+    // NaN is no size either.
+    let positive = |side: f64| side > 0.0;
+    if !positive(box_width) || !positive(box_height) {
         return None;
     }
     let scale = if scale_factor.is_finite() {
