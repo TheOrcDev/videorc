@@ -922,6 +922,11 @@ when off" for the A/B pass bands.
 | Linux readback CPU time p95                                        | ≤ 1.5 ms                                            | ≤ 2.0 ms                        |
 | Compositor frame p95 increase                                      | ≤ the background's own p95 + 0.5 ms                 | same                            |
 
+- **The app gate (owner decision Q71, 2026-11-26):** `smoke:live-background`
+  judges the in-app p95 against **2.75 ms at 1080p and 6.0 ms at 4K**. The
+  1.5 / 3.0 ms above are the hot-GPU microbench's (`live_frame_gpu_times`,
+  frames back to back); in the app one frame per tick runs on a GPU that
+  clocks down between ticks and measures 3–4× longer for the same shader.
 - **GPU memory**: 0–1 MB for four of the five at 1080p; about 13 MB for
   Plasma Wave. Add 8 MB at 4K for the half-size picture. Allocated only
   while applied; freed on change.

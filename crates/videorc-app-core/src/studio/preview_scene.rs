@@ -145,8 +145,8 @@ pub fn camera_output_layout(
 /// `reloadSceneFromCaptureConfig`'s params: the capture config's sources,
 /// layout (through the camera's output boundary, as Electron's
 /// `captureConfig.layout` is) and video; the smoke mode's sources in a
-/// preview smoke run. The working scene's background joins with the scenes
-/// (S1.6b).
+/// preview smoke run. No background: [`preview_scene_request`] adds the
+/// working scene's.
 pub fn studio_scene_params(
     capture: &CaptureConfig,
     studio: &StudioSettings,
@@ -176,7 +176,12 @@ pub fn studio_scene_params(
 /// [`should_reload_scene_from_capture_config`] holds and the settings have
 /// loaded (a scene from the defaults would flash before the stored one),
 /// `None` otherwise. The scene editor and the performance check hold the
-/// scene once they land (S1.6b, and the check with Health).
+/// scene once they land (S1.6b, and the check with Health). It wears the
+/// working background, as Electron's `loadScene` sent `activeSceneBackground`:
+/// without it every reload (at launch, 250 ms after each Stop) committed the
+/// scene with no background, and a live background and its stage margin left
+/// the Preview until the next Record or scene switch (owner report
+/// 2026-11-26).
 pub fn preview_scene_request(
     snapshot: &StudioSnapshot,
     smoke_preview: bool,
@@ -191,11 +196,17 @@ pub fn preview_scene_request(
             performance_check_running: snapshot.performance.hold,
         });
     allowed.then(|| {
-        studio_scene_params(
+        let mut params = studio_scene_params(
             &snapshot.settings.capture,
             &snapshot.settings.studio,
             smoke_preview,
-        )
+        );
+        params.background = snapshot
+            .scenes
+            .working_background
+            .as_ref()
+            .and_then(|background| serde_json::from_value(background.clone()).ok());
+        params
     })
 }
 
@@ -360,6 +371,36 @@ mod tests {
         assert!(params.layout.camera_background.is_some());
         assert!(params.layout.camera_chroma_key_enabled);
         assert_eq!(params.layout.camera_chroma_key_color, "#0000FF");
+    }
+
+    /// Owner report 2026-11-26: the idle reload (at launch, 250 ms after a
+    /// Stop) committed the scene with no background, so a live background
+    /// and its stage margin left the Preview. It wears the working
+    /// background, as Electron's `loadScene` did; with none it sends none.
+    #[test]
+    fn the_idle_reload_wears_the_working_background() {
+        let mut snapshot = super::super::test_support::ready_snapshot();
+        let request = preview_scene_request(&snapshot, false).expect("idle reloads");
+        assert_eq!(request.background, None);
+        snapshot.scenes.working_background = Some(serde_json::json!({
+            "assetId": "live-silk-satin",
+            "managedAssetPath": "videorc-asset://background/live-silk-satin.webp",
+            "fit": "fill",
+            "scale": 100,
+            "offsetX": 0,
+            "offsetY": 0,
+            "blurPx": 0,
+            "dimPercent": 0,
+            "saturationPercent": 100,
+            "vignettePercent": 0,
+            "visibilityPercent": 20,
+            "live": {"id": "silk", "look": "satin", "motion": "calm"}
+        }));
+        let request = preview_scene_request(&snapshot, false).expect("idle reloads");
+        let background = request.background.expect("the working background");
+        assert_eq!(background.asset_id, "live-silk-satin");
+        assert_eq!(background.visibility_percent, 20.0);
+        assert!(background.live.is_some(), "the live spec rides along");
     }
 
     /// `loadScene(config, config.sources)`: a reload confirms the capture

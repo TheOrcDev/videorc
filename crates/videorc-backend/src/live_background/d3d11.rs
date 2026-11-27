@@ -483,7 +483,7 @@ impl LiveBackgroundD3d11Renderer {
         let tick = input.tick;
         let gpu_ms = self.take_last_gpu_ms();
         self.guard.follow(input.spec.id);
-        self.guard.observe(&tick, gpu_ms);
+        self.guard.observe(&tick, gpu_ms, output);
         let p95 = self.guard.last_p95_ms();
         let frame_size = internal_size(input.spec.id, output, GuardLevel::Full);
         let still = if let Some(reason) = preflight {
@@ -1873,7 +1873,7 @@ mod tests {
         };
         renderer.inject_gpu_ms(Some(10.0));
         let mut renderings = Vec::new();
-        for frame in 0..260_u32 {
+        for frame in 0..520_u32 {
             input.tick = LiveBackgroundTick::new(start + interval * frame, interval, false);
             let texture = renderer
                 .render(&input, (320, 180), Some(poster), None)
@@ -1903,7 +1903,7 @@ mod tests {
         // A quiet minute later (a tick a second, on time) the guard climbs
         // one level and the shader draws again into the same live frame.
         renderer.inject_gpu_ms(Some(0.5));
-        let quiet_from = start + Duration::from_secs(5);
+        let quiet_from = start + Duration::from_secs(9);
         for second in 0..70_u32 {
             input.tick = LiveBackgroundTick::new(
                 quiet_from + Duration::from_secs(1) * second,

@@ -30071,7 +30071,7 @@ mod live_background_metal_tests {
         }
 
         /// `ticks` loop ticks 100 ms apart from `from`, every live frame
-        /// read as `gpu_ms` (61 ticks span three of the guard's 2 s windows).
+        /// read as `gpu_ms` (81 ticks span four of the guard's 2 s windows).
         async fn run_timed(&mut self, sequence: &mut u64, from: Instant, ticks: u32, gpu_ms: f64) {
             self.run_spaced(sequence, from, ticks, Duration::from_millis(100), gpu_ms)
                 .await;
@@ -30601,12 +30601,13 @@ mod live_background_metal_tests {
         run.take_off_the_takeover().await;
         let start = Instant::now();
         let mut sequence = 0;
-        run.run_timed(&mut sequence, start, 61, 10.0).await;
+        // 0 to 8.0 s: four windows over budget, two per step.
+        run.run_timed(&mut sequence, start, 81, 10.0).await;
         assert_eq!(
             run.slot.as_ref().map(|renderer| renderer.guard_level()),
             Some(crate::live_background::GuardLevel::Still)
         );
-        let later = start + Duration::from_secs(7);
+        let later = start + Duration::from_secs(9);
         let (recording_first, stream_first, _) = run.tick(sequence + 1, later).await;
         let (recording_later, stream_later, _) =
             run.tick(sequence + 2, later + Duration::from_secs(1)).await;
@@ -30634,7 +30635,7 @@ mod live_background_metal_tests {
     }
 
     /// Owner decision 2026-11-12: the poster is not for good. With no
-    /// takeover anywhere, 6 s of late ticks while the background costs 12 %
+    /// takeover anywhere, 8 s of late ticks while the background costs 12 %
     /// of a frame put it on its poster. After a quiet minute the same
     /// background moves again at half size on the recording and the stream,
     /// with the scratch it released back; a minute later it is at full size.
@@ -30652,9 +30653,9 @@ mod live_background_metal_tests {
         run.take_off_the_takeover().await;
         let start = Instant::now();
         let mut sequence = 0;
-        // Ticks at 0 to 6.0 s, every one late.
+        // Ticks at 0 to 8.0 s, every one late.
         run.late = true;
-        run.run_timed(&mut sequence, start, 61, 2.0).await;
+        run.run_timed(&mut sequence, start, 81, 2.0).await;
         assert_eq!(run.guard_level(), Some(GuardLevel::Still));
         assert_eq!(
             run.live_drawing(),
@@ -30665,14 +30666,14 @@ mod live_background_metal_tests {
             )),
             "the poster, holding no scratch"
         );
-        // A tick a second, on time, at 7 to 68 s: the minute ends at 64 s.
+        // A tick a second, on time, at 9 to 70 s: the minute ends at 68 s.
         run.late = false;
         let second = Duration::from_secs(1);
-        run.run_spaced(&mut sequence, start + second * 7, 62, second, 0.5)
+        run.run_spaced(&mut sequence, start + second * 9, 62, second, 0.5)
             .await;
         assert_eq!(run.guard_level(), Some(GuardLevel::Half));
-        let (recording_first, stream_first, _) = run.tick(sequence + 1, start + second * 69).await;
-        let (recording_later, stream_later, _) = run.tick(sequence + 2, start + second * 70).await;
+        let (recording_first, stream_first, _) = run.tick(sequence + 1, start + second * 71).await;
+        let (recording_later, stream_later, _) = run.tick(sequence + 2, start + second * 72).await;
         sequence += 2;
         for (first, later, canvas, what) in [
             (
@@ -30692,11 +30693,11 @@ mod live_background_metal_tests {
             (LiveBackgroundRendering::Half, None)
         );
         assert!(drawing.2 > 0, "the scratch released at Still is back");
-        // One level per quiet period: full size at 124 s, not before.
-        run.run_spaced(&mut sequence, start + second * 71, 52, second, 0.5)
+        // One level per quiet period: full size at 128 s, not before.
+        run.run_spaced(&mut sequence, start + second * 73, 52, second, 0.5)
             .await;
-        assert_eq!(run.guard_level(), Some(GuardLevel::Half), "at 122 s");
-        run.run_spaced(&mut sequence, start + second * 123, 4, second, 0.5)
+        assert_eq!(run.guard_level(), Some(GuardLevel::Half), "at 124 s");
+        run.run_spaced(&mut sequence, start + second * 125, 4, second, 0.5)
             .await;
         assert_eq!(run.guard_level(), Some(GuardLevel::Full));
         let drawing = run.live_drawing().expect("the renderer reported");
@@ -30733,10 +30734,11 @@ mod live_background_metal_tests {
         assert!(std::ptr::eq(&*shared.texture, &*frame.texture));
         assert!(renderer.frame_at(start + Duration::from_nanos(1)).is_none());
         assert!(renderer.frame_at(start - Duration::from_nanos(1)).is_none());
-        // 10 ms per frame is 60 % of a 60 fps frame: the guard steps to Still.
+        // 10 ms per frame is 60 % of a 60 fps frame: the guard steps to Still
+        // (two windows to Half, two more to Still).
         renderer.inject_gpu_ms(Some(10.0));
         let mut still_at = None;
-        for tick in 1..260_u32 {
+        for tick in 1..600_u32 {
             let at = start + FRAME * tick;
             input.tick = LiveBackgroundTick::new(at, FRAME, false);
             if renderer.render(&input, (WIDTH, HEIGHT), None).is_none() {

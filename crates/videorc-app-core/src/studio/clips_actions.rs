@@ -558,7 +558,21 @@ impl<B: StudioBackend> Studio<B> {
                             SessionStartIntent::RECORD,
                             None,
                         )
-                        .map(|params| {
+                        .map(|mut params| {
+                            // As a Record start sends it (`start_scene`), and
+                            // as Electron's `startBufferOnlySession` did: the
+                            // committed scene with the working background.
+                            // Without it the backend rebuilds the scene from
+                            // the capture config with no background, and every
+                            // ring start (at launch, after each Stop) took the
+                            // background and its stage margin off the Preview
+                            // (owner report 2026-11-26).
+                            params.scene = inner.start_scene().unwrap_or_else(|error| {
+                                self.config.logger.warn(format!(
+                                    "[clips] the working background isn't sendable: {error}"
+                                ));
+                                None
+                            });
                             clips::buffer_only_params(
                                 params,
                                 inner.clips.smoke_seconds,
