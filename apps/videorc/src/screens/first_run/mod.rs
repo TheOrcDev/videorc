@@ -1875,7 +1875,7 @@ fn look_body(
             .children(grant_reason.then(|| {
                 Button::new("first-run-back-permissions")
                     .label("Back to permissions")
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .disabled(locked)
                     .on_click({
@@ -2007,7 +2007,7 @@ fn sound_body(
                     div().pt(px(4.)).child(
                         Button::new("first-run-sound-back-permissions")
                             .label("Back to permissions")
-                            .variant(ButtonVariant::Ghost)
+                            .variant(ButtonVariant::Outline)
                             .size(ButtonSize::Xs)
                             .on_click({
                                 let entity = entity.clone();
