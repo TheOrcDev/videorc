@@ -575,7 +575,7 @@ describe('shipping phone remote sounds (plan 189 S10)', () => {
     for (let index = 0; index < 5; index += 1) await Promise.resolve()
   }
 
-  it('lists sounds by name, presses each by id, and stops them all', async () => {
+  it('lists sounds by name, taps each pad by id, and stops them all', async () => {
     expect((page.document.getElementById('sounds-label') as unknown as HTMLElement).hidden).toBe(
       true
     )
@@ -594,10 +594,14 @@ describe('shipping phone remote sounds (plan 189 S10)', () => {
       { name: 'Stop all sounds', hint: null, disabled: false }
     ])
     const keys = page.document.querySelectorAll<HTMLButtonElement>('#deck-sounds .key')
+    // A pad's tap is a toggle whether or not it plays: the backend decides
+    // (a second tap of a playing pad stops it, as in the app).
     keys[0].click()
+    keys[1].click()
     keys[2].click()
     expect(client().intent.mock.calls.map(([intent]) => intent)).toEqual([
-      { kind: 'soundPlay', soundId: 'airhorn' },
+      { kind: 'soundToggle', soundId: 'airhorn' },
+      { kind: 'soundToggle', soundId: 'applause' },
       { kind: 'soundStop' }
     ])
     // Names only: no file or path ever reaches the page.

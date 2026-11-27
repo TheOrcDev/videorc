@@ -597,8 +597,10 @@ function renderDeck() {
   )
 
   // Plan 189: the soundboard by name only (never a file, a path or audio).
-  // A tap is a press, so each sound plays the way its mode says on the
-  // desktop; Stop all sounds stops every one.
+  // A tap is a pad's tap (soundToggle): the desktop stops that sound when it
+  // plays and plays it otherwise, as a pad in the app does. A While held
+  // sound starts again (no mode crosses the LAN, so the hint can't promise a
+  // stop). Stop all sounds stops every one.
   const sounds = describe.sounds ?? []
   $('sounds-label').hidden = sounds.length === 0
   $('deck-sounds').replaceChildren(
@@ -607,7 +609,7 @@ function renderDeck() {
         name: sound.name,
         hint: sound.playing ? 'Playing' : undefined,
         on: sound.playing,
-        onTap: () => send({ kind: 'soundPlay', soundId: sound.id })
+        onTap: () => send({ kind: 'soundToggle', soundId: sound.id })
       })
     ),
     ...(sounds.length

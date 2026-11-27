@@ -538,6 +538,23 @@ impl SoundPlayer {
         })
     }
 
+    /// A pad's tap on a remote (`soundToggle`): true when it stops the sound
+    /// instead of pressing it. The pad rule of the apps (app-core
+    /// `pad_press_stops`, Electron `padPressStops`): a playing sound stops in
+    /// every mode but While held. A sound that is gone is not playing, so
+    /// its tap stays a press and the desktop refuses it in its own words.
+    pub(crate) fn pad_tap_stops(&self, state: &AppState, sound_id: &str) -> bool {
+        let Ok(sound) = state.database.sound_by_id(sound_id) else {
+            return false;
+        };
+        let playing = self
+            .lock()
+            .voices
+            .iter()
+            .any(|voice| voice.sound_id == sound.id);
+        playing && sound.mode != SoundMode::Hold
+    }
+
     /// `sounds.stop`: one sound's voices, or every voice.
     pub(crate) fn stop(&self, state: &AppState, sound_id: Option<&str>) -> SoundsPlayback {
         self.lock()
@@ -770,6 +787,104 @@ mod tests {
         let emitted = playback_events(&mut events);
         assert!(emitted.len() >= 8, "{}", emitted.len());
         assert!(emitted.last().unwrap().voices.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the desktop does with a relayed sound intent: `soundPlay` is
+    /// `sounds.press`, `soundStop` is `sounds.stop`.
+    async fn run_relayed(state: &AppState, intent: crate::remote_control::RemoteIntent) {
+        use crate::remote_control::RemoteIntent;
+        let player = state.soundboard.clone();
+        match intent.relayed(|sound_id| player.pad_tap_stops(state, sound_id)) {
+            RemoteIntent::SoundPlay { sound_id } => {
+                player.press(state, &sound_id).await.unwrap();
+            }
+            RemoteIntent::SoundStop { sound_id } => {
+                player.stop(state, sound_id.as_deref());
+            }
+            other => panic!("not a sound intent: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_second_tap_of_a_playing_pad_on_a_remote_stops_it_in_every_mode_but_while_held() {
+        use crate::remote_control::RemoteIntent;
+        let (dir, state, _events) = player_state();
+        let player = state.soundboard.clone();
+        // Long enough that no timer fires during the test on a loaded host.
+        let once = seed_sound(&state, "Airhorn", SoundMode::OneShot, 10_000);
+        let toggle = seed_sound(&state, "Gong", SoundMode::Toggle, 10_000);
+        let looped = seed_sound(&state, "Crickets", SoundMode::Loop, 500);
+        let held = seed_sound(&state, "Drum roll", SoundMode::Hold, 10_000);
+        let tap = |sound: &Sound| RemoteIntent::SoundToggle {
+            sound_id: sound.id.clone(),
+        };
+        let voices_of = |sound: &Sound| -> Vec<String> {
+            player
+                .playback()
+                .voices
+                .into_iter()
+                .filter(|voice| voice.sound_id == sound.id)
+                .map(|voice| voice.voice_id)
+                .collect()
+        };
+
+        for sound in [&once, &toggle, &looped] {
+            // Not playing: the tap plays it.
+            assert!(!player.pad_tap_stops(&state, &sound.id));
+            run_relayed(&state, tap(sound)).await;
+            assert_eq!(voices_of(sound).len(), 1, "{}", sound.name);
+            // Playing: the second tap stops that one sound, never a restart.
+            assert!(player.pad_tap_stops(&state, &sound.id));
+            run_relayed(&state, tap(sound)).await;
+            assert!(voices_of(sound).is_empty(), "{}", sound.name);
+            // And the third plays it again.
+            run_relayed(&state, tap(sound)).await;
+            assert_eq!(voices_of(sound).len(), 1, "{}", sound.name);
+        }
+        assert_eq!(player.playback().voices.len(), 3);
+
+        // While held: a remote has no release, so its tap stays a press and
+        // the sound starts again, as before.
+        run_relayed(&state, tap(&held)).await;
+        let first = voices_of(&held);
+        assert_eq!(first.len(), 1);
+        assert!(!player.pad_tap_stops(&state, &held.id));
+        run_relayed(&state, tap(&held)).await;
+        let second = voices_of(&held);
+        assert_eq!(second.len(), 1);
+        assert_ne!(first, second, "While held restarts");
+
+        // A named press (`soundPlay`: `/sound`, a Stream Deck key, an agent)
+        // is unchanged: Play once restarts instead of stopping.
+        let before = voices_of(&once);
+        run_relayed(
+            &state,
+            RemoteIntent::SoundPlay {
+                sound_id: once.id.clone(),
+            },
+        )
+        .await;
+        let after = voices_of(&once);
+        assert_eq!(after.len(), 1);
+        assert_ne!(before, after, "Play once restarts on a press");
+
+        // A sound that is gone: the tap stays a press for the desktop to
+        // refuse.
+        assert!(!player.pad_tap_stops(&state, "gone"));
+        assert_eq!(
+            RemoteIntent::SoundToggle {
+                sound_id: "gone".to_string()
+            }
+            .relayed(|sound_id| player.pad_tap_stops(&state, sound_id)),
+            RemoteIntent::SoundPlay {
+                sound_id: "gone".to_string()
+            }
+        );
+
+        // Stop all sounds is unchanged.
+        run_relayed(&state, RemoteIntent::SoundStop { sound_id: None }).await;
+        assert!(player.playback().voices.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

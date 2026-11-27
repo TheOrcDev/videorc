@@ -15116,6 +15116,11 @@ async fn handle_text_message_with_role(
                             message: Some("Remote control state unavailable.".to_string()),
                         });
                     if ticket.accepted {
+                        // A pad's tap (`soundToggle`) is decided here, where
+                        // the mode and the voices live: the desktop runs the
+                        // `soundStop` or `soundPlay` it always ran.
+                        let intent = intent
+                            .relayed(|sound_id| state.soundboard.pad_tap_stops(state, sound_id));
                         state.emit_event(
                             "remote.intent",
                             serde_json::json!({ "intentId": ticket.intent_id, "intent": intent }),
