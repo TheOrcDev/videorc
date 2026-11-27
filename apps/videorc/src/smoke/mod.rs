@@ -42,6 +42,7 @@
 pub mod activate;
 pub mod capture;
 pub mod driver;
+mod preview_drain;
 pub mod shell;
 pub mod windows;
 
@@ -86,8 +87,8 @@ pub trait ShellSmoke: 'static {
 }
 
 /// The preview's commands on the GPUI app. The preview draws in the main
-/// window (docked) or its own (floating, macOS); Electron's surface and
-/// host commands have no GPUI form and stay "not supported".
+/// window (docked) or its own (floating, macOS). Host placement stays with
+/// the GPUI element; the drain awaits its own feed.
 pub const PREVIEW_COMMANDS: &[&str] = &[
     "inspect-native-preview-live-background",
     "inspect-native-preview-runtime",
@@ -177,7 +178,8 @@ pub struct ShellCommands {
 
 impl SmokeCommandHandler for ShellCommands {
     fn handles(&self, command: &str) -> bool {
-        command == "open-tab"
+        command == "drain-native-preview-host-commands"
+            || command == "open-tab"
             || command == "main-window-id"
             || command == "studio-reveal-vertical-stream"
             || PREVIEW_COMMANDS.contains(&command)
@@ -193,6 +195,27 @@ impl SmokeCommandHandler for ShellCommands {
                 return self
                     .ui
                     .run(move |cx| set_preview_window_bounds(&params, cx))
+                    .await?;
+            }
+            if command == "drain-native-preview-host-commands" {
+                if !params.is_empty() {
+                    return Err("drain-native-preview-host-commands takes no parameters.".into());
+                }
+                let answer = self
+                    .ui
+                    .run(|cx| {
+                        let preview = shell(cx)?.preview_entity().ok_or(MAIN_WINDOW_NOT_READY)?;
+                        preview.read(cx).smoke_drain_host_commands()
+                    })
+                    .await??;
+                let count = preview_drain::wait_for_drain(answer).await?;
+                return self
+                    .ui
+                    .run(move |cx| {
+                        let mut status = shell(cx)?.preview("native-preview-surface-status", cx)?;
+                        status["drainedCommandCount"] = serde_json::json!(count);
+                        Ok(status)
+                    })
                     .await?;
             }
             if PREVIEW_COMMANDS.contains(&command) {

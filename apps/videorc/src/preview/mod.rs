@@ -598,6 +598,24 @@ impl Preview {
         (video.width > 0 && video.height > 0).then_some((video.width, video.height))
     }
 
+    /// The same feed that owns the GPUI layer drains its backend queue.
+    /// Unlike Electron, GPUI already places its own layer; these host commands
+    /// are consumed by the feed, never applied to a second window host.
+    pub fn smoke_drain_host_commands(
+        &self,
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<Vec<serde_json::Value>, String>>, String>
+    {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            self.native
+                .as_ref()
+                .map(|native| native.element.drain_host_commands())
+                .ok_or_else(|| "The GPUI native preview is not running.".to_string())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        Err("This platform has no GPUI native preview host.".to_string())
+    }
+
     /// `native-preview-surface-status` (Electron's `nativePreviewSurfaceStatus`):
     /// what the element presents, read live from its feed (the status the
     /// log reads refreshes only every 750 ms). `presentedFrameId` advances
