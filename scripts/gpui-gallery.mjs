@@ -629,6 +629,19 @@ async function openOtherWindow(command, { role, open, bounds, width, height }) {
   await sleep(SETTLE_MS)
   if (bounds) await command(bounds, { x: 120, y: 60, width, height })
   await sleep(800)
+  if (role === 'comments') {
+    const state = await command('comments-window-state')
+    log(`comments-window-state: ${JSON.stringify(state)}`)
+    // A correctly sized screenshot can still contain a stale, larger GPUI
+    // viewport, placing the composer/footer below the native window edge.
+    for (const [key, expected] of Object.entries({ width, height })) {
+      if (state.bounds?.[key] !== expected || state.contentBounds?.[key] !== expected) {
+        throw new Error(
+          `Stream Manager ${key}: expected ${expected}, frame=${state.bounds?.[key]}, viewport=${state.contentBounds?.[key]}`
+        )
+      }
+    }
+  }
   const raised = await command('raise-window', { role, level: 'floating', focus: false })
   if (!Number.isInteger(raised?.windowId)) throw new Error(`no window id for ${role}`)
   await sleep(SETTLE_MS)
