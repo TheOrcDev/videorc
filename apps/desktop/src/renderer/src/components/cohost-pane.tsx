@@ -780,10 +780,11 @@ export function BuddySayFooter({
                 </Button>
               ) : null}
               <Button
+                className="text-foreground"
                 data-testid="buddy-off-outputs-suggest"
                 size="xs"
                 type="button"
-                variant="ghost"
+                variant="outline"
                 onClick={onUseSuggest}
               >
                 {offOutputsNotice.secondaryAction}
@@ -937,7 +938,13 @@ export function CohostListenPrompt({
           >
             Turn on
           </Button>
-          <Button size="xs" type="button" variant="ghost" onClick={answer}>
+          <Button
+            className="text-foreground"
+            size="xs"
+            type="button"
+            variant="outline"
+            onClick={answer}
+          >
             Not now
           </Button>
         </div>
