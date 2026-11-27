@@ -209,7 +209,9 @@ jobs:
     needs: scope
     if: ${{ needs.scope.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.scope.outputs.macos_sentinel == 'true' && needs.scope.outputs.electron_tests == 'true' }}
     runs-on: macos-15
-    timeout-minutes: 20
+    # 2026-11-27: the backend build alone hit its 15 min step limit on busy
+    # runners (#2477, #2525 runs); 30 min build + boot/sentinel fits in 40.
+    timeout-minutes: 40
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -254,7 +256,7 @@ jobs:
         # The sentinel launches the dev app through `cargo run`. Build the
         # exact binary first so its 120-second readiness budget measures app
         # startup rather than a cold Rust binary link on the macOS runner.
-        timeout-minutes: 15
+        timeout-minutes: 30
         run: cargo build -p videorc-backend --bin videorc-backend
 
       - name: Install dependencies
