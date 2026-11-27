@@ -17,7 +17,8 @@ an airhorn, applause, a laugh track (plan 189). It is free for everyone.
 - **Manage** on the Sounds page (the sidebar's Assets group): "Import sounds…" takes WAV, MP3, M4A, OGG
   or FLAC, up to 30 seconds each, 24 sounds and 5 minutes in all. Each row
   sets the sound's name, volume, key and how a press plays it:
-  - **Play once**: every press plays it from the start;
+  - **Play once**: a press plays it from the start (a pad, a key or a phone
+    tap pressed while it plays stops it instead);
   - **Play/stop**: a press starts it, the next press stops it;
   - **Loop**: like Play/stop, and it repeats until stopped;
   - **While held**: it plays while you hold the pad or the key.
