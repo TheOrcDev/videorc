@@ -651,9 +651,10 @@ impl AudioSection {
             IconName::Desktop,
             words::SYSTEM_AUDIO,
             theme,
-        )
-        .disabled(row.permission_required);
-        if let Some(chip) = row.chip {
+        );
+        // Without the permission the row's own warning says what is missing:
+        // "Needs permission" beside the name would cut it to "System…".
+        if let Some(chip) = row.chip.filter(|_| !row.permission_required) {
             header = header.child(chip_badge(chip.label, chip.tone));
         }
         let checked = row.checked;
@@ -695,10 +696,14 @@ impl AudioSection {
             ));
         }
         if let Some(issue) = row.issue.as_ref() {
-            let buttons = match row.issue_action {
+            // The action is a real button under the words (owner,
+            // 2026-11-27: an app's actions are buttons, never text links).
+            // `Alert::action` pins its control over the top right and keeps
+            // 72 px for it, which "Open Permissions" overran onto the text.
+            let button = match row.issue_action {
                 Some(IssueAction::OpenPermissions) => Some(
                     Button::new("studio-open-permissions")
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Xs)
                         .label(words::OPEN_PERMISSIONS)
                         .on_click(cx.listener(|_, _, _, cx| {
@@ -707,7 +712,7 @@ impl AudioSection {
                 ),
                 Some(IssueAction::Resume) => Some(
                     Button::new("studio-system-audio-resume")
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Xs)
                         .label(words::RESUME)
                         .on_click(cx.listener(|this, _, _, _| this.resume_system_audio())),
@@ -717,8 +722,8 @@ impl AudioSection {
             let mut alert = Alert::new("studio-system-audio-issue")
                 .variant(AlertVariant::Warning)
                 .title(issue.clone());
-            if let Some(button) = buttons {
-                alert = alert.action(button);
+            if let Some(button) = button {
+                alert = alert.description(div().flex().pt(px(6.)).child(button));
             }
             body = body.child(alert);
         }
