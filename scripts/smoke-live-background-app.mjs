@@ -14,7 +14,8 @@
 // - it never freezes for more than half a second;
 // - the stage (the synthetic screen) is not the background;
 // - the poster is never uploaded per frame (immutable uploads stay flat);
-// - the background's own p95 is within budget.
+// - the guard never falls to the still poster (Half may recover to Full).
+// Q186: per-case p50/p95 and the former budgets are information, not gates.
 // Then the background comes off and the live programs and scratch drop to 0
 // (zero cost when off). The guard may draw at half size on a busy host; a
 // fall to the poster fails, so run it on a quiet host (it is load-sensitive). With VIDEORC_LIVE_BACKGROUND_FORCE_STILL=1 (debug
@@ -32,7 +33,7 @@
 // stops the idle compositor must report no live background again.
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
 import { loadavg, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -47,6 +48,9 @@ import {
   compositorDrawsNoLiveBackground,
   idlePreviewLiveBackgroundReporter,
   liveBackgroundSampleMismatches,
+  liveBackgroundContinuityFailures,
+  liveBackgroundTimingSummary,
+  parseLiveBackgroundGuardReport,
   proofSurfaceLiveBackgroundVerdict,
   sceneCarriesBackground,
   smokeMicrophoneEnv,
@@ -74,14 +78,15 @@ const gpuiApp = smokeAppIsGpui()
 const idleReporter = gpuiApp ? 'compositor' : idlePreviewLiveBackgroundReporter(process.platform)
 
 /**
- * The background's own p95 in the app on an M-series Mac (owner decision Q71,
+ * Informational p95 reference in the app on an M-series Mac (owner decision Q71,
  * 2026-11-26). Plan 190's 1.5 / 3.0 ms came from the hot-GPU microbench
  * (`live_frame_gpu_times`, 70 frames back to back); in the app the live
  * buffer draws once per tick on an otherwise idle GPU, whose clocks drop
  * between ticks, so the same shader measures 3–4× longer (Silk 1.5–2.4 ms at
  * 1080p, the heaviest 4K cases 5–6 ms on a quiet host, 2026-10-31).
  */
-const BUDGET_MS = { 1080: 2.75, 2160: 6.0 }
+// Q186: these historical numbers never decide pass/fail.
+const TIMING_REFERENCE_MS = { 1080: 2.75, 2160: 6.0 }
 const CASES = (
   process.env.VIDEORC_LIVE_BACKGROUND_SMOKE_CASES ??
   [
@@ -171,6 +176,11 @@ const LAYOUT = {
 
 mkdirSync(outputDirectory, { recursive: true })
 
+const caseResults = []
+let currentCase = null
+let collectGuardReports = false
+let offStateClean = false
+let appStopped = false
 let stopApp = async () => {}
 try {
   const launch = await launchDevApp({
@@ -186,7 +196,13 @@ try {
     },
     timeoutMs,
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
-    onLine: (line) => console.log(line)
+    onLine: (line) => {
+      console.log(line)
+      const report = parseLiveBackgroundGuardReport(line)
+      if (collectGuardReports && report && report.id === currentCase?.id) {
+        currentCase.guardReports.push(report)
+      }
+    }
   })
   stopApp = launch.stop
   const ws = await connectBackend(launch.connections['backend-ready'], timeoutMs)
@@ -243,7 +259,26 @@ try {
     assert.equal(before.liveBackground, undefined, 'no live status while off')
 
     for (const [index, testCase] of CASES.entries()) {
-      await runCase(testCase, index)
+      currentCase = {
+        case: caseLabel(testCase),
+        id: testCase.id,
+        status: 'RUNNING',
+        guardReports: [],
+        ...liveBackgroundTimingSummary(null, [], TIMING_REFERENCE_MS[testCase.height])
+      }
+      caseResults.push(currentCase)
+      try {
+        await runCase(testCase, index)
+        currentCase.status = 'PASS'
+      } catch (error) {
+        currentCase.status = 'FAIL'
+        currentCase.error = error?.message ?? String(error)
+        console.error(`Live background case FAIL: ${currentCase.case}: ${currentCase.error}`)
+        // Finish a failed take before trying the next case. A cleanup failure
+        // aborts the run; a case failure stays red in the final summary.
+        collectGuardReports = false
+        await request(ws, timeoutMs, 'session.stop')
+      }
     }
 
     // Off again: the programs and scratch are released.
@@ -256,6 +291,13 @@ try {
         (current.framePipeline?.liveBackgroundScratchBytes ?? 0) === 0
       )
     }, 'the live background to release its programs and scratch')
+    offStateClean = true
+    const failed = caseResults.filter((result) => result.status !== 'PASS')
+    assert.equal(
+      failed.length,
+      0,
+      `${failed.length} live background cases failed: ${failed.map((result) => result.case).join(', ')}`
+    )
     console.log('Live background smoke PASS')
   } finally {
     await request(ws, timeoutMs, 'session.stop').catch(() => {})
@@ -396,6 +438,7 @@ try {
           `${label}: the local RTMP listener exited: ${listener.stderr.join('').trim()}`
         )
       }
+      collectGuardReports = true
       started = await request(ws, timeoutMs, 'session.start', {
         ...sessionParams(capability.capabilityId, testCase, target),
         scene: {
@@ -420,6 +463,18 @@ try {
         await sleep(500)
       }
       late = await status()
+      collectGuardReports = false
+      Object.assign(
+        currentCase,
+        liveBackgroundTimingSummary(
+          late.liveBackground,
+          currentCase.guardReports.filter(
+            (report) => report.width === testCase.width && report.height === testCase.height
+          ),
+          TIMING_REFERENCE_MS[testCase.height]
+        ),
+        { endRendering: late.liveBackground?.rendering ?? null }
+      )
       console.log(`${label}: at the end of the take ${JSON.stringify(late.liveBackground)}`)
       stopped = await request(ws, timeoutMs, 'session.stop')
     } finally {
@@ -471,7 +526,6 @@ try {
     // session starts a new compositor run, whose status carries no live
     // background until its first 2 s diagnostic window: skip only those
     // leading samples (the artifacts below judge the pixels from 1 s on).
-    const allowed = forced ? ['still'] : ['shader', 'half']
     const firstReported = samples.findIndex((sample) => sample.liveBackground !== undefined)
     assert(firstReported >= 0, `${label}: no status sample reported the live background`)
     // Samples are 0.5 s apart from 1.5 s in; the first window ends by 2 s, so
@@ -485,12 +539,14 @@ try {
         `${label}: ${firstReported}/${samples.length} samples came before the new run's first status`
       )
     }
-    for (const sample of samples.slice(firstReported)) {
-      assert(
-        allowed.includes(sample.liveBackground?.rendering),
-        `${label}: the live background left ${allowed.join('/')} mid-recording: ${JSON.stringify(sample.liveBackground)}`
-      )
-    }
+    const continuityFailures = liveBackgroundContinuityFailures(
+      [...samples.slice(firstReported), late],
+      {
+        forced,
+        guardReports: currentCase.guardReports
+      }
+    )
+    assert.deepEqual(continuityFailures, [], `${label}: ${continuityFailures.join('; ')}`)
     if (idleReporter === 'proof-surface') {
       // The idle Linux preview has no compositor report to name the case: the
       // take's run is where its id (and a forced still's reason) is checked.
@@ -505,6 +561,8 @@ try {
       )
     }
     const halved = samples.filter((sample) => sample.liveBackground?.rendering === 'half').length
+    currentCase.halfSamples = halved
+    currentCase.statusSamples = samples.length
     if (halved > 0) {
       console.log(`${label}: the guard drew at half size for ${halved}/${samples.length} samples`)
     }
@@ -517,18 +575,14 @@ try {
     )
     if (!forced) {
       assert(late.framePipeline.liveBackgroundPrograms > 0, 'the live programs are counted')
-      const p95 = late.liveBackground?.p95Ms
-      const budget = BUDGET_MS[testCase.height]
-      console.log(
-        `${label}: p95 ${p95?.toFixed?.(2) ?? 'n/a'} ms (budget ${budget}), load ${loadavg()[0].toFixed(1)}`
+      assert(
+        Number.isFinite(currentCase.p95Ms) && currentCase.p95Ms >= 0,
+        `${label}: missing or invalid p95 timing diagnostic`
       )
-      if (process.env.VIDEORC_LIVE_BACKGROUND_SMOKE_SKIP_BUDGET !== '1') {
-        assert(
-          typeof p95 === 'number' && p95 <= budget,
-          `${label}: the live background's p95 ${p95} ms exceeds ${budget} ms (load ${loadavg()[0].toFixed(1)})`
-        )
-      }
     }
+    console.log(
+      `${label}: p50 ${currentCase.p50Ms ?? 'n/a'} ms (${currentCase.p50Source}), p95 ${currentCase.p95Ms ?? 'n/a'} ms (reference ${currentCase.referenceMs}, informational only), load ${loadavg()[0].toFixed(1)}`
+    )
     verifyArtifact(path, testCase, `${label} recording`)
     const quality = await analyzeRecording(path, {
       ffmpegPath,
@@ -778,7 +832,46 @@ try {
     }
   }
 } finally {
-  await stopApp()
+  collectGuardReports = false
+  try {
+    await stopApp()
+    appStopped = true
+  } finally {
+    const summary = {
+      status:
+        appStopped &&
+        offStateClean &&
+        caseResults.length === CASES.length &&
+        caseResults.every((result) => result.status === 'PASS')
+          ? 'PASS'
+          : 'FAIL',
+      requestedCases: CASES.length,
+      completedCases: caseResults.length,
+      offStateClean,
+      appStopped,
+      forced,
+      timingGated: false,
+      cases: caseResults
+    }
+    writeFileSync(
+      join(outputDirectory, 'live-background-summary.json'),
+      JSON.stringify(summary, null, 2) + '\n'
+    )
+    console.log(
+      'Live background summary (timings informational; p50 n/a when no transition log exposes it):'
+    )
+    console.table(
+      caseResults.map((result) => ({
+        case: result.case,
+        status: result.status,
+        p50Ms: result.p50Ms ?? 'n/a',
+        p95Ms: result.p95Ms ?? 'n/a',
+        referenceMs: result.referenceMs,
+        endRendering: result.endRendering ?? 'n/a',
+        halfSamples: result.halfSamples ?? 'n/a'
+      }))
+    )
+  }
 }
 
 function liveBackground({ id, look }) {

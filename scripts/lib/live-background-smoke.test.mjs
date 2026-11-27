@@ -11,6 +11,9 @@ import {
   compositorDrawsNoLiveBackground,
   idlePreviewLiveBackgroundReporter,
   liveBackgroundSampleMismatches,
+  liveBackgroundContinuityFailures,
+  liveBackgroundTimingSummary,
+  parseLiveBackgroundGuardReport,
   proofSurfaceLiveBackgroundVerdict,
   sceneCarriesBackground,
   smokeMicrophoneEnv,
@@ -187,4 +190,101 @@ test('the busiest ring square judges a sparse background; a still ring still fai
   assert(still.motion < SPARSE_RING_MOTION)
   assert.equal(busiestRingSquare(measured([0.5, 0.5])).name, 'left', 'the first of a tie')
   assert.equal(busiestRingSquare([{ name: 'x', motion: Number.NaN }]), null)
+})
+
+test('Q186 allows high p95 and Half recovery while rejecting any sampled poster', () => {
+  const sample = (rendering, p95Ms = 100) => ({ liveBackground: { rendering, p95Ms } })
+  assert.deepEqual(
+    liveBackgroundContinuityFailures([sample('shader'), sample('half'), sample('shader')]),
+    []
+  )
+  assert.deepEqual(liveBackgroundContinuityFailures([sample('half')]), [])
+  assert.equal(
+    liveBackgroundContinuityFailures([sample('shader'), sample('still'), sample('shader')]).length,
+    1
+  )
+  for (const rendering of ['poster', 'starting', undefined]) {
+    assert.equal(liveBackgroundContinuityFailures([sample(rendering)]).length, 1)
+  }
+  assert.equal(liveBackgroundContinuityFailures([{}]).length, 1)
+  assert.equal(liveBackgroundContinuityFailures([]).length, 1)
+})
+
+test('Q186 rejects a Still transition between polls even when shader status recovers', () => {
+  const samples = [{ liveBackground: { rendering: 'shader' } }]
+  assert.equal(
+    liveBackgroundContinuityFailures(samples, {
+      guardReports: [
+        { before: 'Half', after: 'Still' },
+        { before: 'Still', after: 'Full' }
+      ]
+    }).length,
+    1
+  )
+  assert.deepEqual(
+    liveBackgroundContinuityFailures(samples, {
+      guardReports: [
+        { before: 'Full', after: 'Half' },
+        { before: 'Half', after: 'Full' }
+      ]
+    }),
+    []
+  )
+})
+
+test('the explicit forced-still diagnostic retains its inverse rendering gate', () => {
+  assert.deepEqual(
+    liveBackgroundContinuityFailures([{ liveBackground: { rendering: 'still' } }], {
+      forced: true
+    }),
+    []
+  )
+  assert.equal(
+    liveBackgroundContinuityFailures([{ liveBackground: { rendering: 'shader' } }], {
+      forced: true
+    }).length,
+    1
+  )
+})
+
+test('guard log diagnostics preserve measured median and p95, including transition direction', () => {
+  const report = parseLiveBackgroundGuardReport(
+    '[backend:info] INFO live background Some(LiquidChrome) at 1920x1080: guard Full -> Half (median 4.12 ms, p95 4.55 ms, 120 frames, 7 late, frame 16.7 ms)'
+  )
+  assert.deepEqual(report, {
+    id: 'liquid-chrome',
+    width: 1920,
+    height: 1080,
+    before: 'Full',
+    after: 'Half',
+    p50Ms: 4.12,
+    p95Ms: 4.55,
+    frames: 120
+  })
+  assert.equal(parseLiveBackgroundGuardReport('unrelated median 9 ms'), null)
+  const missing = parseLiveBackgroundGuardReport(
+    'live background Some(Silk) at 1920x1080: guard Still -> Half (median NaN ms, p95 NaN ms, 0 frames'
+  )
+  assert.equal(missing.p50Ms, null)
+  assert.equal(missing.p95Ms, null)
+})
+
+test('timing summary is informational and never labels a median of p95 polls as p50', () => {
+  assert.deepEqual(liveBackgroundTimingSummary({ p95Ms: 4.5486 }, [], 2.75), {
+    p50Ms: null,
+    p50Source: 'unavailable: status exposes p95 only; no guard transition',
+    p95Ms: 4.5486,
+    p95Source: 'last status window',
+    referenceMs: 2.75,
+    timingGated: false
+  })
+  const summary = liveBackgroundTimingSummary(
+    { p95Ms: 9 },
+    [{ p50Ms: 3 }, { p50Ms: 4 }, { p50Ms: null }],
+    2.75
+  )
+  assert.equal(summary.p50Ms, 4)
+  assert.equal(summary.p50Source, 'last guard transition window')
+  assert.equal(summary.p95Ms, 9)
+  assert.equal(summary.timingGated, false)
 })

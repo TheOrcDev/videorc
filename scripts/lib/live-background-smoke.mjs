@@ -142,3 +142,61 @@ export function busiestRingSquare(measured) {
   }
   return busiest
 }
+
+/** Q186: timing is diagnostic; an animated Half is allowed, a poster is not. */
+export function liveBackgroundContinuityFailures(
+  samples,
+  { forced = false, guardReports = [] } = {}
+) {
+  const allowed = forced ? ['still'] : ['shader', 'half']
+  const failures = []
+  if (samples.length === 0) failures.push('no live background samples')
+  for (const [index, sample] of samples.entries()) {
+    if (!allowed.includes(sample.liveBackground?.rendering)) {
+      failures.push(
+        `sample ${index} left ${allowed.join('/')}: ${JSON.stringify(sample.liveBackground)}`
+      )
+    }
+  }
+  if (
+    !forced &&
+    guardReports.some(({ before, after }) => before === 'Still' || after === 'Still')
+  ) {
+    failures.push('the guard reached Still (poster), even if it later recovered')
+  }
+  return failures
+}
+
+/** Existing backend transition logs carry p50; the pinned status protocol only has p95. */
+export function parseLiveBackgroundGuardReport(line) {
+  const match =
+    /live background (?:Some\()?([A-Za-z]+)\)? at (\d+)x(\d+): guard (Full|Half|Still) -> (Full|Half|Still) \(median ([\d.]+|NaN) ms, p95 ([\d.]+|NaN) ms, (\d+) frames/.exec(
+      line
+    )
+  if (!match) return null
+  return {
+    id: match[1].replace(/[A-Z]/g, (letter, index) => (index ? '-' : '') + letter.toLowerCase()),
+    width: Number(match[2]),
+    height: Number(match[3]),
+    before: match[4],
+    after: match[5],
+    p50Ms: Number.isFinite(Number(match[6])) ? Number(match[6]) : null,
+    p95Ms: Number.isFinite(Number(match[7])) ? Number(match[7]) : null,
+    frames: Number(match[8])
+  }
+}
+
+/** Do not manufacture a median from p95 polls; name unavailable diagnostics explicitly. */
+export function liveBackgroundTimingSummary(liveBackground, guardReports, referenceMs) {
+  const report = guardReports.findLast((item) => item.p50Ms !== null)
+  return {
+    p50Ms: report?.p50Ms ?? null,
+    p50Source: report
+      ? 'last guard transition window'
+      : 'unavailable: status exposes p95 only; no guard transition',
+    p95Ms: Number.isFinite(liveBackground?.p95Ms) ? liveBackground.p95Ms : null,
+    p95Source: 'last status window',
+    referenceMs,
+    timingGated: false
+  }
+}
