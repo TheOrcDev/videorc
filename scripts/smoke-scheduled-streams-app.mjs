@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { mkdirSync, copyFileSync } from 'node:fs'
+import { tmpdir, homedir } from 'node:os'
+import { join, basename, dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
@@ -13,6 +13,27 @@ import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { startScheduledStreamsFixture } from './lib/scheduled-streams-fixture.mjs'
 import { isDataApiPath, summarizeYouTubeAttempts } from './lib/fake-youtube-api.mjs'
 
+import { createLiveServiceGpui } from './lib/live-service-gpui.mjs'
+const gpui = smokeAppIsGpui()
+let shot = 0
+const native = createLiveServiceGpui(() => smoke, {
+  afterAction: async (action) => {
+    const result = await requestSmokeCommand(
+      smoke,
+      'capture-page',
+      { name: `scheduled-${++shot}-${action}` },
+      { timeoutMs }
+    )
+    const mirror = join(
+      homedir(),
+      '.local/share/ghostex/i',
+      basename(dirname(directory)),
+      'scheduled-streams'
+    )
+    mkdirSync(mirror, { recursive: true })
+    copyFileSync(result.file, join(mirror, basename(result.file)))
+  }
+})
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const directory =
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-scheduling-${Date.now()}`)
@@ -31,8 +52,12 @@ const waitFor = async (fn, label) => {
     if (await fn()) return
     await wait(100)
   }
-  const diagnostics = await evaluate(
-    'return ({scene:window.__videorcSmokeScenePresets?.state(),streaming:window.__videorcSmokeScenePresets?.streamingState()})'
+  const diagnostics = await (
+    gpui
+      ? native.state()
+      : evaluate(
+          'return ({scene:window.__videorcSmokeScenePresets?.state(),streaming:window.__videorcSmokeScenePresets?.streamingState()})'
+        )
   ).catch(() => null)
   throw new Error(`Timed out waiting for ${label}; ${JSON.stringify(diagnostics)}`)
 }
@@ -40,16 +65,20 @@ const openUpcoming = async () => {
   await requestSmokeCommand(smoke, 'open-tab', { tab: 'streaming' }, { timeoutMs })
   await waitFor(
     () =>
-      evaluate(
-        `const tab=[...document.querySelectorAll('[role="tab"]')].find(item=>item.textContent==='Upcoming'); if(tab) tab.click(); return Boolean(tab)`
-      ),
+      gpui
+        ? native.openUpcoming()
+        : evaluate(
+            `const tab=[...document.querySelectorAll('[role="tab"]')].find(item=>item.textContent==='Upcoming'); if(tab) tab.click(); return Boolean(tab)`
+          ),
     'Upcoming tab mounted'
   )
   await waitFor(
     () =>
-      evaluate(
-        'return Boolean(window.__videorcSmokeScheduledStreams && !window.__videorcSmokeScheduledStreams.state().loading)'
-      ),
+      gpui
+        ? native.scheduledState().then((s) => !s.loading)
+        : evaluate(
+            'return Boolean(window.__videorcSmokeScheduledStreams && !window.__videorcSmokeScheduledStreams.state().loading)'
+          ),
     'Upcoming provider actions'
   )
   console.log('[scheduling] Upcoming ready')
@@ -79,6 +108,7 @@ const launch = async () => {
     }
   })
   smoke = app.connections['preview-motion-ready']
+  if (gpui) await native.send('main-window-set-bounds', { width: 1650, height: 962 })
   ws = await connectBackend(app.connections['backend-ready'], timeoutMs)
   await openUpcoming()
 }
@@ -95,9 +125,11 @@ const assertNoTake = async () => {
 const action = async (name, eventId, fields = {}) => {
   console.log(`[scheduling] ${name}`)
   const event = await get(eventId)
-  return evaluate(
-    `return window.__videorcSmokeScheduledStreams.mutate(${JSON.stringify(name)}, ${JSON.stringify({ eventId, expectedRevision: event.revision, ...fields })})`
-  )
+  return gpui
+    ? native.mutate(name, { eventId, expectedRevision: event.revision, ...fields })
+    : evaluate(
+        `return window.__videorcSmokeScheduledStreams.mutate(${JSON.stringify(name)}, ${JSON.stringify({ eventId, expectedRevision: event.revision, ...fields })})`
+      )
 }
 const create = async (title, thumbnailAssetId) => {
   const id = randomUUID()
@@ -111,9 +143,16 @@ const create = async (title, thumbnailAssetId) => {
     offsetChoice: null,
     thumbnailAssetId
   }
-  await evaluate(
-    `return window.__videorcSmokeScheduledStreams.mutate('saveDraft', ${JSON.stringify({ eventId: id, expectedRevision: 0, accountId: 'scheduled-smoke-channel', metadata })})`
-  )
+  await (gpui
+    ? native.mutate('saveDraft', {
+        eventId: id,
+        expectedRevision: 0,
+        accountId: 'scheduled-smoke-channel',
+        metadata
+      })
+    : evaluate(
+        `return window.__videorcSmokeScheduledStreams.mutate('saveDraft', ${JSON.stringify({ eventId: id, expectedRevision: 0, accountId: 'scheduled-smoke-channel', metadata })})`
+      ))
   return id
 }
 try {
@@ -144,41 +183,66 @@ try {
       )
     }
     // Opening the real form has no provider side effect.
-    await evaluate(
-      `const button=[...document.querySelectorAll('button')].find(item=>item.textContent==='Schedule on YouTube'); button.click(); return true`
-    )
+    await (gpui
+      ? native.ui().click({ id: 'schedule-on-youtube' })
+      : evaluate(
+          `const button=[...document.querySelectorAll('button')].find(item=>item.textContent==='Schedule on YouTube'); button.click(); return true`
+        ))
     assert.equal(fixture.events.size, 0)
     await waitFor(
-      () => evaluate(`return Boolean(document.querySelector('#schedule-title'))`),
+      () =>
+        gpui
+          ? native.exists({ id: 'schedule-title-input' })
+          : evaluate(`return Boolean(document.querySelector('#schedule-title'))`),
       'schedule form'
     )
-    await evaluate(
-      `const title=document.querySelector('#schedule-title'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(title,'A detailed upcoming livestream title with a long channel name and international guests'); title.dispatchEvent(new Event('input',{bubbles:true})); return true`
-    )
-    await evaluate(
-      `const channel=document.querySelector('#schedule-channel');channel.focus();channel.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));return true`
-    )
+    await (gpui
+      ? native
+          .ui()
+          .type(
+            { id: 'schedule-title-input' },
+            'A detailed upcoming livestream title with a long channel name and international guests'
+          )
+      : evaluate(
+          `const title=document.querySelector('#schedule-title'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(title,'A detailed upcoming livestream title with a long channel name and international guests'); title.dispatchEvent(new Event('input',{bubbles:true})); return true`
+        ))
+    await (gpui
+      ? native.openSelect({ id: 'schedule-account' })
+      : evaluate(
+          `const channel=document.querySelector('#schedule-channel');channel.focus();channel.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));return true`
+        ))
     await waitFor(
-      () => evaluate(`return Boolean(document.querySelector('[role="option"]'))`),
+      () =>
+        gpui
+          ? native.options().then((v) => v.length > 0)
+          : evaluate(`return Boolean(document.querySelector('[role="option"]'))`),
       'keyboard channel menu'
     )
-    await evaluate(`document.querySelector('[role="option"]').click();return true`)
+    await (gpui
+      ? native.pickFirst()
+      : evaluate(`document.querySelector('[role="option"]').click();return true`))
     for (const theme of ['dark', 'light']) {
-      await evaluate(
-        // The D key is gated while a dialog is open (plan 174 A-2), so set the
-        // theme the way another window would: next-themes follows storage events.
-        `localStorage.setItem('videorc.theme', '${theme}'); window.dispatchEvent(new StorageEvent('storage', { key: 'videorc.theme', newValue: '${theme}' })); return true`
-      )
+      await (gpui
+        ? native.ui().setAppearance({ theme })
+        : evaluate(
+            // The D key is gated while a dialog is open (plan 174 A-2), so set the
+            // theme the way another window would: next-themes follows storage events.
+            `localStorage.setItem('videorc.theme', '${theme}'); window.dispatchEvent(new StorageEvent('storage', { key: 'videorc.theme', newValue: '${theme}' })); return true`
+          ))
       await waitFor(
         () =>
-          evaluate(
-            `return document.documentElement.classList.contains('dark')===${theme === 'dark'}`
-          ),
+          gpui
+            ? native.send('ui-appearance', { theme }).then((s) => s.theme === theme)
+            : evaluate(
+                `return document.documentElement.classList.contains('dark')===${theme === 'dark'}`
+              ),
         `${theme} theme`
       )
-      await evaluate(
-        `await new Promise(resolve=>setTimeout(resolve,350)); await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))); return getComputedStyle(document.querySelector('[role="dialog"]')).backgroundColor`
-      )
+      await (gpui
+        ? native.ui().waitFor({ id: 'schedule-stream', role: 'dialog' })
+        : evaluate(
+            `await new Promise(resolve=>setTimeout(resolve,350)); await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))); return getComputedStyle(document.querySelector('[role="dialog"]')).backgroundColor`
+          ))
       console.log(
         await requestSmokeCommand(
           smoke,
@@ -188,97 +252,134 @@ try {
         )
       )
     }
-    await requestSmokeCommand(smoke, 'set-page-zoom', { factor: 2 }, { timeoutMs })
-    await evaluate(
-      `await new Promise(resolve=>setTimeout(resolve,350)); await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))); return true`
-    )
-    assert.equal(
+    if (!gpui) {
+      await requestSmokeCommand(smoke, 'set-page-zoom', { factor: 2 }, { timeoutMs })
       await evaluate(
-        `const dialog=document.querySelector('[role="dialog"]').getBoundingClientRect();return dialog.top>=0&&dialog.bottom<=innerHeight`
-      ),
-      true,
-      '200% dialog must fit the CSS viewport'
-    )
-    console.log(
-      await requestSmokeCommand(
-        smoke,
-        'capture-page',
-        { name: 'scheduled-form-200-percent' },
-        { timeoutMs }
+        `await new Promise(resolve=>setTimeout(resolve,350)); await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))); return true`
       )
-    )
-    const scrolling = await evaluate(
-      `const dialog=document.querySelector('[role="dialog"]');const scroller=dialog.querySelector('[data-slot="dialog-body"]')??dialog.querySelector('[data-slot="scroll-area-viewport"]');const footer=dialog.querySelector('[data-slot="dialog-footer"]');const initial=scroller.scrollTop;scroller.scrollTop=scroller.scrollHeight;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const thumbnail=[...dialog.querySelectorAll('button')].find(button=>button.textContent==='Choose thumbnail…');return {initial,after:scroller.scrollTop,viewportHeight:scroller.clientHeight,viewportBottom:scroller.getBoundingClientRect().bottom,footerTop:footer.getBoundingClientRect().top,thumbnailBottom:thumbnail.getBoundingClientRect().bottom}`
-    )
-    assert.ok(scrolling.viewportHeight >= 64, '200% form must retain a usable scroll viewport')
-    assert.ok(scrolling.after > scrolling.initial, '200% form must actually scroll')
-    assert.ok(
-      scrolling.viewportBottom <= scrolling.footerTop,
-      'scroll viewport must not overlap footer'
-    )
-    assert.ok(
-      scrolling.thumbnailBottom <= scrolling.viewportBottom,
-      'bottom thumbnail field must be reachable'
-    )
-    console.log('[scheduling] 200% scroll geometry', scrolling)
-    console.log(
-      await requestSmokeCommand(
-        smoke,
-        'capture-page',
-        { name: 'scheduled-form-200-percent-footer' },
-        { timeoutMs }
+      assert.equal(
+        await evaluate(
+          `const dialog=document.querySelector('[role="dialog"]').getBoundingClientRect();return dialog.top>=0&&dialog.bottom<=innerHeight`
+        ),
+        true,
+        '200% dialog must fit the CSS viewport'
       )
-    )
-    await requestSmokeCommand(smoke, 'set-page-zoom', { factor: 1 }, { timeoutMs })
-    await evaluate(
-      `document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); return true`
-    )
+      console.log(
+        await requestSmokeCommand(
+          smoke,
+          'capture-page',
+          { name: 'scheduled-form-200-percent' },
+          { timeoutMs }
+        )
+      )
+      const scrolling = await evaluate(
+        `const dialog=document.querySelector('[role="dialog"]');const scroller=dialog.querySelector('[data-slot="dialog-body"]')??dialog.querySelector('[data-slot="scroll-area-viewport"]');const footer=dialog.querySelector('[data-slot="dialog-footer"]');const initial=scroller.scrollTop;scroller.scrollTop=scroller.scrollHeight;await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const thumbnail=[...dialog.querySelectorAll('button')].find(button=>button.textContent==='Choose thumbnail…');return {initial,after:scroller.scrollTop,viewportHeight:scroller.clientHeight,viewportBottom:scroller.getBoundingClientRect().bottom,footerTop:footer.getBoundingClientRect().top,thumbnailBottom:thumbnail.getBoundingClientRect().bottom}`
+      )
+      assert.ok(scrolling.viewportHeight >= 64, '200% form must retain a usable scroll viewport')
+      assert.ok(scrolling.after > scrolling.initial, '200% form must actually scroll')
+      assert.ok(
+        scrolling.viewportBottom <= scrolling.footerTop,
+        'scroll viewport must not overlap footer'
+      )
+      assert.ok(
+        scrolling.thumbnailBottom <= scrolling.viewportBottom,
+        'bottom thumbnail field must be reachable'
+      )
+      console.log('[scheduling] 200% scroll geometry', scrolling)
+      console.log(
+        await requestSmokeCommand(
+          smoke,
+          'capture-page',
+          { name: 'scheduled-form-200-percent-footer' },
+          { timeoutMs }
+        )
+      )
+      await requestSmokeCommand(smoke, 'set-page-zoom', { factor: 1 }, { timeoutMs })
+    } else {
+      console.log(
+        '[scheduling] Electron-only subcheck: CSS 200% page zoom/DOM scroll geometry; GPUI has no browser page zoom. Native form behavior remains asserted below.'
+      )
+    }
+    await (gpui
+      ? native.ui().press('Escape')
+      : evaluate(
+          `document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); return true`
+        ))
     await waitFor(
-      () => evaluate(`return document.body.textContent.includes('Discard changes?')`),
+      () =>
+        gpui
+          ? native.textIncludes('Discard changes?')
+          : evaluate(`return document.body.textContent.includes('Discard changes?')`),
       'dirty dismissal guard'
     )
-    await evaluate(
-      `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Discard changes');button.click();return true`
-    )
+    await (gpui
+      ? native.ui().click({ name: 'Discard changes', role: 'button' })
+      : evaluate(
+          `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Discard changes');button.click();return true`
+        ))
     await waitFor(
-      () => evaluate(`return !document.querySelector('#schedule-title')`),
+      () =>
+        gpui
+          ? native.exists({ id: 'schedule-title-input' }).then((found) => !found)
+          : evaluate(`return !document.querySelector('#schedule-title')`),
       'form dismissal'
     )
     // Focus returns after the dialog unmounts, a frame later; an occluded
     // window can hold that frame back, so wait instead of reading at once.
     await waitFor(
-      () => evaluate(`return document.activeElement?.textContent === 'Schedule on YouTube'`),
+      () =>
+        gpui
+          ? native.find({ id: 'schedule-on-youtube' }).then((e) => e?.focused === true)
+          : evaluate(`return document.activeElement?.textContent === 'Schedule on YouTube'`),
       'focus restoration to Schedule on YouTube'
     )
     // X has its own form: its planned end is filled from the start, it keeps
     // replay, and YouTube's visibility never appears.
-    await evaluate(
-      `const button=[...document.querySelectorAll('button')].find(item=>item.textContent==='Schedule on X'); button.click(); return true`
-    )
+    await (gpui
+      ? native.ui().click({ id: 'schedule-on-x' })
+      : evaluate(
+          `const button=[...document.querySelectorAll('button')].find(item=>item.textContent==='Schedule on X'); button.click(); return true`
+        ))
     await waitFor(
-      () => evaluate(`return Boolean(document.querySelector('#schedule-end'))`),
+      () =>
+        gpui
+          ? native.exists({ id: 'schedule-end' })
+          : evaluate(`return Boolean(document.querySelector('#schedule-end'))`),
       'X schedule form'
     )
     assert.deepEqual(
-      await evaluate(
-        `return {end:document.querySelector('#schedule-end').value!=='',replay:Boolean(document.querySelector('#schedule-replay')),visibility:Boolean(document.querySelector('#schedule-privacy'))}`
-      ),
+      await (gpui
+        ? Promise.all([
+            native.ui().readText({ id: 'schedule-end' }),
+            native.exists({ id: 'schedule-replay' }),
+            native.exists({ id: 'schedule-privacy' })
+          ]).then(([end, replay, visibility]) => ({ end: end !== '', replay, visibility }))
+        : evaluate(
+            `return {end:document.querySelector('#schedule-end').value!=='',replay:Boolean(document.querySelector('#schedule-replay')),visibility:Boolean(document.querySelector('#schedule-privacy'))}`
+          )),
       { end: true, replay: true, visibility: false },
       'the X form carries X fields only'
     )
     console.log(
       await requestSmokeCommand(smoke, 'capture-page', { name: 'scheduled-form-x' }, { timeoutMs })
     )
-    await evaluate(
-      `document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); return true`
-    )
+    await (gpui
+      ? native.ui().press('Escape')
+      : evaluate(
+          `document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); return true`
+        ))
     await waitFor(
-      () => evaluate(`return !document.querySelector('#schedule-end')`),
+      () =>
+        gpui
+          ? native.exists({ id: 'schedule-end' }).then((found) => !found)
+          : evaluate(`return !document.querySelector('#schedule-end')`),
       'X form dismissal'
     )
     if (process.argv.includes('--ui-only')) {
       console.log(
-        'Scheduled stream UI smoke PASS: theme, 200% viewport, scroll, keyboard, dirty-dismiss and focus restoration.'
+        gpui
+          ? 'Scheduled stream UI smoke PASS: native themes, keyboard, dirty-dismiss, focus restoration and provider fields; browser zoom excluded.'
+          : 'Scheduled stream UI smoke PASS: theme, 200% viewport, scroll, keyboard, dirty-dismiss and focus restoration.'
       )
       return
     }
@@ -333,15 +434,21 @@ try {
     await action('cancel', second)
     assert.equal((await get(second)).lifecycle, 'canceled')
     // Crossing the advertised time has no publishing/start side effect.
-    await evaluate(
-      `window.__scheduleOriginalNow=Date.now; Date.now=()=>new Date('2036-01-01').getTime(); return true`
-    )
+    if (!gpui)
+      await evaluate(
+        `window.__scheduleOriginalNow=Date.now; Date.now=()=>new Date('2036-01-01').getTime(); return true`
+      )
     await wait(600)
     await assertNoTake()
     assert.equal(fixture.calls.filter((call) => call.path.endsWith('/transition')).length, 0)
-    await evaluate(
-      `Date.now=window.__scheduleOriginalNow; delete window.__scheduleOriginalNow; return true`
-    )
+    if (!gpui)
+      await evaluate(
+        `Date.now=window.__scheduleOriginalNow; delete window.__scheduleOriginalNow; return true`
+      )
+    if (gpui)
+      console.log(
+        '[scheduling] Electron-only subcheck: renderer Date.now override; no host clock mutation. No-take/provider assertions above still run.'
+      )
     // Select an OAuth destination in the actual StudioProvider and use its
     // confirmation/cancel/prepare/start/Stop flow end to end.
     console.log('[scheduling] Preparing the Studio scene')
@@ -368,23 +475,52 @@ try {
       createdAt: stamp,
       updatedAt: stamp
     }
-    await evaluate(
-      `window.__videorcSmokeScenePresets.configure(${JSON.stringify({ video, recordEnabled: true, streamEnabled: true, streaming: { enabled: true, mode: 'single', targets: [target], enabledTargetIds: ['youtube'], defaultOutputPreset: 'custom', defaultBitrateKbps: 2000 } })}); window.__videorcSmokeScenePresets.layout({layoutPreset:'screen-only'}); return true`
-    )
+    await (gpui
+      ? native
+          .configure({
+            video,
+            recordEnabled: true,
+            streamEnabled: true,
+            streaming: {
+              enabled: true,
+              mode: 'single',
+              targets: [target],
+              enabledTargetIds: ['youtube'],
+              defaultOutputPreset: 'custom',
+              defaultBitrateKbps: 2000
+            }
+          })
+          .then(() => native.layout({ layoutPreset: 'screen-only' }))
+      : evaluate(
+          `window.__videorcSmokeScenePresets.configure(${JSON.stringify({ video, recordEnabled: true, streamEnabled: true, streaming: { enabled: true, mode: 'single', targets: [target], enabledTargetIds: ['youtube'], defaultOutputPreset: 'custom', defaultBitrateKbps: 2000 } })}); window.__videorcSmokeScenePresets.layout({layoutPreset:'screen-only'}); return true`
+        ))
     await waitFor(
-      () => evaluate(`return window.__videorcSmokeScenePresets.state().canSave`),
+      () =>
+        gpui
+          ? native.sceneReady()
+          : evaluate(`return window.__videorcSmokeScenePresets.state().canSave`),
       'confirmed synthetic scene'
     )
     await waitFor(
-      () => evaluate('return window.__videorcSmokeScenePresets.streamingState().canStart'),
+      () =>
+        gpui
+          ? native.ready()
+          : evaluate('return window.__videorcSmokeScenePresets.streamingState().canStart'),
       'Studio ready to start'
     )
-    await evaluate('await window.__videorcSmokeScenePresets.start(); return true')
+    await (gpui
+      ? native.goLive('open')
+      : evaluate('await window.__videorcSmokeScenePresets.start(); return true'))
     await waitFor(
-      () => evaluate('return window.__videorcSmokeScenePresets.streamingState().confirmationOpen'),
+      () =>
+        gpui
+          ? native.confirmationOpen()
+          : evaluate('return window.__videorcSmokeScenePresets.streamingState().confirmationOpen'),
       'Go Live confirmation'
     )
-    await evaluate('window.__videorcSmokeScenePresets.cancelGoLive(); return true')
+    await (gpui
+      ? native.goLive('cancel')
+      : evaluate('window.__videorcSmokeScenePresets.cancelGoLive(); return true'))
     assert.equal(fixture.events.get(remoteId).status.lifeCycleStatus, 'ready')
     assert.equal(fixture.streams.size, 0)
     const receivePath = join(directory, 'received.flv')
@@ -416,16 +552,25 @@ try {
     })
     await wait(1000)
     assert.equal(listener.exitCode, null, listenerError)
-    await evaluate('await window.__videorcSmokeScenePresets.start(); return true')
+    await (gpui
+      ? native.goLive('open')
+      : evaluate('await window.__videorcSmokeScenePresets.start(); return true'))
     await waitFor(
-      () => evaluate('return window.__videorcSmokeScenePresets.streamingState().confirmationOpen'),
+      () =>
+        gpui
+          ? native.confirmationOpen()
+          : evaluate('return window.__videorcSmokeScenePresets.streamingState().confirmationOpen'),
       'second Go Live confirmation'
     )
     fixture.controls.loseStreamResponse = true
-    await evaluate('await window.__videorcSmokeScenePresets.confirmGoLive(); return true')
+    await (gpui
+      ? native.goLive('confirm')
+      : evaluate('await window.__videorcSmokeScenePresets.confirmGoLive(); return true'))
     assert.equal((await get(first)).preparation.phase, 'creating-stream')
     assert.equal(fixture.streams.size, 1)
-    await evaluate('window.__videorcSmokeScenePresets.cancelGoLive();return true')
+    await (gpui
+      ? native.goLive('cancel')
+      : evaluate('window.__videorcSmokeScenePresets.cancelGoLive();return true'))
     await openUpcoming()
     const ingestCandidates = await request(ws, timeoutMs, 'scheduledStreams.candidates', {
       eventId: first
@@ -433,27 +578,40 @@ try {
     assert.equal(ingestCandidates.length, 1)
     assert.equal(ingestCandidates[0].candidateKind, 'ingest')
     assert.ok(!JSON.stringify(ingestCandidates).includes('ingestionInfo'))
-    await evaluate(
-      `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Recover');button.click();return true`
-    )
+    await (gpui
+      ? native.ui().click({ name: 'Recover', role: 'button' })
+      : evaluate(
+          `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Recover');button.click();return true`
+        ))
     await waitFor(
       () =>
-        evaluate(
-          `return Boolean(document.querySelector('[aria-label="Ingest stream to recover"]'))`
-        ),
+        gpui
+          ? native.exists({ name: 'Ingest stream to recover' })
+          : evaluate(
+              `return Boolean(document.querySelector('[aria-label="Ingest stream to recover"]'))`
+            ),
       'explicit ingest recovery dialog'
     )
-    await evaluate(
-      `const select=document.querySelector('[aria-label="Ingest stream to recover"]');select.focus();select.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));return true`
-    )
+    await (gpui
+      ? native.openSelect({ name: 'Ingest stream to recover' })
+      : evaluate(
+          `const select=document.querySelector('[aria-label="Ingest stream to recover"]');select.focus();select.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));return true`
+        ))
     await waitFor(
-      () => evaluate(`return Boolean(document.querySelector('[role="option"]'))`),
+      () =>
+        gpui
+          ? native.options().then((v) => v.length > 0)
+          : evaluate(`return Boolean(document.querySelector('[role="option"]'))`),
       'compatible owned ingest candidate'
     )
-    await evaluate(`document.querySelector('[role="option"]').click();return true`)
-    await evaluate(
-      `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Use selected candidate');button.click();return true`
-    )
+    await (gpui
+      ? native.pickFirst()
+      : evaluate(`document.querySelector('[role="option"]').click();return true`))
+    await (gpui
+      ? native.ui().click({ name: 'Use selected candidate', role: 'button' })
+      : evaluate(
+          `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Use selected candidate');button.click();return true`
+        ))
     await waitFor(async () => {
       const event = await get(first)
       return !event.preparation && event.operationState === 'idle'
@@ -461,52 +619,97 @@ try {
     assert.equal((await get(first)).watchUrl, watchUrl)
     // Failure cleanup follows the production Google gate and clears this debug-only
     // account. Restore only the fixture connection, then use the real selection UI.
-    await evaluate(
-      `const current=window.__videorcSmokeScenePresets.streamingState().captureConfig; window.__videorcSmokeScenePresets.configure({streamEnabled:false,streaming:{...current.streaming,enabled:false,enabledTargetIds:[],targets:[${JSON.stringify({ ...target, enabled: false })}]}}); return true`
-    )
+    await (gpui
+      ? native.configure({
+          streamEnabled: false,
+          streaming: {
+            enabled: false,
+            enabledTargetIds: [],
+            targets: [{ ...target, enabled: false }]
+          }
+        })
+      : evaluate(
+          `const current=window.__videorcSmokeScenePresets.streamingState().captureConfig; window.__videorcSmokeScenePresets.configure({streamEnabled:false,streaming:{...current.streaming,enabled:false,enabledTargetIds:[],targets:[${JSON.stringify({ ...target, enabled: false })}]}}); return true`
+        ))
     await waitFor(
       () =>
-        evaluate(
-          `return [...document.querySelectorAll('button')].some(button=>button.textContent==='Use for Go Live…' && !button.disabled)`
-        ),
+        gpui
+          ? native.enabled({ name: 'Use for Go Live…', role: 'button' })
+          : evaluate(
+              `return [...document.querySelectorAll('button')].some(button=>button.textContent==='Use for Go Live…' && !button.disabled)`
+            ),
       'recovered event selectable'
     )
-    await evaluate(
-      `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Use for Go Live…' && !button.disabled);button.click();return true`
-    )
+    await (gpui
+      ? native.ui().click({ name: 'Use for Go Live…', role: 'button' })
+      : evaluate(
+          `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Use for Go Live…' && !button.disabled);button.click();return true`
+        ))
     await waitFor(
       () =>
-        evaluate(`return Boolean(document.querySelector('[aria-label="Livestream destination"]'))`),
+        gpui
+          ? native.exists({ name: 'Livestream destination' })
+          : evaluate(
+              `return Boolean(document.querySelector('[aria-label="Livestream destination"]'))`
+            ),
       'saved event destination dialog'
     )
-    await evaluate(
-      `const select=document.querySelector('[aria-label="Livestream destination"]');select.focus();select.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));return true`
-    )
-    await waitFor(
-      () => evaluate(`return Boolean(document.querySelector('[role="option"]'))`),
-      'saved event destination option'
-    )
-    await evaluate(`document.querySelector('[role="option"]').click();return true`)
-    await evaluate(
-      `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Use saved event');button.click();return true`
-    )
+    await (gpui
+      ? native.openSelect({ name: 'Livestream destination' })
+      : evaluate(
+          `const select=document.querySelector('[aria-label="Livestream destination"]');select.focus();select.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));return true`
+        ))
     await waitFor(
       () =>
-        evaluate(
-          `const config=window.__videorcSmokeScenePresets.streamingState().captureConfig;return config.streamEnabled && config.streaming.enabled && config.streaming.targets.some(target=>target.enabled && target.scheduledEventId===${JSON.stringify(first)})`
-        ),
+        gpui
+          ? native.options().then((v) => v.length > 0)
+          : evaluate(`return Boolean(document.querySelector('[role="option"]'))`),
+      'saved event destination option'
+    )
+    await (gpui
+      ? native.pickFirst()
+      : evaluate(`document.querySelector('[role="option"]').click();return true`))
+    await (gpui
+      ? native.ui().click({ name: 'Use saved event', role: 'button' })
+      : evaluate(
+          `const button=[...document.querySelectorAll('button')].find(button=>button.textContent==='Use saved event');button.click();return true`
+        ))
+    await waitFor(
+      () =>
+        gpui
+          ? native
+              .goLive('state')
+              .then(
+                ({ captureConfig: c }) =>
+                  c.streamEnabled &&
+                  c.streaming.enabled &&
+                  c.streaming.targets.some((t) => t.enabled && t.scheduledEventId === first)
+              )
+          : evaluate(
+              `const config=window.__videorcSmokeScenePresets.streamingState().captureConfig;return config.streamEnabled && config.streaming.enabled && config.streaming.targets.some(target=>target.enabled && target.scheduledEventId===${JSON.stringify(first)})`
+            ),
       'saved selection enabled streaming and target'
     )
     await waitFor(
-      () => evaluate('return window.__videorcSmokeScenePresets.streamingState().canStart'),
+      () =>
+        gpui
+          ? native.ready()
+          : evaluate('return window.__videorcSmokeScenePresets.streamingState().canStart'),
       'recovered Studio output path ready'
     )
-    await evaluate('await window.__videorcSmokeScenePresets.start();return true')
+    await (gpui
+      ? native.goLive('open')
+      : evaluate('await window.__videorcSmokeScenePresets.start();return true'))
     await waitFor(
-      () => evaluate('return window.__videorcSmokeScenePresets.streamingState().confirmationOpen'),
+      () =>
+        gpui
+          ? native.confirmationOpen()
+          : evaluate('return window.__videorcSmokeScenePresets.streamingState().confirmationOpen'),
       'recovered Go Live confirmation'
     )
-    await evaluate('await window.__videorcSmokeScenePresets.confirmGoLive(); return true')
+    await (gpui
+      ? native.goLive('confirm')
+      : evaluate('await window.__videorcSmokeScenePresets.confirmGoLive(); return true'))
     await waitFor(
       async () => fixture.events.get(remoteId).status.lifeCycleStatus === 'live',
       'same scheduled event live'
@@ -514,7 +717,9 @@ try {
     const started = await request(ws, timeoutMs, 'recording.status')
     assert.equal(fixture.streams.size, 1)
     await wait(3000)
-    await evaluate('await window.__videorcSmokeScenePresets.stop(); return true')
+    await (gpui
+      ? native.stop()
+      : evaluate('await window.__videorcSmokeScenePresets.stop(); return true'))
     await waitFor(
       async () => (await get(first)).lifecycle === 'completed',
       'provider-confirmed completion'
@@ -549,26 +754,45 @@ try {
     // instant create+publish pair.
     console.log('[scheduling] X leg')
     const xId = randomUUID()
-    await evaluate(
-      `return window.__videorcSmokeScheduledStreams.mutate('saveDraft', ${JSON.stringify({
-        eventId: xId,
-        expectedRevision: 0,
-        provider: 'x',
-        accountId: 'scheduled-smoke-x',
-        metadata: {
-          title: 'Scheduled X smoke',
-          description: 'X description',
-          privacy: 'private',
-          madeForKids: false,
-          localStart: '2035-01-01T12:00',
-          timeZone: 'Europe/Madrid',
-          offsetChoice: null,
-          thumbnailAssetId: thumbnails[1].id,
-          plannedEndLocal: '2035-01-01T13:00',
-          availableForReplay: false
-        }
-      })})`
-    )
+    await (gpui
+      ? native.mutate('saveDraft', {
+          eventId: xId,
+          expectedRevision: 0,
+          provider: 'x',
+          accountId: 'scheduled-smoke-x',
+          metadata: {
+            title: 'Scheduled X smoke',
+            description: 'X description',
+            privacy: 'private',
+            madeForKids: false,
+            localStart: '2035-01-01T12:00',
+            timeZone: 'Europe/Madrid',
+            offsetChoice: null,
+            thumbnailAssetId: thumbnails[1].id,
+            plannedEndLocal: '2035-01-01T13:00',
+            availableForReplay: false
+          }
+        })
+      : evaluate(
+          `return window.__videorcSmokeScheduledStreams.mutate('saveDraft', ${JSON.stringify({
+            eventId: xId,
+            expectedRevision: 0,
+            provider: 'x',
+            accountId: 'scheduled-smoke-x',
+            metadata: {
+              title: 'Scheduled X smoke',
+              description: 'X description',
+              privacy: 'private',
+              madeForKids: false,
+              localStart: '2035-01-01T12:00',
+              timeZone: 'Europe/Madrid',
+              offsetChoice: null,
+              thumbnailAssetId: thumbnails[1].id,
+              plannedEndLocal: '2035-01-01T13:00',
+              availableForReplay: false
+            }
+          })})`
+        ))
     await action('schedule', xId)
     const xEvent = await get(xId)
     assert.equal(xEvent.provider, 'x')
@@ -619,11 +843,28 @@ try {
       createdAt: stamp,
       updatedAt: stamp
     }
-    await evaluate(
-      `window.__videorcSmokeScenePresets.configure(${JSON.stringify({ video, recordEnabled: true, streamEnabled: true, streaming: { enabled: true, mode: 'single', targets: [xTarget], enabledTargetIds: ['x'], defaultOutputPreset: 'custom', defaultBitrateKbps: 2000 } })}); return true`
-    )
+    await (gpui
+      ? native.configure({
+          video,
+          recordEnabled: true,
+          streamEnabled: true,
+          streaming: {
+            enabled: true,
+            mode: 'single',
+            targets: [xTarget],
+            enabledTargetIds: ['x'],
+            defaultOutputPreset: 'custom',
+            defaultBitrateKbps: 2000
+          }
+        })
+      : evaluate(
+          `window.__videorcSmokeScenePresets.configure(${JSON.stringify({ video, recordEnabled: true, streamEnabled: true, streaming: { enabled: true, mode: 'single', targets: [xTarget], enabledTargetIds: ['x'], defaultOutputPreset: 'custom', defaultBitrateKbps: 2000 } })}); return true`
+        ))
     await waitFor(
-      () => evaluate('return window.__videorcSmokeScenePresets.streamingState().canStart'),
+      () =>
+        gpui
+          ? native.ready()
+          : evaluate('return window.__videorcSmokeScenePresets.streamingState().canStart'),
       'X Studio ready to start'
     )
     const xReceivePath = join(directory, 'received-x.flv')
@@ -651,19 +892,28 @@ try {
     })
     await wait(1000)
     assert.equal(listener.exitCode, null)
-    await evaluate('await window.__videorcSmokeScenePresets.start(); return true')
+    await (gpui
+      ? native.goLive('open')
+      : evaluate('await window.__videorcSmokeScenePresets.start(); return true'))
     await waitFor(
-      () => evaluate('return window.__videorcSmokeScenePresets.streamingState().confirmationOpen'),
+      () =>
+        gpui
+          ? native.confirmationOpen()
+          : evaluate('return window.__videorcSmokeScenePresets.streamingState().confirmationOpen'),
       'X Go Live confirmation'
     )
-    await evaluate('await window.__videorcSmokeScenePresets.confirmGoLive(); return true')
+    await (gpui
+      ? native.goLive('confirm')
+      : evaluate('await window.__videorcSmokeScenePresets.confirmGoLive(); return true'))
     await waitFor(
       async () => fixture.xSchedules.get(xEvent.providerEventId).state === 'Running',
       'scheduled X broadcast live'
     )
     const xStarted = await request(ws, timeoutMs, 'recording.status')
     await wait(3000)
-    await evaluate('await window.__videorcSmokeScenePresets.stop(); return true')
+    await (gpui
+      ? native.stop()
+      : evaluate('await window.__videorcSmokeScenePresets.stop(); return true'))
     await waitFor(
       async () => (await get(xId)).lifecycle === 'completed',
       'X provider-confirmed completion'
@@ -672,9 +922,8 @@ try {
     assert.equal(fixture.xSchedules.get(xEvent.providerEventId).state, 'Ended')
     assert.equal(fixture.xSources.size, 0, 'completed schedule releases its source')
     assert.equal(
-      fixture.calls.filter(
-        (call) => call.method === 'POST' && call.path === '/2/broadcasts'
-      ).length,
+      fixture.calls.filter((call) => call.method === 'POST' && call.path === '/2/broadcasts')
+        .length,
       0,
       'no instant X broadcast was created'
     )

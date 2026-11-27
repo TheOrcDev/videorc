@@ -3,6 +3,7 @@
 //! without a typed source remain behind the bell.
 mod render;
 mod routing;
+mod smoke;
 mod system;
 mod watchdog;
 
@@ -399,6 +400,8 @@ pub struct Centre {
     open: bool,
     ticking: bool,
     toaster: Entity<Toaster>,
+    /// Titles delivered to this window, retained only while the toaster holds the id.
+    smoke_toasts: HashMap<String, String>,
     focuses: HashMap<String, FocusHandle>,
     /// The main window's watchdog system notifications (`system.rs`).
     watchdog_notices: Option<system::WatchdogNotices>,
@@ -439,6 +442,7 @@ impl Centre {
             open: false,
             ticking: false,
             toaster,
+            smoke_toasts: HashMap::new(),
             focuses: HashMap::new(),
             watchdog_notices: None,
         }
@@ -500,9 +504,7 @@ impl Centre {
             Delivery::Store(Effect::Dismiss { key }) | Delivery::Dismiss(key) => self
                 .toaster
                 .update(cx, |toaster, cx| toaster.dismiss(&key.into(), window, cx)),
-            Delivery::PressToast { id, toast } => self
-                .toaster
-                .update(cx, |toaster, cx| toaster.show(id, toast, window, cx)),
+            Delivery::PressToast { id, toast } => self.show_toast(id, toast, window, cx),
             Delivery::Press(notice) => {
                 let id = notice
                     .id
@@ -541,8 +543,7 @@ impl Centre {
                     let studio = self.hub.read(cx).studio.clone();
                     data.on_close = Some(Rc::new(move |_, _| studio.dismiss_start_failure()));
                 }
-                self.toaster
-                    .update(cx, |toaster, cx| toaster.show(id, data, window, cx));
+                self.show_toast(id, data, window, cx);
             }
             _ => {}
         }
@@ -584,8 +585,7 @@ impl Centre {
                 });
             });
         }
-        self.toaster
-            .update(cx, |toaster, cx| toaster.show(entry.key, data, window, cx));
+        self.show_toast(entry.key, data, window, cx);
     }
 }
 pub fn install_keys(cx: &mut gpui::App) {
