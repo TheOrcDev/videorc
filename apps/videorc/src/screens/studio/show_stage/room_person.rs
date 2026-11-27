@@ -7,7 +7,9 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{AnyElement, App, Image, ObjectFit, SharedString, Window, div, img, prelude::*, px};
+use gpui::{
+    AnyElement, App, ObjectFit, RenderImage, SharedString, Window, div, img, prelude::*, px,
+};
 use videorc_app_core::guests::tile::name_initial;
 use videorc_app_core::guests::view::{
     MicState, MicView, RoomPerson, ScreenShareState, Tone, guest_screen_share, quality_status,
@@ -67,7 +69,7 @@ pub fn count_label(words: &str, count: usize, t: &Theme) -> AnyElement {
 pub fn person_thumb(
     id: &str,
     name: &str,
-    frame: Option<Arc<Image>>,
+    frame: Option<Arc<RenderImage>>,
     camera_off: bool,
     speaking: bool,
     t: &Theme,
@@ -196,7 +198,7 @@ fn state_badges(person: &RoomPerson, mic: &MicView) -> Vec<AnyElement> {
 /// What a Show stage row needs to draw one person.
 pub struct PersonRowParts {
     pub person: RoomPerson,
-    pub picture: Option<Arc<Image>>,
+    pub picture: Option<Arc<RenderImage>>,
     pub camera_off: bool,
     pub mic: MicView,
     /// What a press of the mic does ("Mute Ada", "Let Ada unmute").
