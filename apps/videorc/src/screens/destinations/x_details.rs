@@ -129,7 +129,7 @@ impl DestinationsPanel {
                 line = line.child(
                     Button::new(SharedString::from(format!("{id}-retry")))
                         .label(X_CATEGORIES_RETRY)
-                        .variant(ButtonVariant::Link)
+                        .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Xs)
                         .disabled(disabled)
                         .on_click(move |_, _, _| {
