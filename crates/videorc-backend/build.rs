@@ -24,8 +24,21 @@ fn main() {
     // is on the same list). Elsewhere `cloud.room.owner` answers
     // `backend: false`.
     println!("cargo::rustc-check-cfg=cfg(backend_room)");
-    if matches!(target_os.as_str(), "macos" | "linux") {
+    // Windows only with the `windows-room` feature (the LiveKit dependency is
+    // optional there).
+    let windows_room =
+        target_os == "windows" && std::env::var_os("CARGO_FEATURE_WINDOWS_ROOM").is_some();
+    if matches!(target_os.as_str(), "macos" | "linux") || windows_room {
         println!("cargo::rustc-cfg=backend_room");
+    }
+    let static_crt = std::env::var("CARGO_CFG_TARGET_FEATURE")
+        .unwrap_or_default()
+        .split(',')
+        .any(|feature| feature == "crt-static");
+    if windows_room && !static_crt {
+        println!(
+            "cargo::warning=the windows-room feature needs RUSTFLAGS=\"-C target-feature=+crt-static\"; without it the link fails with LNK2038"
+        );
     }
     // Plan 260 S1.8 (S0.8's finding): libwebrtc's Objective-C categories (for
     // example +[NSString stringForStdString:]) load only with -ObjC; without
