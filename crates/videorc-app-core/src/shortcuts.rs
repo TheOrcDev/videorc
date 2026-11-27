@@ -352,6 +352,13 @@ pub fn shortcut_recorder_step(
                     owner.label
                 ));
             }
+            // A global key saved with Guests hidden must not take the
+            // ninth page key when talk shows become available again.
+            if app_shortcut_owner(&accelerator, platform, true).is_some() {
+                return RecorderStep::Reject(format!(
+                    "{shown} is reserved for page navigation. Pick another."
+                ));
+            }
             match validate(accelerator.as_str()) {
                 Some(refusal) => RecorderStep::Reject(refusal),
                 None => RecorderStep::Commit(accelerator),
@@ -486,6 +493,27 @@ mod tests {
 
     const MAC: Option<&str> = Some("darwin");
     const WIN: Option<&str> = Some("win32");
+
+    #[test]
+    fn visible_page_shortcuts_reserve_the_ninth_global_key_while_hidden() {
+        for (platform, input) in [
+            (MAC, press("Digit9", true, false, false, false)),
+            (WIN, press("Digit9", false, true, false, false)),
+        ] {
+            let RecorderStep::Reject(hidden) =
+                shortcut_recorder_step(&input, platform, |_| None, false)
+            else {
+                panic!("hidden ninth page key must stay reserved")
+            };
+            assert!(hidden.contains("reserved for page navigation"));
+            let RecorderStep::Reject(shown) =
+                shortcut_recorder_step(&input, platform, |_| None, true)
+            else {
+                panic!("shown ninth key belongs to Sidekick")
+            };
+            assert!(shown.contains("Sidekick"));
+        }
+    }
 
     #[test]
     fn visible_page_shortcut_hints_and_recorder_owners_follow_availability() {
