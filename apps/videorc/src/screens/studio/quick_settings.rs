@@ -7,25 +7,31 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Context, EventEmitter, FontWeight, SharedString, Window, div, prelude::*, px,
+    AnyElement, Context, EventEmitter, FontWeight, RenderImage, SharedString, Task, Window, div,
+    prelude::*, px,
 };
 use tokio::sync::watch;
-use videorc_app_core::StudioSnapshot;
 use videorc_app_core::chat::LiveChat;
 use videorc_app_core::chat::store::DeliveryCursor;
 use videorc_app_core::desktop::permissions::PermissionPlatform;
 use videorc_app_core::nav::PageId;
 use videorc_app_core::studio::HealthTelemetry;
+use videorc_app_core::studio::camera_background_art::current_art;
+use videorc_app_core::studio::camera_background_frames::{
+    POLL_INTERVAL, bgra_from_bmp, poll_camera_frame,
+};
 use videorc_app_core::studio::camera_background_view::{
     CHOOSE_IMAGE_DESCRIPTION, CHOOSE_IMAGE_EMPTY, CHOOSE_IMAGE_TITLE, ChoiceId, ChoicesInput,
     DONE_LABEL, LABEL as BACKGROUND_LABEL, OPEN_IMAGES_LABEL, POPOVER_IMAGES, background_for,
     background_for_choice, bundled_images, choices, images_picked_first,
 };
+use videorc_app_core::studio::room_frames::{FrameCursor, FramePoll};
 use videorc_app_core::studio::session::session_is_live;
 use videorc_app_core::studio::source_selection::{PICKER_NONE_VALUE, PickerView, SourceKind};
 use videorc_app_core::studio::sources_section::{
     SourcesExtras, SourcesSectionView, copy as section_copy,
 };
+use videorc_app_core::{ConnectionState, StudioSnapshot};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle, DialogSize};
 use videorc_kit::empty::Empty;
@@ -105,6 +111,43 @@ fn section_view(
     )
 }
 
+/// The polls between two checks that the popover is still drawn (about 2 s).
+const VIEWER_SEEN_TICKS: u32 = 13;
+
+/// The Background popover's "What viewers see" while it is open: the
+/// camera's newest processed frame and the task that polls for it.
+struct ViewerFeed {
+    /// The frame shown, with its place in the stream; none until one arrives
+    /// and after the camera has none.
+    frame: Option<(FrameCursor, Arc<RenderImage>)>,
+    /// Dropped with the feed, which stops the polling.
+    task: Task<()>,
+}
+
+/// One poll, read off the main thread: a new frame is decoded there.
+enum ViewerPoll {
+    Frame(FrameCursor, Arc<RenderImage>),
+    /// No camera frame: back to the pick's picture.
+    Empty,
+    Unchanged,
+}
+
+/// The poll's BMP as a picture GPUI draws (BGRA, mirrored like the outputs).
+fn viewer_poll(poll: FramePoll, mirror: bool) -> ViewerPoll {
+    match poll {
+        FramePoll::Frame { cursor, bmp } => bgra_from_bmp(&bmp, mirror)
+            .and_then(|frame| image::RgbaImage::from_raw(frame.width, frame.height, frame.pixels))
+            .map_or(ViewerPoll::Unchanged, |pixels| {
+                ViewerPoll::Frame(
+                    cursor,
+                    Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])),
+                )
+            }),
+        FramePoll::Empty => ViewerPoll::Empty,
+        FramePoll::Unchanged => ViewerPoll::Unchanged,
+    }
+}
+
 /// The Studio inspector's Quick settings (no heading: the rows name themselves).
 pub struct QuickSettingsSection {
     studio: Arc<AppStudio>,
@@ -114,6 +157,10 @@ pub struct QuickSettingsSection {
     chat: LiveChat,
     door_cursor: DeliveryCursor,
     popover_open: bool,
+    /// The popover's live picture: there only while the popover is drawn.
+    viewer: Option<ViewerFeed>,
+    /// The popover's body was drawn since the feed last checked.
+    viewer_seen: bool,
     choose_image: DialogHandle,
 }
 
@@ -178,8 +225,124 @@ impl QuickSettingsSection {
             chat,
             door_cursor,
             popover_open: false,
+            viewer: None,
+            viewer_seen: false,
             choose_image: DialogHandle::new(false),
         }
+    }
+
+    /// Opens or closes the Background popover. Closing it stops the live
+    /// picture's polling and drops its frame.
+    fn set_popover_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.popover_open = open;
+        // The taken feed drops with its `task` either way: the polling stops.
+        if !open
+            && let Some(feed) = self.viewer.take()
+            && let Some((_, frame)) = feed.frame
+        {
+            cx.drop_image(frame, Some(window));
+        }
+        cx.notify();
+    }
+
+    /// Starts the live picture's polling when the popover's body is drawn
+    /// (`CameraBackgroundViewer` polls only while mounted): one poll every
+    /// 150 ms, the newest frame kept. A failed poll is asked again on the
+    /// next tick and the last frame stays; no toast, no error. It stops when
+    /// the popover closes ([`Self::set_popover_open`]) and, about 2 s after
+    /// the body was last drawn, by itself (the page left with it open).
+    fn ensure_viewer(&mut self, cx: &mut Context<Self>) {
+        self.viewer_seen = true;
+        if self.viewer.is_some() {
+            return;
+        }
+        let studio = self.studio.clone();
+        let runtime = self.runtime.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let mut ticks = 0;
+            loop {
+                // What to ask after, and which way round the camera is.
+                let Ok(Some((after, mirror))) = this.update(cx, |section, _| {
+                    let feed = section.viewer.as_ref().filter(|_| section.popover_open)?;
+                    let after = feed.frame.as_ref().map(|(cursor, _)| cursor.clone());
+                    let mirror = section
+                        .studio
+                        .watch()
+                        .borrow()
+                        .settings
+                        .capture
+                        .layout
+                        .camera_mirror;
+                    Some((after, mirror))
+                }) else {
+                    break;
+                };
+                if let ConnectionState::Connected { ready, .. } = studio.backend().current_state() {
+                    let (port, token) = (ready.port, ready.token.clone());
+                    let job = runtime.spawn(async move {
+                        poll_camera_frame(port, &token, after.as_ref())
+                            .await
+                            .map(|poll| viewer_poll(poll, mirror))
+                    });
+                    if let Ok(Ok(poll)) = job.await
+                        && this
+                            .update(cx, |section, cx| section.take_viewer_poll(poll, cx))
+                            .is_err()
+                    {
+                        return;
+                    }
+                }
+                cx.background_executor().timer(POLL_INTERVAL).await;
+                ticks += 1;
+                if ticks % VIEWER_SEEN_TICKS == 0 {
+                    // Ask for a draw; a popover still on screen answers
+                    // (`viewer_seen`) before the next check.
+                    let Ok(seen) = this.update(cx, |section, cx| {
+                        let seen = std::mem::take(&mut section.viewer_seen);
+                        cx.notify();
+                        seen
+                    }) else {
+                        return;
+                    };
+                    if !seen {
+                        break;
+                    }
+                }
+            }
+            // The popover is closed or no longer drawn: the feed and its
+            // frame go. This task is the feed's own, so it is let go of
+            // rather than cancelled from inside itself.
+            let _ = this.update(cx, |section, cx| {
+                if let Some(feed) = section.viewer.take() {
+                    if let Some((_, frame)) = feed.frame {
+                        cx.drop_image(frame, None);
+                    }
+                    feed.task.detach();
+                    cx.notify();
+                }
+            });
+        });
+        self.viewer = Some(ViewerFeed { frame: None, task });
+    }
+
+    /// Keeps a poll's answer: the newer frame (the one before it leaves the
+    /// GPU), or none when the camera has no frame.
+    fn take_viewer_poll(&mut self, poll: ViewerPoll, cx: &mut Context<Self>) {
+        let Some(feed) = self.viewer.as_mut() else {
+            return;
+        };
+        let before = match poll {
+            ViewerPoll::Frame(cursor, frame) => feed.frame.replace((cursor, frame)),
+            ViewerPoll::Empty => match feed.frame.take() {
+                Some(before) => Some(before),
+                None => return,
+            },
+            ViewerPoll::Unchanged => return,
+        };
+        if let Some((_, before)) = before {
+            cx.drop_image(before, None);
+        }
+        cx.notify();
     }
 
     fn select_camera(&self, value: String) {
@@ -318,15 +481,17 @@ impl QuickSettingsSection {
         let content_entity = entity.clone();
         let background = line.background.clone();
         let choice = line.choice.clone();
-        let value_for_picker = line.value_label.clone();
+        // The trigger's picture: the Orc over the current pick.
+        let art = current_art(line.choice.as_ref(), || {
+            bundled_images(&videorc_app_core::bundled::current().backgrounds)
+        });
 
         Popover::new("quick-settings-background")
             .open(open)
             .width(320.)
-            .on_open_change(move |now, _, cx| {
+            .on_open_change(move |now, window, cx| {
                 let _ = entity.update(cx, |section, cx| {
-                    section.popover_open = now;
-                    cx.notify();
+                    section.set_popover_open(now, window, cx);
                 });
             })
             .trigger_with(move |_expanded, window, app| {
@@ -336,19 +501,13 @@ impl QuickSettingsSection {
                     BACKGROUND_LABEL,
                     trigger_value.clone(),
                 )
-                .leading(thumbnail(theme))
+                .leading(thumbnail(&art, theme))
                 .on_navigate(|_, _, _| {})
             })
             .content(move |window, cx| {
                 content_entity
                     .update(cx, |section, cx| {
-                        section.popover_content(
-                            &background,
-                            choice.as_ref(),
-                            &value_for_picker,
-                            window,
-                            cx,
-                        )
+                        section.popover_content(&background, choice.as_ref(), window, cx)
                     })
                     .unwrap_or_else(|_| div().into_any_element())
             })
@@ -356,14 +515,22 @@ impl QuickSettingsSection {
     }
 
     fn popover_content(
-        &self,
+        &mut self,
         background: &serde_json::Value,
         selected: Option<&ChoiceId>,
-        value: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme::resolve(None, window, cx);
+        // P257: the live "What viewers see", only while this body is drawn.
+        if self.popover_open {
+            self.ensure_viewer(cx);
+        }
+        let frame = self
+            .viewer
+            .as_ref()
+            .and_then(|feed| feed.frame.as_ref())
+            .map(|(_, frame)| frame.clone());
         let camera_selected = self
             .studio
             .watch()
@@ -393,29 +560,27 @@ impl QuickSettingsSection {
             background,
             &tiles,
             selected,
-            value,
+            frame,
             t,
-            move |choice, _, cx| {
+            move |choice, window, cx| {
                 let _ = choose_entity.update(cx, |section, cx| {
                     section.choose_background(choice);
-                    section.popover_open = false;
-                    cx.notify();
+                    section.set_popover_open(false, window, cx);
                 });
             },
             move |window, cx| {
                 let _ = image_entity.update(cx, |section, cx| {
-                    section.popover_open = false;
+                    section.set_popover_open(false, window, cx);
                     section.choose_image.open(window, cx);
                     cx.notify();
                 });
             },
-            move |_, cx| {
+            move |window, cx| {
                 let _ = settings_entity.update(cx, |section, cx| {
-                    section.popover_open = false;
+                    section.set_popover_open(false, window, cx);
                     // Scene page is Background's home (Electron
                     // `openSceneBackground`, P575).
                     cx.emit(OpenPage::scene_background());
-                    cx.notify();
                 });
             },
         )

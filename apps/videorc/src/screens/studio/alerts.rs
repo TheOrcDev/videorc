@@ -274,7 +274,7 @@ impl WatchdogCards {
             row = row.child(self.fix_button(&card.id, fix, ButtonVariant::Default, cx));
         }
         for fix in &card.more_fixes {
-            row = row.child(self.fix_button(&card.id, fix, ButtonVariant::Ghost, cx));
+            row = row.child(self.fix_button(&card.id, fix, ButtonVariant::Outline, cx));
         }
         if let Some(quiet) = &card.quiet {
             let id = card.id.clone();
@@ -285,7 +285,7 @@ impl WatchdogCards {
                     card.id
                 )))
                 .label(quiet.label)
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .size(ButtonSize::Xs)
                 .disabled(!quiet.enabled)
                 .on_click(cx.listener(move |this, _, _, _| this.quiet(id.clone(), action))),
@@ -511,7 +511,7 @@ impl Render for CloudResumeSlot {
             .on_click(cx.listener(|this, _, _, _| this.resume()));
         let end = Button::new("cloud-end")
             .label(card.end_label)
-            .variant(ButtonVariant::Ghost)
+            .variant(ButtonVariant::Outline)
             .size(ButtonSize::Xs)
             .disabled(!card.end_enabled)
             .on_click(cx.listener(|this, _, window, cx| this.ask_end(window, cx)));
@@ -644,7 +644,7 @@ impl Render for PreviewNotes {
         // while the native path has something to re-arm.
         let retry = Button::new("capture-health-retry")
             .label(RETRY_PREVIEW_LABEL)
-            .variant(ButtonVariant::Ghost)
+            .variant(ButtonVariant::Outline)
             .size(ButtonSize::Xs)
             .disabled(!self.preview.read(cx).can_retry())
             .on_click(cx.listener(|notes, _, _, cx| {
@@ -663,9 +663,8 @@ impl Render for PreviewNotes {
                 div()
                     .min_w_0()
                     .child(div().line_clamp(3).child(alert.detail))
-                    .child(actions().child(retry)),
+                    .child(actions().child(retry).child(door)),
             )
-            .action(door)
             .into_any_element()
     }
 }

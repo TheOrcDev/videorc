@@ -2,6 +2,7 @@
 //! `videorc_app_core::first_run` (#1766), drawn with `videorc-kit`. Words
 //! match Electron's `components/first-run/*` and `lib/first-run.ts`.
 
+pub(crate) mod backdrop;
 pub(crate) mod pictures;
 
 use std::collections::BTreeMap;
@@ -10,8 +11,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
     AnyElement, ColorSpace, Context, Entity, EventEmitter, FocusHandle, FontWeight, Image,
-    ImageFormat, ObjectFit, SharedString, Window, WindowControlArea, div, img, linear_color_stop,
-    linear_gradient, prelude::*, px, relative,
+    ImageFormat, ObjectFit, SharedString, Subscription, Window, WindowControlArea, div, img,
+    linear_color_stop, linear_gradient, prelude::*, px, relative,
 };
 use videorc_app_core::assets;
 use videorc_app_core::desktop::permissions::{
@@ -22,6 +23,7 @@ use videorc_app_core::desktop::system_access::{
     SystemAccessState, is_media_access_snapshot_ready, row_action, system_access_action_label,
     system_access_rows, system_access_status, system_access_visible_detail,
 };
+use videorc_app_core::first_run::backdrop::{self as backdrop_rules, StillReason};
 use videorc_app_core::first_run::{self as fr, Goal, Leave, SetupMode, Step};
 use videorc_app_core::format::device_noun;
 use videorc_app_core::livestream::accounts::{
@@ -36,7 +38,7 @@ use videorc_app_core::studio::audio_mixer::{
 };
 use videorc_app_core::studio::settings::SettingWrite;
 use videorc_app_core::studio::source_selection::SourceKind;
-use videorc_app_core::{BackendClient, Studio};
+use videorc_app_core::{BackendClient, Logger, Studio};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::badge::{Badge, BadgeVariant};
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
@@ -234,6 +236,17 @@ pub struct FirstRunScreen {
     /// main thread the first time setup opens.
     inverted_poster: Option<Arc<Image>>,
     poster_started: bool,
+    /// The backdrop: the poster, or Liquid Chrome moving over it
+    /// (`backdrop.rs`). The player lives only while setup is open and the
+    /// picture moves.
+    backdrop_mode: backdrop::Mode,
+    #[cfg(target_os = "macos")]
+    backdrop_player: Option<backdrop::Player>,
+    /// Which player's events still count: one per opening of setup.
+    backdrop_run: u64,
+    /// Redraws when the window is hidden or shown, so the player holds.
+    backdrop_visibility: Option<Subscription>,
+    logger: Logger,
     /// Keyboard focus (`first-run-setup.tsx`): the Goal rows, Up and Down
     /// moving between them, and Look's first background card.
     goal_focus: [FocusHandle; 3],
@@ -267,6 +280,7 @@ impl FirstRunScreen {
         studio: Arc<AppStudio>,
         permissions: Arc<Permissions>,
         runtime: tokio::runtime::Handle,
+        logger: Logger,
         cx: &mut Context<Self>,
     ) -> Self {
         let studio_watch = studio.clone();
@@ -328,6 +342,12 @@ impl FirstRunScreen {
             settling: false,
             inverted_poster: None,
             poster_started: false,
+            backdrop_mode: backdrop::Mode::Starting,
+            #[cfg(target_os = "macos")]
+            backdrop_player: None,
+            backdrop_run: 0,
+            backdrop_visibility: None,
+            logger,
             goal_focus: std::array::from_fn(|_| cx.focus_handle()),
             look_focus: cx.focus_handle(),
             body_focus: cx.focus_handle(),
@@ -416,12 +436,17 @@ impl FirstRunScreen {
             .and_then(|value| fr::parse_record(Some(value)))
             .and_then(|record| record.goal);
         self.step = fr::steps_for(self.goal, platform)[0];
+        let was_open = self.open;
         self.open = true;
         self.focused_step = None;
         self.opened_at = Some(Instant::now());
         self.samples.clear();
         self.studio.set_clips_first_run_setup_open(true);
         self.prepare_poster(cx);
+        // A setup already open keeps its moving picture.
+        if !was_open {
+            self.reset_backdrop();
+        }
         cx.notify();
     }
 
@@ -434,6 +459,7 @@ impl FirstRunScreen {
             .into_iter()
             .find(|candidate| *candidate >= step)
             .unwrap_or(Step::Permissions);
+        let was_open = self.open;
         self.open = true;
         self.focused_step = None;
         self.opened_at = Some(Instant::now());
@@ -445,7 +471,110 @@ impl FirstRunScreen {
         }
         self.persist_step();
         self.prepare_poster(cx);
+        // A setup already open keeps its moving picture.
+        if !was_open {
+            self.reset_backdrop();
+        }
         cx.notify();
+    }
+
+    /// The backdrop as a fresh opening of setup finds it, and as a closed
+    /// setup leaves it: no player, no thread, nothing on the GPU.
+    fn reset_backdrop(&mut self) {
+        self.backdrop_mode = backdrop::Mode::Starting;
+        self.backdrop_run += 1;
+        #[cfg(target_os = "macos")]
+        {
+            self.backdrop_player = None;
+        }
+    }
+
+    /// The poster stays, and the log says why (once per reason).
+    fn backdrop_still(&mut self, reason: StillReason, detail: Option<String>) {
+        if self.backdrop_mode != backdrop::Mode::Still(reason) {
+            self.logger
+                .info(backdrop::still_line(reason, detail.as_deref()));
+        }
+        self.backdrop_mode = backdrop::Mode::Still(reason);
+        #[cfg(target_os = "macos")]
+        {
+            self.backdrop_player = None;
+        }
+    }
+
+    // Only the macOS player sends events so far.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn on_backdrop(&mut self, run: u64, event: backdrop::Event, cx: &mut Context<Self>) {
+        if run != self.backdrop_run || !self.open {
+            return;
+        }
+        match event {
+            backdrop::Event::FirstFrame => {
+                if self.backdrop_mode == backdrop::Mode::Starting {
+                    self.backdrop_mode = backdrop::Mode::Moving;
+                }
+            }
+            backdrop::Event::Still(reason, detail) => self.backdrop_still(reason, detail),
+        }
+        cx.notify();
+    }
+
+    /// Keeps the backdrop in step with what the screen is about to draw:
+    /// starts the player the first time motion is allowed, hands it the
+    /// theme, the window's visibility and its size, and takes it down under
+    /// reduced motion (`WelcomeBackdrop`'s effects).
+    fn sync_backdrop(
+        &mut self,
+        frame: backdrop::Frame,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.backdrop_visibility.is_none() {
+            self.backdrop_visibility =
+                Some(cx.observe_window_visibility(window, |_, _, _, cx| cx.notify()));
+        }
+        if frame.reduced_motion {
+            self.backdrop_still(StillReason::ReducedMotion, None);
+            return;
+        }
+        if self.backdrop_mode == backdrop::Mode::Still(StillReason::ReducedMotion) {
+            // Motion is allowed again: a new player, from the poster.
+            self.backdrop_mode = backdrop::Mode::Starting;
+            self.backdrop_run += 1;
+        }
+        if matches!(self.backdrop_mode, backdrop::Mode::Still(_)) {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(player) = self.backdrop_player.as_mut() {
+                player.sync(frame);
+                return;
+            }
+            match backdrop::Player::start(frame, window, cx) {
+                Ok((player, mut events)) => {
+                    self.backdrop_player = Some(player);
+                    let run = self.backdrop_run;
+                    cx.spawn(async move |this, cx| {
+                        while let Some(event) = events.recv().await {
+                            let told = this.update(cx, |screen, cx| {
+                                screen.on_backdrop(run, event, cx);
+                            });
+                            if told.is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+                }
+                Err((reason, detail)) => self.backdrop_still(reason, detail),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = window;
+            self.backdrop_still(StillReason::Unsupported, None);
+        }
     }
 
     /// Turns the backdrop's poster around for light, once, off the main
@@ -473,8 +602,32 @@ impl FirstRunScreen {
         crate::app::hotkeys::node_platform()
     }
 
+    /// The moving picture, once it has a frame to show.
+    fn backdrop_picture(&self) -> Option<AnyElement> {
+        if self.backdrop_mode != backdrop::Mode::Moving {
+            return None;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let player = self.backdrop_player.as_ref()?;
+            Some(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .child(player.element())
+                    .into_any_element(),
+            )
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    }
+
     fn leave(&mut self, leave: Leave, cx: &mut Context<Self>) {
         self.open = false;
+        // The shader stops with setup.
+        self.reset_backdrop();
         self.studio.set_clips_first_run_setup_open(false);
         self.persist_complete(leave.completion);
         if let Some(page) = leave.open_page {
@@ -974,6 +1127,19 @@ impl Render for FirstRunScreen {
         }
         let appearance = theme::current(window, cx);
         let t = appearance.theme();
+        let viewport = window.viewport_size();
+        self.sync_backdrop(
+            backdrop::Frame {
+                tone: backdrop_rules::tone(appearance.dark, appearance.increase_contrast),
+                reduced_motion: !theme::motion(cx) || backdrop::system_reduces_motion(),
+                visible: window.is_visible(),
+                width: f64::from(viewport.width),
+                height: f64::from(viewport.height),
+                scale_factor: f64::from(window.scale_factor()),
+            },
+            window,
+            cx,
+        );
         let platform = self.platform();
         let (position, count) = fr::step_position(self.step, self.goal, Some(platform));
         let title = step_title(self.step);
@@ -1198,7 +1364,9 @@ impl Render for FirstRunScreen {
         .text_color(hsla(t.popover_foreground));
 
         // Liquid Chrome's poster edge to edge (the backdrop's still): dimmed
-        // under dark, turned around under light. Decoration only.
+        // under dark, turned around under light. Decoration only. Once the
+        // player's first frame is on its layer the moving picture covers it;
+        // the clock starts at the poster's phase, so nothing jumps.
         let picture = if appearance.dark {
             Some(pictures::poster())
         } else {
@@ -1229,7 +1397,8 @@ impl Render for FirstRunScreen {
                         .inset_0()
                         .bg(hsla(with_alpha(videorc_kit::tokens::DARK.glass_solid, dim))),
                 )
-            });
+            })
+            .children(self.backdrop_picture());
 
         div()
             .id("first-run-setup")
@@ -1875,7 +2044,7 @@ fn look_body(
             .children(grant_reason.then(|| {
                 Button::new("first-run-back-permissions")
                     .label("Back to permissions")
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .disabled(locked)
                     .on_click({
@@ -2007,7 +2176,7 @@ fn sound_body(
                     div().pt(px(4.)).child(
                         Button::new("first-run-sound-back-permissions")
                             .label("Back to permissions")
-                            .variant(ButtonVariant::Ghost)
+                            .variant(ButtonVariant::Outline)
                             .size(ButtonSize::Xs)
                             .on_click({
                                 let entity = entity.clone();

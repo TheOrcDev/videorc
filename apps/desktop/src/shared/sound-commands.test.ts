@@ -5,6 +5,7 @@ import {
   SOUND_COMMAND_USAGE,
   classifySoundCommand,
   matchSoundName,
+  padPressStops,
   playingSoundIds,
   pressStops,
   soundCompletions,
@@ -62,6 +63,18 @@ describe('pressStops', () => {
     expect(pressStops('oneShot', true)).toBe(false)
     expect(pressStops('hold', true)).toBe(false)
     expect(pressStops('toggle', false)).toBe(false)
+  })
+})
+
+describe('padPressStops', () => {
+  it('stops a playing pad in every mode but While held (owner, 2026-11-27)', () => {
+    expect(padPressStops('oneShot', true)).toBe(true)
+    expect(padPressStops('toggle', true)).toBe(true)
+    expect(padPressStops('loop', true)).toBe(true)
+    expect(padPressStops('hold', true)).toBe(false)
+    for (const mode of ['oneShot', 'toggle', 'loop', 'hold'] as const) {
+      expect(padPressStops(mode, false)).toBe(false)
+    }
   })
 })
 

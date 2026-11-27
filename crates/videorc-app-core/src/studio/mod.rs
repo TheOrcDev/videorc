@@ -70,6 +70,8 @@ pub mod audio_mixer;
 pub mod audio_section;
 pub mod backend;
 pub mod camera_background;
+pub mod camera_background_art;
+pub mod camera_background_frames;
 pub mod camera_background_migration;
 pub mod camera_background_view;
 pub mod camera_frame_rate;
@@ -138,7 +140,7 @@ pub mod stream_report_store;
 pub mod takeover_microphone;
 pub mod takeover_mute;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 pub mod timecode;
 pub mod transport;
 pub mod ui_local;

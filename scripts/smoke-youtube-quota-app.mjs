@@ -4,7 +4,7 @@ import { mkdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import {
   FAKE_YOUTUBE_ACCESS_TOKEN,
   startFakeYouTubeApi,
@@ -579,6 +579,14 @@ async function youtubeProvider(socket, sessionId) {
 }
 
 async function countToasts(smoke, pattern) {
+  if (smokeAppIsGpui()) {
+    const state = await requestSmokeCommand(smoke, 'notifications-state', {}, { timeoutMs })
+    assert(state.hook === true && Array.isArray(state.toasts), 'GPUI notification snapshot missing')
+    return state.toasts.filter(({ text }) => {
+      pattern.lastIndex = 0
+      return pattern.test(text)
+    }).length
+  }
   const response = await requestSmokeCommand(
     smoke,
     'eval-js',
@@ -592,6 +600,14 @@ async function countToasts(smoke, pattern) {
 
 /** How many times Videorc raised a matching notification on its own (plan 250). */
 async function countNotices(smoke, pattern) {
+  if (smokeAppIsGpui()) {
+    const state = await requestSmokeCommand(smoke, 'notifications-state', {}, { timeoutMs })
+    assert(
+      state.hook === true && Array.isArray(state.entries),
+      'GPUI notification snapshot missing'
+    )
+    return countNotifications(state, { title: pattern })
+  }
   const response = await requestSmokeCommand(
     smoke,
     'eval-js',

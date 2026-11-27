@@ -170,10 +170,10 @@ export function BuddyGreetingsSection(): ReactElement | null {
             </FieldDescription>
           </FieldContent>
           <Button
-            className="shrink-0"
+            className="shrink-0 text-foreground"
             size="xs"
             type="button"
-            variant="ghost"
+            variant="outline"
             onClick={() => openBuddyTab('chat')}
           >
             {`Sidekick → ${buddyTabLabel('chat')}`}

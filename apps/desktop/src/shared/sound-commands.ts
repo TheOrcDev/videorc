@@ -107,12 +107,25 @@ export function playingSoundIds(voices: readonly Pick<SoundVoice, 'soundId'>[]):
 }
 
 /**
- * True when a press stops the sound instead of starting it: a playing
- * Play/stop or Loop sound (audiocn's pad mapping, applied by the backend for
- * keys and remotes). Play once restarts and While held starts.
+ * True when a named press (`/sound`, a remote: `sounds.press`) stops the
+ * sound instead of starting it: a playing Play/stop or Loop sound (audiocn's
+ * pad mapping, applied by the backend). Play once restarts and While held
+ * starts. A pad and its key follow `padPressStops`.
  */
 export function pressStops(mode: SoundMode, playing: boolean): boolean {
   return playing && (mode === 'toggle' || mode === 'loop')
+}
+
+/**
+ * True when a pad, or its key on the Studio page, stops the sound instead of
+ * starting it: a second press of a playing pad stops that one sound in every
+ * mode but While held (owner, 2026-11-27: "it shouldn't repeat it. It should
+ * stop it"). While held starts on the press and stops on the release. The
+ * named commands (`/sound`, ⌘K, a remote) keep `pressStops`: Play once
+ * restarts there.
+ */
+export function padPressStops(mode: SoundMode, playing: boolean): boolean {
+  return playing && mode !== 'hold'
 }
 
 /**

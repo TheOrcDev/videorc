@@ -170,6 +170,7 @@ pub const ELECTRON_SMOKE_COMMAND_NAMES: &[&str] = &[
 /// Electron's smokes reach through the renderer (`eval-js`, the remote
 /// surface) instead.
 pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
+    "notifications-state",
     // S3.0j: the account: what it did (names, plan, the sign-in that
     // waits, each link's outcome; never a code, a verifier or an email),
     // the sign-in as the menu starts it (a smoke run opens no browser; the
@@ -267,6 +268,7 @@ pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     // (`state`, `save`, `apply`, `remove`, `layout`, `background`,
     // `configure`).
     "studio-capture-configure",
+    "studio-go-live",
     "studio-scene-apply",
     "studio-scene-background",
     "studio-scene-delete",
@@ -445,8 +447,8 @@ pub struct ValidatedSmokeCommand {
 /// `None` is the 400.
 ///
 /// The Comments fixture commands keep Electron's larger key budget for the
-/// snapshot; their full fixture schema is not checked here because the Rust
-/// app answers them "not supported" until the Comments window exists.
+/// snapshot. The window's typed fixture handler validates the snapshot schema
+/// before it takes ownership of the view; unsupported fixture fields fail by name.
 pub fn validate_smoke_command_payload(value: &Value) -> Option<ValidatedSmokeCommand> {
     let body = value.as_object()?;
     let command = body.get("command")?.as_str()?;

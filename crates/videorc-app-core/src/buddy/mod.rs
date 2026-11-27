@@ -4,7 +4,7 @@
 //! and rules; the app sends the calls and feeds the events.
 //!
 //! Since Electron's #1356 and #1372 the co-host is "Sidekick" and the
-//! character on stream is "the avatar", on two pages (Sidekick ⌘9, Avatar ⌘8);
+//! character on stream is "the avatar", on two pages (Sidekick ⌘8/⌘9, Avatar ⌘7/⌘8);
 //! the module keeps the code name `buddy`, as Electron's files do.
 //!
 //! Still to land in S1.6e: the chat and voice commands, Sidekick Live, the

@@ -511,6 +511,7 @@ fn main() -> Result<()> {
     let hotkey_logger = logger.clone();
     let follow_logger = logger.clone();
     let health_logger = logger.clone();
+    let first_run_logger = logger.clone();
     let handoff_links = deep_links.clone();
     // The quit while on air: the guard follows the backend's events.
     let exit_events = client.subscribe();
@@ -698,7 +699,13 @@ fn main() -> Result<()> {
         });
         let go_live = cx.new(|cx| GoLiveDialog::new(studio.clone(), core_handle.clone(), cx));
         let first_run = cx.new(|cx| {
-            FirstRunScreen::new(studio.clone(), permissions.clone(), core_handle.clone(), cx)
+            FirstRunScreen::new(
+                studio.clone(),
+                permissions.clone(),
+                core_handle.clone(),
+                first_run_logger.clone(),
+                cx,
+            )
         });
         let settings = cx.new(|cx| {
             screens::settings::SettingsScreen::new(
@@ -1183,10 +1190,10 @@ fn main() -> Result<()> {
         // View → the pages and ⌘1–⌘0 (P1499–P1503, P1559): the page as its
         // sidebar row opens it, from any window; the main window comes up.
         let show_page = move |key: videorc_app_core::desktop::menu::PageKey, cx: &mut App| {
-            let Some(page) = PageId::from_menu_key(key) else {
-                return;
-            };
             let _ = main_window.update(cx, |shell, window, cx| {
+                let Some(page) = PageId::from_menu_key(key, shell.guests_shown(cx)) else {
+                    return;
+                };
                 shell.open_page(page, window, cx);
                 window.activate_window();
             });

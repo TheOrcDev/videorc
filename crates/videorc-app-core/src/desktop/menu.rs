@@ -59,41 +59,26 @@ pub struct MenuPage {
     pub title: &'static str,
 }
 
-const fn page(digit: u8, title: &'static str) -> MenuPage {
-    MenuPage {
-        key: PageKey::Digit(digit),
-        title,
-    }
+/// The visible sidebar's pages and keys, grouped for the View menu.
+/// Settings keeps its separate App-menu item.
+pub fn page_groups(guests_shown: bool) -> Vec<Vec<MenuPage>> {
+    crate::nav::ZONES
+        .iter()
+        .map(|(_, pages)| {
+            pages
+                .iter()
+                .filter_map(|page| {
+                    let key = page.key(guests_shown)?;
+                    (key != PageKey::Settings).then_some(MenuPage {
+                        key,
+                        title: page.label(),
+                    })
+                })
+                .collect()
+        })
+        .filter(|group: &Vec<MenuPage>| !group.is_empty())
+        .collect()
 }
-
-const fn letter_page(letter: u8, title: &'static str) -> MenuPage {
-    MenuPage {
-        key: PageKey::Letter(letter),
-        title,
-    }
-}
-
-/// `APP_MENU_PAGE_GROUPS`: the View menu's pages in sidebar order, one group
-/// per sidebar zone (`SIDEBAR_LAYOUT`, owner 2026-11-20): the fixed keys
-/// first (Images ⇧⌘G, Sounds ⇧⌘S, Library ⌘0, Settings ⌘,), then ⌘1–⌘9
-/// down the remaining rows. Settings is the App menu's Settings… item.
-pub const PAGE_GROUPS: [&[MenuPage]; 5] = [
-    &[page(1, "Studio")],
-    &[
-        page(2, "Sources"),
-        page(3, "Scene"),
-        page(4, "Captions"),
-        page(5, "Output"),
-    ],
-    &[
-        page(6, "Destinations"),
-        page(7, "Guests"),
-        page(8, "Avatar"),
-        page(9, "Sidekick"),
-    ],
-    &[letter_page(b'G', "Images"), letter_page(b'S', "Sounds")],
-    &[page(0, "Library")],
-];
 
 /// The windows the Window menu toggles (`AppMenuWindowId`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -408,7 +393,7 @@ impl MenuAvailability {
 
     /// Everything (Electron's shape, for the tests that mirror it).
     pub fn everything() -> Self {
-        let pages = PAGE_GROUPS
+        let pages = page_groups(true)
             .iter()
             .flat_map(|group| group.iter().map(|page| page.key))
             .chain([PageKey::Settings])
@@ -435,6 +420,7 @@ pub fn app_menu_template(
     platform: MenuPlatform,
     app_name: &str,
     availability: &MenuAvailability,
+    guests_shown: bool,
 ) -> Option<Vec<MenuEntry>> {
     if platform != MenuPlatform::Mac {
         return None;
@@ -442,7 +428,7 @@ pub fn app_menu_template(
     let enabled = |command| availability.command_enabled(command);
 
     let mut pages = Vec::new();
-    for (index, group) in PAGE_GROUPS.iter().enumerate() {
+    for (index, group) in page_groups(guests_shown).iter().enumerate() {
         if index > 0 {
             pages.push(MenuEntry::Separator);
         }
@@ -579,7 +565,13 @@ mod tests {
     const APP: &str = "Videorc";
 
     fn template() -> Vec<MenuEntry> {
-        app_menu_template(MenuPlatform::Mac, APP, &MenuAvailability::everything()).unwrap()
+        app_menu_template(
+            MenuPlatform::Mac,
+            APP,
+            &MenuAvailability::everything(),
+            true,
+        )
+        .unwrap()
     }
 
     fn top<'a>(template: &'a [MenuEntry], title: &str) -> &'a [MenuEntry] {
@@ -600,6 +592,40 @@ mod tests {
                 other => other.title(APP).unwrap(),
             })
             .collect()
+    }
+
+    #[test]
+    fn visible_page_menu_updates_names_keys_and_commands() {
+        for shown in [false, true, false] {
+            let menu = app_menu_template(
+                MenuPlatform::Mac,
+                APP,
+                &MenuAvailability::everything(),
+                shown,
+            )
+            .unwrap();
+            let view = menu
+                .iter()
+                .find_map(|entry| match entry {
+                    MenuEntry::Submenu { title, items, .. } if title == "View" => Some(items),
+                    _ => None,
+                })
+                .unwrap();
+            let text = format!("{view:?}");
+            assert_eq!(text.contains("Guests"), shown);
+            for (title, digit) in [
+                ("Avatar", if shown { 8 } else { 7 }),
+                ("Sidekick", if shown { 9 } else { 8 }),
+            ] {
+                let expected = MenuEntry::item(
+                    title,
+                    Some(&PageKey::Digit(digit).accelerator()),
+                    MenuCommand::ShowPage(PageKey::Digit(digit)),
+                    true,
+                );
+                assert!(view.contains(&expected));
+            }
+        }
     }
 
     #[test]
@@ -736,7 +762,7 @@ mod tests {
 
         let mut without_notes = MenuAvailability::everything();
         without_notes.windows.remove(&WindowId::Notes);
-        let template = app_menu_template(MenuPlatform::Mac, APP, &without_notes).unwrap();
+        let template = app_menu_template(MenuPlatform::Mac, APP, &without_notes, true).unwrap();
         let titles: Vec<String> = top(&template, "Window")
             .iter()
             .filter_map(|entry| entry.title(APP))
@@ -792,7 +818,7 @@ mod tests {
     fn shows_no_menu_bar_on_windows_and_linux() {
         for platform in [MenuPlatform::Windows, MenuPlatform::Linux] {
             assert_eq!(
-                app_menu_template(platform, APP, &MenuAvailability::everything()),
+                app_menu_template(platform, APP, &MenuAvailability::everything(), true),
                 None
             );
         }
@@ -801,7 +827,7 @@ mod tests {
     #[test]
     fn phase_2_enables_only_what_the_rust_app_has() {
         let template =
-            app_menu_template(MenuPlatform::Mac, APP, &MenuAvailability::phase_2()).unwrap();
+            app_menu_template(MenuPlatform::Mac, APP, &MenuAvailability::phase_2(), true).unwrap();
         let enabled: Vec<(String, bool)> = every_entry(&template)
             .into_iter()
             .filter_map(|entry| match entry {

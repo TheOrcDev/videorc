@@ -311,7 +311,7 @@ export const SCREENS = Object.freeze([
   },
   {
     id: 'avatar-profile',
-    title: 'Avatar ⌘8, Profile',
+    title: 'Avatar (⌘7; ⌘8 with Guests), Profile',
     deck: 'livestream',
     open: page('avatar', { subTab: 'profile' }),
     baseline: { screen: 'avatar-profile', state: 'default' },
@@ -322,7 +322,7 @@ export const SCREENS = Object.freeze([
   // shooter sets the page-tabs scroller's `scrollTop` to the same value).
   {
     id: 'avatar-profile-2',
-    title: 'Avatar ⌘8, Profile scrolled: Name and personality, Look',
+    title: 'Avatar (⌘7; ⌘8 with Guests), Profile scrolled: Name and personality, Look',
     deck: 'livestream',
     open: page('avatar', { subTab: 'profile' }),
     scroll: { dy: 600 },
@@ -331,7 +331,7 @@ export const SCREENS = Object.freeze([
   },
   {
     id: 'avatar-profile-3',
-    title: 'Avatar ⌘8, Profile scrolled: Reactions and Motion',
+    title: 'Avatar (⌘7; ⌘8 with Guests), Profile scrolled: Reactions and Motion',
     deck: 'livestream',
     open: page('avatar', { subTab: 'profile' }),
     scroll: { dy: 1200 },
@@ -340,7 +340,7 @@ export const SCREENS = Object.freeze([
   },
   {
     id: 'avatar-greetings',
-    title: 'Avatar ⌘8, Greetings',
+    title: 'Avatar (⌘7; ⌘8 with Guests), Greetings',
     deck: 'livestream',
     open: page('avatar', { subTab: 'greetings' }),
     baseline: { screen: 'avatar-greetings', state: 'default' },
@@ -355,7 +355,7 @@ export const SCREENS = Object.freeze([
     ['clean-cut', 'Clean cut', 'buddy-clean-cut', 'Sidekick → Clean cut']
   ].map(([subTab, label, screen, section]) => ({
     id: `sidekick-${subTab}`,
-    title: `Sidekick ⌘9, ${label} (signed out)`,
+    title: `Sidekick (⌘8; ⌘9 with Guests), ${label} (signed out)`,
     deck: 'sidekick',
     open: page('ai', { subTab }),
     baseline: { screen, state: 'locked' },

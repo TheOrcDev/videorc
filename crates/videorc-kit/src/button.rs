@@ -92,6 +92,7 @@ pub struct Button {
     selected: bool,
     ground: Option<Color>,
     accessibility_label: Option<SharedString>,
+    accessibility_description: Option<SharedString>,
     tooltip: Option<SharedString>,
     /// With `tooltip`: the chip reads this action's binding from the keymap.
     tooltip_action: Option<Box<dyn Action>>,
@@ -117,6 +118,7 @@ impl Button {
             selected: false,
             ground: None,
             accessibility_label: None,
+            accessibility_description: None,
             tooltip: None,
             tooltip_action: None,
             track_focus: None,
@@ -184,6 +186,13 @@ impl Button {
     /// The name a screen reader reads, for an icon-only button.
     pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
         self.accessibility_label = Some(label.into());
+        self
+    }
+
+    /// What a screen reader reads after the name (`aria-describedby`): the
+    /// tooltip's words, when they say more than the button's own.
+    pub fn accessibility_description(mut self, description: impl Into<SharedString>) -> Self {
+        self.accessibility_description = Some(description.into());
         self
     }
 
@@ -410,6 +419,9 @@ impl RenderOnce for Button {
         // no node from its child text, so a labelled button read as unnamed.
         if let Some(label) = self.accessibility_label.or_else(|| self.label.clone()) {
             button = button.accessibility_label(label);
+        }
+        if let Some(description) = self.accessibility_description {
+            button = button.aria_description(description);
         }
         if let Some(handle) = self.track_focus.as_ref() {
             button = button.track_focus(handle);

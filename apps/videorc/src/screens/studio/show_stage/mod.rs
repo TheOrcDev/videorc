@@ -860,9 +860,8 @@ impl ShowStage {
                 div().child(
                     Button::new("more-want-to-join")
                         .label(more_want_to_join(overflow))
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Xs)
-                        .child(icon(IconName::CaretRight, 14., hsla(t.foreground)))
                         .on_click({
                             let entity = entity.clone();
                             move |_, _, cx| entity.update(cx, |stage, cx| stage.open_guests(cx))
@@ -1124,9 +1123,8 @@ impl ShowStage {
                                 Button::new("show-stage-invite-link")
                                     .icon(IconName::LinkSimple)
                                     .label(INVITE_LINK)
-                                    .variant(ButtonVariant::Ghost)
+                                    .variant(ButtonVariant::Outline)
                                     .size(ButtonSize::Xs)
-                                    .child(icon(IconName::CaretRight, 14., hsla(t.foreground)))
                                     .on_click(move |_, _, cx| {
                                         entity.update(cx, |stage, cx| stage.open_guests(cx))
                                     }),

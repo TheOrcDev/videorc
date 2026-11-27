@@ -180,6 +180,29 @@ pub fn background_import_label(importing: bool) -> &'static str {
     }
 }
 
+/// The same initial look as Electron's LIVE_BACKGROUND_DEFAULT_LOOKS.
+/// Resolve by saved identity so live shader metadata and all style defaults
+/// follow the scene background normalizer.
+pub fn live_background_style(id: &str) -> Option<serde_json::Value> {
+    let look = match id {
+        "silk" => "satin",
+        "side-rays" => "sunbeam",
+        "plasma-wave" => "plasma",
+        "liquid-chrome" => "polished",
+        "line-waves" => "silk",
+        "beams" | "ferrofluid" => "studio",
+        "color-bends" => "default",
+        "dither" => "classic",
+        "ghost-fibers" => "violet",
+        _ => return None,
+    };
+    crate::scenes::background::normalize_saved_background(Some(&serde_json::json!({
+        "assetId": format!("live-{id}-{look}"),
+    })))
+    .ok()
+    .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

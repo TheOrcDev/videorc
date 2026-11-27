@@ -167,6 +167,15 @@ impl PageMemory {
     }
 }
 
+/// Electron's `isSessionActive` for local output: the Clips ring alone
+/// owns no recording/live transport. Explicit start/stop requests still lock
+/// setup while the backend's status catches up.
+pub fn session_locks_setup(session: &crate::studio::SessionView) -> bool {
+    (session.phase.is_active() && !crate::studio::session::session_is_replay_only(&session.status))
+        || session.start_pending
+        || session.stop_pending
+}
+
 /// What the page reads besides its memory.
 pub struct SetupInput<'a> {
     pub capture: &'a Value,

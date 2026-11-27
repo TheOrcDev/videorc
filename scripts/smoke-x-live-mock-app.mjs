@@ -12,17 +12,24 @@
 // base at it too. It never reaches x.com and never uses a real X token.
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { mkdirSync, writeFileSync, copyFileSync } from 'node:fs'
+import { tmpdir, homedir } from 'node:os'
+import { join, basename, dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { startScheduledStreamsFixture } from './lib/scheduled-streams-fixture.mjs'
 
+import { createLiveServiceGpui } from './lib/live-service-gpui.mjs'
+
 const X_ACCOUNT = 'scheduled-smoke-x'
+const gpui = smokeAppIsGpui()
+let shot = 0
+const native = createLiveServiceGpui(() => smoke, {
+  afterAction: (action) => capture(`x-live-${++shot}-${action}`)
+})
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const directory =
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-x-live-mock-${Date.now()}`)
@@ -42,56 +49,86 @@ const waitFor = async (fn, label, deadlineMs = timeoutMs) => {
     if (await fn()) return
     await wait(150)
   }
-  const diagnostics = await evaluate(
-    'return ({streaming:window.__videorcSmokeScenePresets?.streamingState?.()})'
+  const diagnostics = await (
+    gpui
+      ? native.state()
+      : evaluate('return ({streaming:window.__videorcSmokeScenePresets?.streamingState?.()})')
   ).catch(() => null)
   throw new Error(`Timed out waiting for ${label}; ${JSON.stringify(diagnostics)?.slice(0, 2000)}`)
 }
-const capture = async (name) =>
-  log(
-    `screenshot ${JSON.stringify(await requestSmokeCommand(smoke, 'capture-page', { name }, { timeoutMs }))}`
+const capture = async (name) => {
+  const result = await requestSmokeCommand(smoke, 'capture-page', { name }, { timeoutMs })
+  const mirror = join(
+    homedir(),
+    '.local/share/ghostex/i',
+    basename(dirname(directory)),
+    'x-live-mock'
   )
+  if (result.file) {
+    mkdirSync(mirror, { recursive: true })
+    copyFileSync(result.file, join(mirror, basename(result.file)))
+  }
+  log(`screenshot ${JSON.stringify(result)}`)
+}
 const xCalls = (method, pathPattern) =>
   fixture.calls.filter((call) => call.method === method && pathPattern.test(call.path))
 // A Base UI Select opened from the keyboard, as a person would.
 const pickOption = async (triggerSelector, optionText) => {
-  await evaluate(
-    `const trigger=document.querySelector(${JSON.stringify(triggerSelector)}); trigger.scrollIntoView({block:'center'}); trigger.focus(); trigger.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true})); return true`
-  )
+  await (gpui
+    ? native.openSelect({ id: triggerSelector.slice(1) })
+    : evaluate(
+        `const trigger=document.querySelector(${JSON.stringify(triggerSelector)}); trigger.scrollIntoView({block:'center'}); trigger.focus(); trigger.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true})); return true`
+      ))
   await waitFor(
-    () => evaluate(`return document.querySelectorAll('[role="option"]').length > 0`),
+    () =>
+      gpui
+        ? native.options().then((v) => v.length > 0)
+        : evaluate(`return document.querySelectorAll('[role="option"]').length > 0`),
     `${triggerSelector} options`,
     15000
   )
-  const options = await evaluate(
-    `return [...document.querySelectorAll('[role="option"]')].map(option=>option.textContent.trim())`
-  )
-  await evaluate(
-    `const option=[...document.querySelectorAll('[role="option"]')].find(item=>item.textContent.trim()===${JSON.stringify(optionText)}); option.click(); return true`
-  )
+  const options = await (gpui
+    ? native.options()
+    : evaluate(
+        `return [...document.querySelectorAll('[role="option"]')].map(option=>option.textContent.trim())`
+      ))
+  await (gpui
+    ? native.ui().click({ name: optionText, within: { id: 'select-content' } })
+    : evaluate(
+        `const option=[...document.querySelectorAll('[role="option"]')].find(item=>item.textContent.trim()===${JSON.stringify(optionText)}); option.click(); return true`
+      ))
   await waitFor(
-    () => evaluate(`return document.querySelectorAll('[role="option"]').length === 0`),
+    () =>
+      gpui
+        ? native.options().then((v) => v.length === 0)
+        : evaluate(`return document.querySelectorAll('[role="option"]').length === 0`),
     `${triggerSelector} closed`,
     15000
   )
   return options
 }
 const setInput = (selector, value) =>
-  evaluate(
-    `const input=document.querySelector(${JSON.stringify(selector)}); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(value)}); input.dispatchEvent(new Event('input',{bubbles:true})); return true`
-  )
+  gpui
+    ? native.ui().type({ id: selector.slice(1) }, value)
+    : evaluate(
+        `const input=document.querySelector(${JSON.stringify(selector)}); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(value)}); input.dispatchEvent(new Event('input',{bubbles:true})); return true`
+      )
 const clickButton = (text) =>
-  evaluate(
-    `const button=[...document.querySelectorAll('button')].find(item=>item.textContent.trim()===${JSON.stringify(text)} && !item.disabled); if(!button) return false; button.click(); return true`
-  )
+  gpui
+    ? native.clickEnabled({ name: text, role: 'button' })
+    : evaluate(
+        `const button=[...document.querySelectorAll('button')].find(item=>item.textContent.trim()===${JSON.stringify(text)} && !item.disabled); if(!button) return false; button.click(); return true`
+      )
 // Destinations › Setup holds Stream details and Live on X.
 const openSetup = async () => {
   await requestSmokeCommand(smoke, 'open-tab', { tab: 'streaming' }, { timeoutMs })
   await waitFor(
     () =>
-      evaluate(
-        `const tab=[...document.querySelectorAll('[role="tab"]')].find(item=>item.textContent.trim()==='Setup'); if(tab && tab.getAttribute('aria-selected')!=='true') tab.click(); return Boolean(tab && tab.getAttribute('aria-selected')==='true')`
-      ),
+      gpui
+        ? native.openSetup()
+        : evaluate(
+            `const tab=[...document.querySelectorAll('[role="tab"]')].find(item=>item.textContent.trim()==='Setup'); if(tab && tab.getAttribute('aria-selected')!=='true') tab.click(); return Boolean(tab && tab.getAttribute('aria-selected')==='true')`
+          ),
     'Destinations › Setup'
   )
 }
@@ -152,22 +189,46 @@ const xTarget = (fields = {}) => {
   }
 }
 const configureX = (target) =>
-  evaluate(
-    `window.__videorcSmokeScenePresets.configure(${JSON.stringify({ video, recordEnabled: false, streamEnabled: true, streaming: { enabled: true, mode: 'single', targets: [target], enabledTargetIds: ['x'], defaultOutputPreset: 'custom', defaultBitrateKbps: 2000 } })}); return true`
-  )
+  gpui
+    ? native.configure({
+        video,
+        recordEnabled: false,
+        streamEnabled: true,
+        streaming: {
+          enabled: true,
+          mode: 'single',
+          targets: [target],
+          enabledTargetIds: ['x'],
+          defaultOutputPreset: 'custom',
+          defaultBitrateKbps: 2000
+        }
+      })
+    : evaluate(
+        `window.__videorcSmokeScenePresets.configure(${JSON.stringify({ video, recordEnabled: false, streamEnabled: true, streaming: { enabled: true, mode: 'single', targets: [target], enabledTargetIds: ['x'], defaultOutputPreset: 'custom', defaultBitrateKbps: 2000 } })}); return true`
+      )
 const goLive = async (label) => {
   await waitFor(
-    () => evaluate('return window.__videorcSmokeScenePresets.streamingState().canStart'),
+    () =>
+      gpui
+        ? native.ready()
+        : evaluate('return window.__videorcSmokeScenePresets.streamingState().canStart'),
     `${label}: Studio ready to start`
   )
-  await evaluate('await window.__videorcSmokeScenePresets.start(); return true')
+  await (gpui
+    ? native.goLive('open')
+    : evaluate('await window.__videorcSmokeScenePresets.start(); return true'))
   await waitFor(
-    () => evaluate('return window.__videorcSmokeScenePresets.streamingState().confirmationOpen'),
+    () =>
+      gpui
+        ? native.confirmationOpen()
+        : evaluate('return window.__videorcSmokeScenePresets.streamingState().confirmationOpen'),
     `${label}: Go Live confirmation`
   )
 }
 const stopAndDrain = async (label) => {
-  await evaluate('await window.__videorcSmokeScenePresets.stop(); return true')
+  await (gpui
+    ? native.stop()
+    : evaluate('await window.__videorcSmokeScenePresets.stop(); return true'))
   await waitFor(async () => {
     const status = await request(ws, timeoutMs, 'recording.status')
     return status.state === 'idle' || status.replayOnly === true
@@ -210,32 +271,49 @@ try {
   })
   smoke = app.connections['preview-motion-ready']
   ws = await connectBackend(app.connections['backend-ready'], timeoutMs)
+  if (gpui) {
+    await native.send('main-window-set-bounds', { width: 1650, height: 962 })
+    await capture('x-live-initial')
+  }
   await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 500 }, { timeoutMs })
-  await evaluate(
-    `window.__videorcSmokeScenePresets.layout({layoutPreset:'screen-only'}); return true`
-  )
+  await (gpui
+    ? native.layout({ layoutPreset: 'screen-only' })
+    : evaluate(
+        `window.__videorcSmokeScenePresets.layout({layoutPreset:'screen-only'}); return true`
+      ))
   await configureX(xTarget())
   await openSetup()
+  await capture('x-live-setup')
 
   // 1. Stream details: X's categories, in X's order, and a saved pick.
   log('Stream details category')
   await waitFor(
     () =>
-      evaluate(
-        `return Boolean(document.querySelector('#x-category')) || [...document.querySelectorAll('[data-slot="accordion-trigger"]')].some(item=>/^X\\b/.test(item.textContent.trim()))`
-      ),
+      gpui
+        ? native.exists({ id: 'x-category' })
+        : evaluate(
+            `return Boolean(document.querySelector('#x-category')) || [...document.querySelectorAll('[data-slot="accordion-trigger"]')].some(item=>/^X\\b/.test(item.textContent.trim()))`
+          ),
     'X row in Stream details'
   )
-  if (!(await evaluate(`return Boolean(document.querySelector('#x-category'))`))) {
-    await evaluate(
-      `const trigger=[...document.querySelectorAll('[data-slot="accordion-trigger"]')].find(item=>/^X\\b/.test(item.textContent.trim())); trigger.scrollIntoView({block:'center'}); trigger.click(); return true`
-    )
+  if (
+    !(await (gpui
+      ? native.exists({ id: 'x-category' })
+      : evaluate(`return Boolean(document.querySelector('#x-category'))`)))
+  ) {
+    await (gpui
+      ? native.ui().click({ name: 'X' })
+      : evaluate(
+          `const trigger=[...document.querySelectorAll('[data-slot="accordion-trigger"]')].find(item=>/^X\\b/.test(item.textContent.trim())); trigger.scrollIntoView({block:'center'}); trigger.click(); return true`
+        ))
   }
   await waitFor(
     () =>
-      evaluate(
-        `const trigger=document.querySelector('#x-category'); return Boolean(trigger && !trigger.disabled && trigger.getAttribute('data-disabled')===null)`
-      ),
+      gpui
+        ? native.enabled({ id: 'x-category' })
+        : evaluate(
+            `const trigger=document.querySelector('#x-category'); return Boolean(trigger && !trigger.disabled && trigger.getAttribute('data-disabled')===null)`
+          ),
     'X category picker enabled (categories read)'
   )
   assert.ok(
@@ -252,9 +330,11 @@ try {
   await setInput('#stream-title', 'X live mock show')
   await capture('x-live-mock-stream-details-category')
   assert.ok(
-    await evaluate(
-      `const button=[...document.querySelectorAll('button')].find(item=>item.textContent.trim()==='Save' && !item.disabled && (item.closest('section')?.textContent??'').includes('Stream details')); if(!button) return false; button.click(); return true`
-    ),
+    await (gpui
+      ? native.clickEnabled({ id: 'stream-details-save' })
+      : evaluate(
+          `const button=[...document.querySelectorAll('button')].find(item=>item.textContent.trim()==='Save' && !item.disabled && (item.closest('section')?.textContent??'').includes('Stream details')); if(!button) return false; button.click(); return true`
+        )),
     'Stream details Save'
   )
   await waitFor(async () => {
@@ -274,10 +354,12 @@ try {
   assert.equal(listener.exitCode, null, 'RTMP receiver listening')
   await goLive('instant')
   log(
-    `confirmation names the category: ${await evaluate(`return [...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')].some(dialog=>dialog.textContent.includes('Just Chatting'))`)}`
+    `confirmation names the category: ${await (gpui ? native.textIncludes('Just Chatting') : evaluate(`return [...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')].some(dialog=>dialog.textContent.includes('Just Chatting'))`))}`
   )
   await capture('x-live-mock-go-live-confirmation')
-  await evaluate('await window.__videorcSmokeScenePresets.confirmGoLive(); return true')
+  await (gpui
+    ? native.goLive('confirm')
+    : evaluate('await window.__videorcSmokeScenePresets.confirmGoLive(); return true'))
   await waitFor(async () => fixture.xBroadcasts.size === 1, 'instant X broadcast created')
   const [created] = xCalls('POST', /^\/2\/broadcasts$/)
   assert.equal(created.body.live_category_id, 'just-chatting', 'Go Live sent the category')
@@ -294,13 +376,19 @@ try {
   log('live edit')
   await openSetup()
   await waitFor(
-    () => evaluate(`return Boolean(document.querySelector('#x-live-title'))`),
+    () =>
+      gpui
+        ? native.exists({ id: 'x-live-title' })
+        : evaluate(`return Boolean(document.querySelector('#x-live-title'))`),
     'Live on X section'
   )
   await capture('x-live-mock-live-edit-before')
   await setInput('#x-live-title', '')
   await waitFor(
-    () => evaluate(`return document.body.textContent.includes('X needs a title.')`),
+    () =>
+      gpui
+        ? native.textIncludes('X needs a title.')
+        : evaluate(`return document.body.textContent.includes('X needs a title.')`),
     'empty title refused'
   )
   assert.equal(await clickButton('Update X'), false, 'Update X is disabled on an empty title')
@@ -319,9 +407,14 @@ try {
   assert.equal(fixture.xBroadcasts.get(broadcastId).live_category_id, 'gaming')
   await waitFor(
     () =>
-      evaluate(
-        `const status=[...document.querySelectorAll('[role="status"]')].map(item=>item.textContent).join(' '); return status.includes('Renamed while live on X') && status.includes('Gaming')`
-      ),
+      gpui
+        ? native
+            .ui()
+            .readText({ id: 'x-live-shown' })
+            .then((text) => text.includes('Renamed while live on X') && text.includes('Gaming'))
+        : evaluate(
+            `const status=[...document.querySelectorAll('[role="status"]')].map(item=>item.textContent).join(' '); return status.includes('Renamed while live on X') && status.includes('Gaming')`
+          ),
     "the page shows X's answer"
   )
   await capture('x-live-mock-live-edit-after')
@@ -338,9 +431,11 @@ try {
   await requestSmokeCommand(smoke, 'open-tab', { tab: 'streaming' }, { timeoutMs })
   await waitFor(
     () =>
-      evaluate(
-        `const tab=[...document.querySelectorAll('[role="tab"]')].find(item=>item.textContent==='Upcoming'); if(tab) tab.click(); return Boolean(window.__videorcSmokeScheduledStreams && !window.__videorcSmokeScheduledStreams.state().loading)`
-      ),
+      gpui
+        ? native.openUpcoming()
+        : evaluate(
+            `const tab=[...document.querySelectorAll('[role="tab"]')].find(item=>item.textContent==='Upcoming'); if(tab) tab.click(); return Boolean(window.__videorcSmokeScheduledStreams && !window.__videorcSmokeScheduledStreams.state().loading)`
+          ),
     'Upcoming provider actions'
   )
   const thumbnail = join(directory, 'thumbnail.png')
@@ -363,30 +458,51 @@ try {
     { timeoutMs }
   )
   const eventId = randomUUID()
-  await evaluate(
-    `return window.__videorcSmokeScheduledStreams.mutate('saveDraft', ${JSON.stringify({
-      eventId,
-      expectedRevision: 0,
-      provider: 'x',
-      accountId: X_ACCOUNT,
-      metadata: {
-        title: 'Scheduled X show with a category',
-        description: 'X description',
-        privacy: 'private',
-        madeForKids: false,
-        localStart: '2035-01-01T12:00',
-        timeZone: 'Europe/Madrid',
-        offsetChoice: null,
-        thumbnailAssetId: asset.id,
-        plannedEndLocal: '2035-01-01T13:00',
-        availableForReplay: false
-      }
-    })})`
-  )
+  await (gpui
+    ? native.mutate('saveDraft', {
+        eventId,
+        expectedRevision: 0,
+        provider: 'x',
+        accountId: X_ACCOUNT,
+        metadata: {
+          title: 'Scheduled X show with a category',
+          description: 'X description',
+          privacy: 'private',
+          madeForKids: false,
+          localStart: '2035-01-01T12:00',
+          timeZone: 'Europe/Madrid',
+          offsetChoice: null,
+          thumbnailAssetId: asset.id,
+          plannedEndLocal: '2035-01-01T13:00',
+          availableForReplay: false
+        }
+      })
+    : evaluate(
+        `return window.__videorcSmokeScheduledStreams.mutate('saveDraft', ${JSON.stringify({
+          eventId,
+          expectedRevision: 0,
+          provider: 'x',
+          accountId: X_ACCOUNT,
+          metadata: {
+            title: 'Scheduled X show with a category',
+            description: 'X description',
+            privacy: 'private',
+            madeForKids: false,
+            localStart: '2035-01-01T12:00',
+            timeZone: 'Europe/Madrid',
+            offsetChoice: null,
+            thumbnailAssetId: asset.id,
+            plannedEndLocal: '2035-01-01T13:00',
+            availableForReplay: false
+          }
+        })})`
+      ))
   const saved = await request(ws, timeoutMs, 'scheduledStreams.get', { eventId })
-  await evaluate(
-    `return window.__videorcSmokeScheduledStreams.mutate('schedule', ${JSON.stringify({ eventId, expectedRevision: saved.revision })})`
-  )
+  await (gpui
+    ? native.mutate('schedule', { eventId, expectedRevision: saved.revision })
+    : evaluate(
+        `return window.__videorcSmokeScheduledStreams.mutate('schedule', ${JSON.stringify({ eventId, expectedRevision: saved.revision })})`
+      ))
   const scheduled = await request(ws, timeoutMs, 'scheduledStreams.get', { eventId })
   assert.equal(scheduled.lifecycle, 'scheduled')
   const scheduleId = scheduled.providerEventId
@@ -397,7 +513,9 @@ try {
   startListener(scheduledReceive)
   await wait(1000)
   await goLive('scheduled')
-  await evaluate('await window.__videorcSmokeScenePresets.confirmGoLive(); return true')
+  await (gpui
+    ? native.goLive('confirm')
+    : evaluate('await window.__videorcSmokeScenePresets.confirmGoLive(); return true'))
   await waitFor(
     async () => fixture.xSchedules.get(scheduleId)?.state === 'Running',
     'scheduled X broadcast live'
@@ -433,6 +551,20 @@ try {
   console.log(
     'X live mock smoke PASS: categories in Stream details, the category on Go Live, a live title and category update, and the category on a scheduled show, all against the loopback fake X.'
   )
+} catch (error) {
+  if (gpui && smoke) {
+    await native
+      .ui()
+      .tree()
+      .then((tree) =>
+        writeFileSync(join(directory, 'failure-ui-tree.json'), JSON.stringify(tree, null, 2))
+      )
+      .catch((diagnostic) => log(`UI tree unavailable: ${diagnostic.message}`))
+    await capture('x-live-failure').catch((diagnostic) =>
+      log(`Screenshot unavailable: ${diagnostic.message}`)
+    )
+  }
+  throw error
 } finally {
   ws?.close()
   if (listener && listener.exitCode === null) {

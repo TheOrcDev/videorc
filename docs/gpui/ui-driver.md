@@ -305,3 +305,26 @@ use `capture-page` on macOS for theme screenshots; the renderer mic `eval-js` ch
 `ui-click {x,y}` and `ui-drag` (`scripts/lib/freeform-editor-gpui.mjs`). Stage bounds come from `ui-find` on
 `scene-stage` (gutter 28 px). The gate is backend-authoritative (scene revision + accepted transform); DOM frame /
 pointer-capture evidence stays Electron. `select-camera-shape` covers the mask case shared with preview-scene-commit.
+
+## Loopback live-service smokes
+
+`smoke:youtube-quota`, `smoke:x-live-mock`, and `smoke:scheduled-streams`
+use typed GPUI commands; their Electron branches retain renderer hooks.
+`notifications-state` reads bell entries (including occurrence counts) and
+currently mounted toast titles without opening or marking the bell read.
+`scheduled-state` reads Upcoming's loaded/pending/error state;
+`scheduled-mutate {action, params}` follows the same Studio operation path
+as Upcoming, including revision checks and operation completion.
+`studio-go-live {action}` accepts `state`, `open`, `confirm`, or `cancel`;
+start/stop and provider checks still run through the app's Studio.
+The Go Live snapshot exposes only streaming enabled flags and selected event IDs,
+not ingest URLs, stream keys, or arbitrary capture settings.
+These commands use the existing authenticated smoke-server policy; no JS
+shim, platform credentials, or new backend network routes are added.
+
+The GPUI scheduling branch retains native form, keyboard, dirty-dismiss,
+focus-return, and provider-field assertions. Missing native controls fail
+by name. Browser CSS page zoom and the Electron renderer's `Date.now`
+monkeypatch are explicitly Electron-only subchecks, not GPUI evidence.
+The fake-provider lifecycle, exact event identity, restart, recovery,
+quota accounting and decoded recording assertions remain common.

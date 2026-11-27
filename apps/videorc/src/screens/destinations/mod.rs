@@ -22,6 +22,7 @@ mod youtube_consent;
 
 use std::sync::Arc;
 
+use crate::screens::dialogs::after_open_change;
 use gpui::{Context, Entity, SharedString, Window, div, prelude::*, px, relative};
 use serde_json::json;
 use videorc_app_core::livestream::DetailsState;
@@ -300,7 +301,7 @@ impl DestinationsPanel {
                 platforms: &platforms,
                 runtimes: &runtimes,
                 entitlements: None,
-                session_active: snapshot.session.phase.is_active(),
+                session_active: setup::session_locks_setup(&snapshot.session),
                 go_live_pending: go_live.open || go_live.pending,
                 development: cfg!(debug_assertions),
             },
@@ -526,7 +527,9 @@ impl DestinationsPanel {
                 let entity = entity.clone();
                 move |open, _, window, cx| {
                     if !open {
-                        entity.update(cx, |this, cx| this.close_clear_key(window, cx));
+                        after_open_change(&entity.downgrade(), window, cx, |this, window, cx| {
+                            this.close_clear_key(window, cx)
+                        });
                     }
                 }
             })

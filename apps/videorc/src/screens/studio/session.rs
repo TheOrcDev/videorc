@@ -358,13 +358,13 @@ impl SessionSection {
     fn start_failure(&self, failure: &StartFailureAlert, cx: &mut Context<Self>) -> Alert {
         let retry = Button::new("session-start-retry")
             .label(RETRY)
-            .variant(ButtonVariant::Ghost)
+            .variant(ButtonVariant::Outline)
             .size(ButtonSize::Xs)
             .disabled(!failure.retry_enabled)
             .on_click(cx.listener(|this, _, _, _| this.retry_start()));
         let dismiss = Button::new("session-start-dismiss")
             .label(DISMISS)
-            .variant(ButtonVariant::Ghost)
+            .variant(ButtonVariant::Outline)
             .size(ButtonSize::Xs)
             .on_click(cx.listener(|this, _, _, _| this.studio.dismiss_start_failure()));
         Alert::new("session-start-failure")
@@ -392,7 +392,7 @@ impl SessionSection {
             row = row.child(
                 Button::new("session-runtime-open-library")
                     .label(OPEN_LIBRARY)
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Library)))),
             );
@@ -403,7 +403,7 @@ impl SessionSection {
             row = row.child(
                 Button::new("session-runtime-reveal")
                     .label(reveal_in_file_manager_label())
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .on_click(cx.listener(move |_, _, _, cx| {
                         cx.reveal_path(std::path::Path::new(&path));
@@ -413,7 +413,7 @@ impl SessionSection {
         row = row.child(
             Button::new("session-runtime-dismiss")
                 .label(DISMISS)
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .size(ButtonSize::Xs)
                 .on_click(cx.listener(|this, _, _, _| this.studio.dismiss_notice())),
         );

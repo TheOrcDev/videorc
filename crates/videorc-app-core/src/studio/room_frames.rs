@@ -51,10 +51,10 @@ pub enum FramePoll {
 /// The polling pace: the renderer's 30 fps.
 pub const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 /// One poll's deadline and the biggest picture read (a 4K BGRA BMP).
-const POLL_DEADLINE: Duration = Duration::from_secs(2);
-const MAX_FRAME_BYTES: usize = 3840 * 2160 * 4 + 1024;
+pub(super) const POLL_DEADLINE: Duration = Duration::from_secs(2);
+pub(super) const MAX_FRAME_BYTES: usize = 3840 * 2160 * 4 + 1024;
 
-fn encode(value: &str) -> String {
+pub(super) fn encode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 

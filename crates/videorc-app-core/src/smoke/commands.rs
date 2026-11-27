@@ -54,6 +54,7 @@ pub const IMPLEMENTED_COMMANDS: &[&str] = &[
     "backend-debug-rpc",
     "html-overlay-stats",
     "import-smoke-background",
+    "import-smoke-scheduled-thumbnail",
     "import-takeover-image",
     "inspect-backend-state-isolation",
     "preview-lifecycle-allow-app-quit",
@@ -75,6 +76,7 @@ pub const STUDIO_COMMANDS: &[&str] = &[
     "select-layout-preset",
     "select-screen-device",
     "studio-capture-configure",
+    "studio-go-live",
     "studio-live-audio-hold",
     "studio-performance-check",
     "studio-privacy-add-app",
@@ -153,7 +155,6 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "global-shortcuts-fire",
     "global-shortcuts-recorder",
     "global-shortcuts-state",
-    "import-smoke-scheduled-thumbnail",
     "inspect-native-preview-bootstrap",
     "inspect-native-preview-live-background",
     "inspect-native-preview-runtime",
@@ -175,6 +176,7 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "notes-window-save-document",
     "notes-window-set-bounds",
     "notes-window-state",
+    "notifications-state",
     "open-layout-tab",
     "open-tab",
     "permissions-recheck",
@@ -385,6 +387,7 @@ impl AppSmokeCommands {
                 Ok(json!({ "stats": null }))
             }
             "import-smoke-background" => self.import_background(&params).await,
+            "import-smoke-scheduled-thumbnail" => self.import_scheduled_thumbnail(&params).await,
             "import-takeover-image" => self.import_takeover(&params).await,
             "inspect-backend-state-isolation" => self.inspect_isolation(&params).await,
             other => Err(not_supported_message(other)),
@@ -456,6 +459,34 @@ impl AppSmokeCommands {
             )
             .await?;
         background_import_answer(&grant.path, &imported)
+    }
+
+    /// `import-smoke-scheduled-thumbnail {path}`: a livestream thumbnail inside
+    /// the smoke's state directory, imported as Schedule's Choose thumbnail…
+    /// imports one (the backend's `scheduledThumbnail.import` checks, fits,
+    /// stores and registers it). Answered with the backend's own answer, as
+    /// Electron's main answers it.
+    async fn import_scheduled_thumbnail(
+        &self,
+        params: &Map<String, Value>,
+    ) -> Result<Value, String> {
+        const UNAVAILABLE: &str = "Thumbnail smoke import unavailable.";
+        if self.config.packaged || params.len() != 1 {
+            return Err(UNAVAILABLE.into());
+        }
+        let path = params.get("path").cloned().ok_or(UNAVAILABLE)?;
+        let mut check = Map::new();
+        check.insert("path".into(), path);
+        check.insert("kind".into(), json!("input-file"));
+        let grant =
+            validate_smoke_resource_authorization(&check, self.config.state_directory.as_deref())?;
+        self.admin
+            .request(
+                "scheduledThumbnail.import",
+                json!({ "path": grant.path.to_string_lossy() }),
+                IMAGE_IMPORT_TIMEOUT,
+            )
+            .await
     }
 
     /// `import-takeover-image {path}`: a takeover image inside the smoke's
