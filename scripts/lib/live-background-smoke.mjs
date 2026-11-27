@@ -107,3 +107,38 @@ export function smokeMicrophoneEnv(platform) {
     ? { VIDEORC_CAPTION_CONTRACT_TEST: '1', VIDEORC_LIVE_SOURCE_SWITCH_TEST: '1' }
     : {}
 }
+
+/**
+ * Squares around the stage margin (Visibility 20: 10 % a side), each square
+ * on a 16:9 frame. The first is the smoke's long-standing ring square. A
+ * sparse background (Ghost Fibers' dots on black, 2026-11-26) can leave any
+ * one of them black for a whole take, so a still-looking ring is judged on
+ * the busiest square before it fails.
+ */
+export const RING_SQUARES = Object.freeze([
+  { name: 'left', rect: { x: 0.015, y: 0.4, w: 0.06, h: 0.1067 } },
+  { name: 'right', rect: { x: 0.925, y: 0.4, w: 0.06, h: 0.1067 } },
+  { name: 'top', rect: { x: 0.4775, y: 0.01, w: 0.045, h: 0.08 } },
+  { name: 'bottom', rect: { x: 0.4775, y: 0.91, w: 0.045, h: 0.08 } },
+  { name: 'top-left', rect: { x: 0.01, y: 0.01, w: 0.045, h: 0.08 } },
+  { name: 'top-right', rect: { x: 0.945, y: 0.01, w: 0.045, h: 0.08 } },
+  { name: 'bottom-left', rect: { x: 0.01, y: 0.91, w: 0.045, h: 0.08 } },
+  { name: 'bottom-right', rect: { x: 0.945, y: 0.91, w: 0.045, h: 0.08 } }
+])
+
+/**
+ * A square's mean frame-to-frame change (64 × 64, five a second) above which
+ * a sparse ring moves. A still margin measures 0.00–0.01; Ghost Fibers' dots
+ * in their busiest square 0.53–0.76 on the takes that failed the old check.
+ */
+export const SPARSE_RING_MOTION = 0.3
+
+/** The busiest of `[{name, rect, motion}]`: the first of the highest. */
+export function busiestRingSquare(measured) {
+  let busiest = null
+  for (const square of measured) {
+    if (!Number.isFinite(square.motion)) continue
+    if (!busiest || square.motion > busiest.motion) busiest = square
+  }
+  return busiest
+}

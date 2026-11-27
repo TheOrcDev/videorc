@@ -39,7 +39,10 @@ import { join, resolve } from 'node:path'
 import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import {
+  RING_SQUARES,
+  SPARSE_RING_MOTION,
   afterTakeLiveBackgroundState,
+  busiestRingSquare,
   chromiumGpuDisabled,
   compositorDrawsNoLiveBackground,
   idlePreviewLiveBackgroundReporter,
@@ -145,7 +148,7 @@ const STAGE = { x: 0.4, y: 0.4, w: 0.2, h: 0.2 }
  * compare the recording with the stream at one scale. Line Waves' thin lines
  * average away in the 16 × 16 ring thumbnail; here they still show.
  */
-const RING_SQUARE = { x: 0.015, y: 0.4, w: 0.06, h: 0.1067 }
+const RING_SQUARE = RING_SQUARES[0].rect
 const RTMP_BASE_PORT = Number(process.env.VIDEORC_LIVE_BACKGROUND_RTMP_PORT ?? 19841)
 const RTMP_BIND_MS = 1500
 
@@ -678,10 +681,21 @@ try {
       { width: testCase.stream.width, height: testCase.stream.height },
       `${label}: the received stream is ${JSON.stringify(size)}`
     )
-    const recordingMotion = squareMotion(recordingPath)
-    const streamMotion = squareMotion(streamPath)
+    // Both legs on the same square: the ring square, or, when that one is
+    // dark on the recording (Ghost Fibers' dots, 2026-11-26), the
+    // recording's busiest margin square.
+    let square = { name: RING_SQUARES[0].name, rect: RING_SQUARE }
+    let recordingMotion = squareMotion(recordingPath, square.rect)
+    if (!forced && recordingMotion <= 1) {
+      const busiest = busiestRingSquare(measureRingSquares(recordingPath))
+      if (busiest && busiest.motion > recordingMotion) {
+        square = busiest
+        recordingMotion = busiest.motion
+      }
+    }
+    const streamMotion = squareMotion(streamPath, square.rect)
     console.log(
-      `${label}: ring square motion recording ${recordingMotion.toFixed(2)}, stream ${streamMotion.toFixed(2)} per 0.2 s`
+      `${label}: ${square.name} ring square motion recording ${recordingMotion.toFixed(2)}, stream ${streamMotion.toFixed(2)} per 0.2 s`
     )
     if (forced) {
       assert(
@@ -713,17 +727,21 @@ try {
       // Plan 194: Beams drifts slowly over a dark ring at Calm (about 0.2 per
       // 0.5 s), but across the take the ring still changes (about 3 in 5 s).
       const drift = motion > 1 || fine > 1 ? null : ringDrift(path)
+      // Ghost Fibers' dots on black can leave the ring strip and its square
+      // dark for a whole take (2026-11-26): judge the busiest margin square.
+      const sparse =
+        motion > 1 || fine > 1 || drift > 1.5 ? null : busiestRingSquare(measureRingSquares(path))
       console.log(
-        `${label}: ring square ${fine?.toFixed(2)}, drift across the take ${drift?.toFixed(2)}`
+        `${label}: ring square ${fine?.toFixed(2)}, drift across the take ${drift?.toFixed(2)}${sparse ? `, busiest square ${sparse.name} ${sparse.motion.toFixed(2)}` : ''}`
       )
       assert(
-        motion > 1 || fine > 1 || drift > 1.5,
-        `${path}: the live background ring does not move (motion ${motion}, square ${fine}, drift ${drift})`
+        motion > 1 || fine > 1 || drift > 1.5 || sparse?.motion > SPARSE_RING_MOTION,
+        `${path}: the live background ring does not move (motion ${motion}, square ${fine}, drift ${drift}, busiest square ${sparse?.name} ${sparse?.motion})`
       )
       // A slow background (Beams, Color Bends: every frame changes, by 0.03
       // to 0.2) stays under freezedetect's noise floor for half a second; a
-      // stall still shows over two.
-      const freezes = freezeStarts(path, RING, motion < 2 ? 2 : 0.5)
+      // stall still shows over two. A sparse one is watched where it moves.
+      const freezes = freezeStarts(path, sparse?.rect ?? RING, motion < 2 ? 2 : 0.5)
       assert.equal(freezes.length, 0, `${path}: the ring froze at ${freezes.join(', ')} s`)
     }
     // The stage shows the synthetic screen, never the background.
@@ -927,11 +945,16 @@ function probeVideoSize(path) {
   return match ? { width: Number(match[1]), height: Number(match[2]) } : null
 }
 
-/** Plan 193: mean frame-to-frame change of the ring square, 64 × 64 at 5 per second. */
-function squareMotion(path) {
-  const frames = grayTimeline(path, RING_SQUARE, { size: 64, fps: 5 })
+/** Plan 193: mean frame-to-frame change of a ring square, 64 × 64 at 5 per second. */
+function squareMotion(path, rect = RING_SQUARE) {
+  const frames = grayTimeline(path, rect, { size: 64, fps: 5 })
   const steps = frames.slice(1).map((frame, index) => meanAbsDiff(frame, frames[index]))
   return steps.reduce((sum, value) => sum + value, 0) / steps.length
+}
+
+/** Every margin square's motion, for `busiestRingSquare`. */
+function measureRingSquares(path) {
+  return RING_SQUARES.map((square) => ({ ...square, motion: squareMotion(path, square.rect) }))
 }
 
 /** Plan 194: how far the ring moves from the take's first sample to its last (64 × 64). */

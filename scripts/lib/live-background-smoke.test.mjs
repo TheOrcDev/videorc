@@ -3,7 +3,10 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  RING_SQUARES,
+  SPARSE_RING_MOTION,
   afterTakeLiveBackgroundState,
+  busiestRingSquare,
   chromiumGpuDisabled,
   compositorDrawsNoLiveBackground,
   idlePreviewLiveBackgroundReporter,
@@ -159,4 +162,29 @@ test('the synthetic microphone brings the flags that open it and give it a tone'
   assert.deepEqual(smokeMicrophoneEnv('darwin'), flags)
   assert.deepEqual(smokeMicrophoneEnv('win32'), flags)
   assert.deepEqual(smokeMicrophoneEnv('linux'), {})
+})
+
+test('the ring squares sit inside the stage margin, square on a 16:9 frame', () => {
+  for (const { name, rect } of RING_SQUARES) {
+    const inSideMargin = rect.x + rect.w <= 0.1 || rect.x >= 0.9
+    const inTopOrBottomMargin = rect.y + rect.h <= 0.1 || rect.y >= 0.9
+    assert(inSideMargin || inTopOrBottomMargin, `${name} is in the stage`)
+    assert(rect.x >= 0 && rect.y >= 0 && rect.x + rect.w <= 1 && rect.y + rect.h <= 1, name)
+    assert(Math.abs(rect.w * 16 - rect.h * 9) < 0.01, `${name} is not square`)
+  }
+  assert.equal(RING_SQUARES[0].name, 'left', "the smoke's long-standing square comes first")
+})
+
+// 2026-11-26: Ghost Fibers' dots left the left square black (0.00) while the
+// bottom-left one moved (0.70); a still margin measures 0.00-0.01.
+test('the busiest ring square judges a sparse background; a still ring still fails', () => {
+  const measured = (motions) =>
+    RING_SQUARES.map((square, index) => ({ ...square, motion: motions[index] ?? 0 }))
+  const dots = busiestRingSquare(measured([0, 0.01, 0, 0.53, 0, 0.1, 0.7, 0]))
+  assert.equal(dots.name, 'bottom-left')
+  assert(dots.motion > SPARSE_RING_MOTION)
+  const still = busiestRingSquare(measured([0, 0.01, 0, 0, 0.01, 0, 0, 0]))
+  assert(still.motion < SPARSE_RING_MOTION)
+  assert.equal(busiestRingSquare(measured([0.5, 0.5])).name, 'left', 'the first of a tie')
+  assert.equal(busiestRingSquare([{ name: 'x', motion: Number.NaN }]), null)
 })
