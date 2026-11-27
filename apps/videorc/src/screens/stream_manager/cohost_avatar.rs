@@ -155,7 +155,7 @@ impl SidekickPane {
                             div().flex().flex_wrap().gap(px(6.)).child(show).child(
                                 Button::new("buddy-off-outputs-suggest")
                                     .label(secondary)
-                                    .variant(ButtonVariant::Ghost)
+                                    .variant(ButtonVariant::Outline)
                                     .size(ButtonSize::Xs)
                                     .on_click(cx.listener(|pane, _, window, cx| {
                                         pane.request_talk(CohostTalkMode::Suggest, window, cx)
@@ -302,7 +302,7 @@ impl SidekickPane {
             .child(
                 Button::new("cohost-listen-not-now")
                     .label(pane_words::NOT_NOW)
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .on_click(cx.listener(|pane, _, _, cx| pane.answer_listen_prompt(cx))),
             );
