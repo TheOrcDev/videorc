@@ -157,7 +157,9 @@ async function systemAudioSkip(ctx) {
     : `System audio device is ${device?.status ?? 'missing'}; ${
         process.platform === 'win32'
           ? 'Windows process loopback needs build 20348 or later and an output device.'
-          : 'the dev app needs the Screen Recording grant.'
+          : process.platform === 'linux'
+            ? 'Linux system audio capture is unavailable in this build.'
+            : 'the dev app needs the Screen Recording grant.'
       }`
 }
 
@@ -359,7 +361,20 @@ async function waitForPublishedMp4(ctx, sessionId, terminal) {
 
 /** Record, press once at `pressSeconds`, Stop: the press's file time and the MP4. */
 async function recordWithPress(ctx, { name, systemAudio }) {
-  await sendIntent(ctx, { kind: systemAudio ? 'systemAudioOn' : 'systemAudioOff' })
+  if (!systemAudio && smokeAppIsGpui() && (await systemAudioSkip(ctx))) {
+    // A missing device refuses even the Off intent. Prove the seeded Off
+    // state before recording rather than treating that refusal as success.
+    const snapshot = await request(ctx.renderer, timeoutMs, 'ui.settings.get', {
+      keys: ['videorc.captureConfig']
+    })
+    const raw = snapshot.entries?.['videorc.captureConfig']
+    const config = typeof raw === 'string' ? JSON.parse(raw) : raw
+    if (config?.audio?.systemAudioEnabled !== false) {
+      fail('System audio is unavailable, but the Studio did not save it Off.')
+    }
+  } else {
+    await sendIntent(ctx, { kind: systemAudio ? 'systemAudioOn' : 'systemAudioOff' })
+  }
   // Only the session this Record starts: the Clips ring re-armed after the
   // last Stop and its buffer-only `recording` status is already buffered.
   const recordingPromise = ctx.recorder.waitFor(
@@ -438,10 +453,17 @@ const cases = {
         record.payload?.voices?.some((voice) => voice.soundId === ctx.sound.id)
     )
     await sleep(SOUNDBOARD_GATES.toneSeconds * 1000 + 300)
-    return {
-      ...evaluateIdlePress({ playback: playback.payload, soundId: ctx.sound.id }),
-      evidence: {}
+    const verdict = evaluateIdlePress({ playback: playback.payload, soundId: ctx.sound.id })
+    if (process.platform === 'linux' && smokeAppIsGpui()) {
+      const voice = playback.payload.voices.find((entry) => entry.soundId === ctx.sound.id)
+      const monitor = await monitorVerdict(voice.voiceId, 'Linux idle monitor')
+      return {
+        pass: verdict.pass && monitor.pass,
+        failures: [...verdict.failures, ...monitor.failures],
+        evidence: { monitor: monitor.report ?? null }
+      }
     }
+    return { ...verdict, evidence: {} }
   },
   async 'on-air'(ctx) {
     const result = await judgeRecording(ctx, 'on-air', false)
@@ -463,7 +485,7 @@ const cases = {
       return {
         pass: true,
         skipped:
-          "the backend's monitor is macOS only (plan 260 S1.3b); Windows keeps the renderer's until S1.3d.",
+          'the monitor-only loopback check uses macOS afplay; idle monitor playback is checked separately on Linux GPUI.',
         failures: [],
         evidence: {}
       }
@@ -548,9 +570,13 @@ const cases = {
 let stopApp = async () => {}
 const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-soundboard-user-data-'))
 try {
-  if (process.platform !== 'darwin' && process.platform !== 'win32') {
+  if (
+    process.platform !== 'darwin' &&
+    process.platform !== 'win32' &&
+    !(process.platform === 'linux' && smokeAppIsGpui())
+  ) {
     log(
-      `SKIPPED: the soundboard app smoke runs on macOS and Windows, not ${process.platform}; the fixture smoke runs everywhere.`
+      `SKIPPED: the soundboard app smoke runs on macOS, Windows and Linux GPUI, not ${process.platform}; the fixture smoke runs everywhere.`
     )
   } else {
     const missingWorker = missingWindowsCaptureWorker({ repoRoot })
