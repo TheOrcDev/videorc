@@ -66,8 +66,8 @@ The page keys come from `assignPageKeys` (shared/sidebar-pages.ts:129). Fixed ke
 | P008 | Row "Output" (⌘5) (id `recording`) | Opens Output page | `shared/sidebar-pages.ts:59` | [x] | [ ] | [ ] |
 | P009 | Row "Destinations" (⌘6) (id `live`) | Opens Destinations page | `shared/sidebar-pages.ts:60` | [x] | [ ] | [ ] |
 | P010 | Row "Guests" (⌘7) | Opens Guests; shown only when cloud talk shows are available | `renderer/components/sidebar.tsx:254` | [x] | [ ] | [ ] |
-| P011 | Row "Avatar" (⌘8) | Opens Avatar page | `shared/sidebar-pages.ts:62` | [x] | [ ] | [ ] |
-| P012 | Row "Sidekick" (⌘9) (id `ai`) | Opens Sidekick page | `shared/sidebar-pages.ts:63` | [x] | [ ] | [ ] |
+| P011 | Row "Avatar" (⌘7, or ⌘8 with Guests) | Opens Avatar page | `shared/sidebar-pages.ts:62` | [x] | [ ] | [ ] |
+| P012 | Row "Sidekick" (⌘8, or ⌘9 with Guests) (id `ai`) | Opens Sidekick page | `shared/sidebar-pages.ts:63` | [x] | [ ] | [ ] |
 | P013 | Row "Images" (⇧⌘G) (id `assets`) | Opens Images page | `shared/sidebar-pages.ts:111` | [x] | [ ] | [ ] |
 | P014 | Row "Sounds" (⇧⌘S) | Opens Sounds page | `shared/sidebar-pages.ts:112` | [x] | [ ] | [ ] |
 | P015 | Row "Library" (⌘0) | Opens Library; sits in the bottom block | `shared/sidebar-pages.ts:113` | [x] | [ ] | [ ] |
@@ -1535,13 +1535,13 @@ until the runtime, visual and accessibility checks above can run.
 | P1048 | Close flush | Last save before window closes | `renderer/components/notes-window.tsx:171` | [ ] | [ ] | [ ] |
 
 
-## Avatar ⌘8, Sidekick ⌘9, Images, Sounds, Library ⌘0 and Settings ⌘,
+## Avatar ⌘7/⌘8, Sidekick ⌘8/⌘9, Images, Sounds, Library ⌘0 and Settings ⌘,
 
-### Avatar page (⌘8): page shell and status row (tabs/avatar-tab.tsx)
+### Avatar page (⌘7, or ⌘8 with Guests): page shell and status row (tabs/avatar-tab.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1049 | Page key ⌘8 ("Avatar") | Opens the Avatar page. Key assigned by the sidebar digit order | `shared/sidebar-pages.ts:144` | [x] | [ ] | [ ] |
+| P1049 | Page key ⌘7/⌘8 ("Avatar") | Opens the Avatar page. Key assigned by the sidebar digit order | `shared/sidebar-pages.ts:144` | [x] | [ ] | [ ] |
 | P1050 | Tab strip "Profile" / "Greetings" | Switches the Avatar sections. The shell remembers the last tab | `renderer/components/tabs/avatar-tab.tsx:60 (labels renderer/lib/avatar-tabs.ts:23)` | [x] | [ ] | [ ] |
 | P1051 | Avatar emblem + name + placement line | Shows the avatar's picture, its name and where it appears | `renderer/components/tabs/avatar-tab.tsx:105` | [x] | [ ] | [ ] |
 | P1052 | "Place on Scene" button + shortcut chip | Opens the Scene page | `renderer/components/tabs/avatar-tab.tsx:125` | [x] | [ ] | [ ] |
@@ -1690,11 +1690,11 @@ until the runtime, visual and accessibility checks above can run.
 | P1160 | "Remove greeting" (X) | Deletes the line | `renderer/components/buddy-greetings-section.tsx:669` | [x] | [ ] | [ ] |
 | P1161 | Warning notes | Show length and platform-limit warnings | `renderer/components/buddy-greetings-section.tsx:684` | [x] | [ ] | [ ] |
 
-### Sidekick page (⌘9): shell and Overview (tabs/buddy-tab.tsx)
+### Sidekick page (⌘8, or ⌘9 with Guests): shell and Overview (tabs/buddy-tab.tsx)
 
 | # | Control | What it does | Source | macOS | Windows | Linux |
 | --- | --- | --- | --- | :-: | :-: | :-: |
-| P1162 | Page key ⌘9 ("Sidekick") | Opens the Sidekick page (key by digit order) | `shared/sidebar-pages.ts:144` | [x] | [ ] | [ ] |
+| P1162 | Page key ⌘8/⌘9 ("Sidekick") | Opens the Sidekick page (key by digit order) | `shared/sidebar-pages.ts:144` | [x] | [ ] | [ ] |
 | P1163 | Tab strip "Overview", "Chat", "Community", "Voice", "Reports", "Clean cut" | Switches the Sidekick sections | `renderer/components/tabs/buddy-tab.tsx:131 (renderer/lib/buddy-tabs.ts:28)` | [x] | [ ] | [ ] |
 | P1164 | Status row: Sidekick mark + status line (dot, label, reason, detail) | Shows Sidekick Live's state | `renderer/components/tabs/buddy-tab.tsx:284` | [x] | [ ] | [ ] |
 | P1165 | "Sidekick Live" switch (with disabled reason) | Turns Sidekick on or off. Asks for consent if needed | `renderer/components/cohost-status.tsx:123` | [x] | [ ] | [ ] |
@@ -2151,7 +2151,7 @@ until the runtime, visual and accessibility checks above can run.
 | P1498 | Edit: Speech → Start / Stop Speaking | Standard roles *(macOS only)* | `main/app-menu.ts:123` | [ ] | n/a | n/a |
 | P1499 | View: "Studio" ⌘1 | Shows main window on the page *(macOS only)* | `main/app-menu.ts:71; shared/app-menu-items.ts:20` | [ ] | n/a | n/a |
 | P1500 | View: "Sources" ⌘2, "Scene" ⌘3, "Captions" ⌘4, "Output" ⌘5 | Setup pages *(macOS only)* | `shared/app-menu-items.ts:20` | [ ] | n/a | n/a |
-| P1501 | View: "Destinations" ⌘6, "Guests" ⌘7, "Avatar" ⌘8, "Sidekick" ⌘9 | Livestream pages (Guests listed whatever the cloud status) *(macOS only)* | `shared/app-menu-items.ts:20` | [ ] | n/a | n/a |
+| P1501 | View: "Destinations" ⌘6, "Guests" ⌘7, "Avatar" ⌘7/⌘8, "Sidekick" ⌘8/⌘9 | Livestream pages (Guests listed only while visible; following page keys close the gap) *(macOS only)* | `shared/app-menu-items.ts:20` | [ ] | n/a | n/a |
 | P1502 | View: "Images" ⇧⌘G, "Sounds" ⇧⌘S | Assets pages *(macOS only)* | `shared/app-menu-items.ts:20` | [ ] | n/a | n/a |
 | P1503 | View: "Library" ⌘0 | Library page *(macOS only)* | `shared/app-menu-items.ts:20` | [ ] | n/a | n/a |
 | P1504 | View: Reload, Force Reload, Toggle Developer Tools | Development builds only *(dev only (all OS))* | `main/app-menu.ts:49` | dev | dev | dev |
@@ -2294,3 +2294,5 @@ lines that still exist, marks removed lines `removed` rather than deleting
 them, and adds new controls after the last ID. The drift check in plan
 260's executor instructions applies: a control added since this list is
 scope to add, not to drop.
+
+Page numbering (owner Q187): Guests hidden means Avatar ⌘7 and Sidekick ⌘8. Guests shown means Guests ⌘7, Avatar ⌘8 and Sidekick ⌘9. Menus, hints and bindings update live with availability. Fixed Images ⇧⌘G, Sounds ⇧⌘S, Library ⌘0 and Settings ⌘, do not move.

@@ -310,6 +310,13 @@ impl CommandPalette {
         })
         .detach();
     }
+    /// The sidebar's visibility changed while Search may be open.
+    pub fn refresh_page_shortcuts(&mut self, cx: &mut Context<Self>) {
+        if self.handle.is_open() {
+            self.refresh(cx);
+        }
+    }
+
     pub fn set_notifications_available(&mut self) {
         self.notifications_available = true;
     }
@@ -498,7 +505,7 @@ impl CommandPalette {
                 )
                 .value(format!("Open {}", page.label()))
                 .keywords(page_keywords(page))
-                .shortcut(shortcut_accelerator(&format!("nav-{}", page.id()))),
+                .shortcut(page.accelerator(guests)),
             );
             // `command-palette.tsx:471-487`: Background settings under Scene.
             if page == PageId::Layouts {

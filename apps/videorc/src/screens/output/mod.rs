@@ -773,7 +773,14 @@ impl OutputPanel {
             shift: modifiers.shift,
             key_up: true,
         };
-        let held = match recorder::shortcut_recorder_step(&input, platform, |_| None) {
+        let held = match recorder::shortcut_recorder_step(
+            &input,
+            platform,
+            |_| None,
+            videorc_app_core::livestream::cloud_status::guests_visible(
+                self.studio.cloud_now().status.as_ref(),
+            ),
+        ) {
             recorder::RecorderStep::Held(held) => {
                 accel::accelerator_modifiers_label(&held, platform)
             }
@@ -800,9 +807,14 @@ impl OutputPanel {
             shift: key.modifiers.shift,
             key_up: false,
         };
-        let step = recorder::shortcut_recorder_step(&input, platform, |value| {
-            accel::global_shortcut_taken_reason(&config, value, &action, platform, &scenes)
-        });
+        let step = recorder::shortcut_recorder_step(
+            &input,
+            platform,
+            |value| accel::global_shortcut_taken_reason(&config, value, &action, platform, &scenes),
+            videorc_app_core::livestream::cloud_status::guests_visible(
+                self.studio.cloud_now().status.as_ref(),
+            ),
+        );
         let value = match step {
             recorder::RecorderStep::Commit(value) => value,
             recorder::RecorderStep::Clear => String::new(),
@@ -1521,6 +1533,9 @@ impl OutputPanel {
         let config = self.shortcut_config();
         let scenes = self.shortcut_scenes();
         let view = recorder::shortcuts_view(recorder::ShortcutsInput {
+            guests_shown: videorc_app_core::livestream::cloud_status::guests_visible(
+                self.studio.cloud_now().status.as_ref(),
+            ),
             config: &config,
             platform,
             unavailable: registration.unavailable.as_deref(),

@@ -206,9 +206,9 @@ pub struct Shell {
     destinations: Entity<DestinationsPanel>,
     /// Phase 3: Guests ⌘7.
     guests: Entity<GuestsPanel>,
-    /// Phase 3: Avatar ⌘8.
+    /// Phase 3: Avatar ⌘7/⌘8.
     avatar: Entity<AvatarScreen>,
-    /// Phase 3: Sidekick ⌘9.
+    /// Phase 3: Sidekick ⌘8/⌘9.
     sidekick: Entity<SidekickScreen>,
     /// Phase 3: Images ⇧⌘G.
     images: Entity<ImagesPanel>,
@@ -322,7 +322,15 @@ impl Shell {
             )
         });
         if let Some(guests_visible) = &guests_visible {
-            cx.observe(guests_visible, |_, _, cx| cx.notify()).detach();
+            super::menus::refresh_page_menu(*guests_visible.read(cx).value(), cx);
+            cx.observe(guests_visible, |this, visible, cx| {
+                super::menus::refresh_page_menu(*visible.read(cx).value(), cx);
+                this.settings.update(cx, |_, cx| cx.notify());
+                this.palette
+                    .update(cx, |palette, cx| palette.refresh_page_shortcuts(cx));
+                cx.notify();
+            })
+            .detach();
         }
         palette.update(cx, |palette, _| palette.set_notifications_available());
         let command_held = false;
@@ -778,7 +786,7 @@ impl Shell {
     /// secondary tier; the page you're on wears the chrome plate at 500 with
     /// its icon in the primary ink, and hover is the flat sidebar block.
     /// `guestsVisible`, failing closed before the cloud has answered.
-    fn guests_shown(&self, cx: &gpui::App) -> bool {
+    pub fn guests_shown(&self, cx: &gpui::App) -> bool {
         self.guests_visible
             .as_ref()
             .is_some_and(|visible| *visible.read(cx).value())
@@ -797,7 +805,7 @@ impl Shell {
         // P017: chips stay mounted (width reserved) and fade in while
         // ⌘/Ctrl is held; aria-hidden — the row's click is enough.
         let shortcut = page
-            .key()
+            .key(self.guests_shown(cx))
             .and_then(super::menus::page_action)
             .map(|action| {
                 div()
@@ -857,7 +865,7 @@ impl Shell {
             page_icon(PageId::Studio)
         };
         let shortcut = PageId::Studio
-            .key()
+            .key(self.guests_shown(cx))
             .and_then(super::menus::page_action)
             .map(|action| {
                 div()

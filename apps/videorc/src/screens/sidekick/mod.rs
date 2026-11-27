@@ -1,4 +1,4 @@
-//! Sidekick ⌘9 (plan 260 Phase 3): Overview, Chat, Community, Voice,
+//! Sidekick ⌘8/⌘9 (plan 260 Phase 3): Overview, Chat, Community, Voice,
 //! Reports and Clean cut from `videorc_app_core::buddy` and
 //! `stream_manager::buddy`, drawn with `videorc-kit`. Words match Electron's
 //! `tabs/buddy-tab.tsx`.

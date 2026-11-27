@@ -145,9 +145,14 @@ impl SceneDialogs {
             shift: key.modifiers.shift,
             key_up: false,
         };
-        let step = shortcut_recorder_step(&input, platform, |value| {
-            a::global_shortcut_taken_reason(&config, value, &action, platform, &scenes)
-        });
+        let step = shortcut_recorder_step(
+            &input,
+            platform,
+            |value| a::global_shortcut_taken_reason(&config, value, &action, platform, &scenes),
+            videorc_app_core::livestream::cloud_status::guests_visible(
+                self.studio.cloud_now().status.as_ref(),
+            ),
+        );
         let value = match step {
             RecorderStep::Commit(value) => value,
             RecorderStep::Clear => String::new(),
