@@ -55,6 +55,7 @@ describe('CohostListenPrompt', () => {
     await render(onTurnOn)
     // The second answer is a button too, not ghost text (owner, 11-27).
     expect(button('Not now').dataset.variant).toBe('outline')
+    expect(button('Not now').className).toContain('text-foreground')
     await act(async () => button('Not now').click())
     expect(onTurnOn).not.toHaveBeenCalled()
     expect(prompt()).toBeNull()

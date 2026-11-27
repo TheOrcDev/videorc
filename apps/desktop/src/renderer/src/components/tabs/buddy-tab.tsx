@@ -366,7 +366,7 @@ function BuddyLivePowers({
               </FieldContent>
               <Button
                 aria-label={`Open ${label} settings for ${power.title}`}
-                className="shrink-0"
+                className="shrink-0 text-foreground"
                 size="xs"
                 type="button"
                 variant="outline"

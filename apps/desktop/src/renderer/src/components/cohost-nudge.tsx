@@ -27,10 +27,22 @@ export function CohostNudge({
       <span className="min-w-0 flex-1">
         Sidekick is off. It can group your chat&apos;s questions and draft replies.
       </span>
-      <Button className="shrink-0" size="xs" type="button" variant="outline" onClick={onTurnOn}>
+      <Button
+        className="shrink-0 text-foreground"
+        size="xs"
+        type="button"
+        variant="outline"
+        onClick={onTurnOn}
+      >
         Turn on
       </Button>
-      <Button className="shrink-0" size="xs" type="button" variant="outline" onClick={onDismiss}>
+      <Button
+        className="shrink-0 text-foreground"
+        size="xs"
+        type="button"
+        variant="outline"
+        onClick={onDismiss}
+      >
         Dismiss
       </Button>
     </div>
