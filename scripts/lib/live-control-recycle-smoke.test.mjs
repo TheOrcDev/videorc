@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import {
+  isolatedRecycleDatabasePath,
   lsofShowsOwnedTcpListener,
   netstatShowsOwnedTcpListener,
   ownedTcpListenerIsReady,
@@ -270,4 +271,66 @@ test('RTMP readiness waits for an owned listener without a fixed startup sleep',
   assert.equal(probes, 2)
   assert.doesNotMatch(smoke, /await sleep\(750\)/)
   assert.match(smoke, /waitForOwnedTcpListener/)
+})
+
+const isolatedBackend = {
+  isolated: true,
+  databaseInsideSmokeState: true,
+  secretsInsideSmokeState: true,
+  recordingsInsideSmokeState: true,
+  backendUsesConfiguredDatabase: true
+}
+
+test('Electron recycle uses the launch database verified by its boolean-only inspection', () => {
+  const databasePath = join(root, 'isolated', 'custom', 'videorc.sqlite3')
+  assert.equal(
+    isolatedRecycleDatabasePath({
+      isolation: isolatedBackend,
+      gpui: false,
+      launchEnv: { VIDEORC_DATABASE_PATH: databasePath }
+    }),
+    databasePath
+  )
+})
+
+test('GPUI recycle retains the database path reported by the running app', () => {
+  const databasePath = join(root, 'isolated', 'user-data', 'videorc.sqlite3')
+  assert.equal(
+    isolatedRecycleDatabasePath({
+      isolation: { ...isolatedBackend, databasePath },
+      gpui: true,
+      launchEnv: { VIDEORC_DATABASE_PATH: join(root, 'wrong', 'videorc.sqlite3') }
+    }),
+    databasePath
+  )
+})
+
+test('recycle refuses unverified isolation or an absent database path on either app', () => {
+  for (const gpui of [false, true]) {
+    const options = {
+      gpui,
+      isolation: { ...isolatedBackend, databasePath: join(root, 'db.sqlite3') },
+      launchEnv: { VIDEORC_DATABASE_PATH: join(root, 'db.sqlite3') }
+    }
+    assert.throws(
+      () =>
+        isolatedRecycleDatabasePath({
+          ...options,
+          isolation: { ...options.isolation, isolated: false }
+        }),
+      /must be isolated/
+    )
+    assert.throws(
+      () =>
+        isolatedRecycleDatabasePath({
+          ...options,
+          isolation: { ...options.isolation, backendUsesConfiguredDatabase: false }
+        }),
+      /configured isolated database/
+    )
+    assert.throws(
+      () => isolatedRecycleDatabasePath({ ...options, isolation: isolatedBackend, launchEnv: {} }),
+      /path must be absolute/
+    )
+  }
 })
