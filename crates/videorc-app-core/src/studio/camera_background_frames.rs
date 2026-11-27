@@ -97,11 +97,12 @@ pub fn bgra_from_bmp(bmp: &[u8], mirror: bool) -> Option<BgraFrame> {
     let rows = source.chunks_exact(stride);
     let mut push_row = |row: &[u8]| {
         let mut push =
-            |pixel: &[u8]| pixels.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+            |pixel: &[u8; 4]| pixels.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+        let cells = row.as_chunks::<4>().0;
         if mirror {
-            row.chunks_exact(4).rev().for_each(&mut push);
+            cells.iter().rev().for_each(&mut push);
         } else {
-            row.chunks_exact(4).for_each(&mut push);
+            cells.iter().for_each(&mut push);
         }
     };
     if top_down {
