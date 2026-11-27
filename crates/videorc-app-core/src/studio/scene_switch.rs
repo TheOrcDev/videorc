@@ -400,6 +400,17 @@ pub(super) struct SwitchCore {
     /// `sceneVisibilityRequestIdRef`: the latest Show or Hide, so an older
     /// answer never lands over a newer one.
     pub(super) visibility_request: u64,
+    /// The latest switch refusal in the streamer's words, by the intent it
+    /// answered, so a caller that asked can say why (#2491: Images).
+    last_refusal: Option<(u64, SwitchRefusal)>,
+}
+
+/// A refused scene change, as the toast told it: the backend's code and the
+/// reason in the streamer's words ("This scene needs a screen or window…").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchRefusal {
+    pub code: String,
+    pub reason: String,
 }
 
 impl SwitchCore {
@@ -951,7 +962,23 @@ impl<B: StudioBackend> Studio<B> {
 
     /// `reportError(error, {action: 'switch', object: 'the scene'})`.
     fn report_switch_error(&self, error: &RpcError) {
-        let connected = matches!(self.lock().connection, Connection::Connected { .. });
+        let connected = {
+            let mut inner = self.lock();
+            let reason = crate::user_error::user_error_message(
+                Failure::Rpc(error),
+                Some(copy::SWITCH_THE_SCENE),
+            )
+            .description;
+            let intent = inner.scenes.switch.intent_id;
+            inner.scenes.switch.last_refusal = Some((
+                intent,
+                SwitchRefusal {
+                    code: error.code.clone(),
+                    reason,
+                },
+            ));
+            matches!(inner.connection, Connection::Connected { .. })
+        };
         if let Some(command) = backend_error_toast(error, connected, copy::SWITCH_THE_SCENE) {
             self.post(vec![command]);
         }
@@ -1073,6 +1100,28 @@ impl<B: StudioBackend> Studio<B> {
         self.layout_transaction(layout, options, None)
             .await
             .committed
+    }
+
+    /// [`Self::request_layout_transaction`], with the refusal the toast told
+    /// when this transaction was not committed (`None`: committed, or
+    /// superseded by a newer intent with no refusal of its own).
+    pub(super) async fn request_layout_transaction_explained(
+        self: &Arc<Self>,
+        layout: Value,
+        options: TransactionOptions,
+    ) -> Result<(), Option<SwitchRefusal>> {
+        let outcome = self.layout_transaction(layout, options, None).await;
+        if outcome.committed {
+            return Ok(());
+        }
+        let inner = self.lock();
+        Err(inner
+            .scenes
+            .switch
+            .last_refusal
+            .as_ref()
+            .filter(|(intent, _)| *intent == outcome.intent)
+            .map(|(_, refusal)| refusal.clone()))
     }
 
     async fn layout_transaction(
