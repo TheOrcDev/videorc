@@ -42,6 +42,7 @@
 pub mod activate;
 pub mod capture;
 pub mod driver;
+mod preview_drain;
 pub mod shell;
 pub mod windows;
 
@@ -86,8 +87,8 @@ pub trait ShellSmoke: 'static {
 }
 
 /// The preview's commands on the GPUI app. The preview draws in the main
-/// window (docked) or its own (floating, macOS); Electron's surface and
-/// host placement stays with the GPUI element; the drain awaits its own feed.
+/// window (docked) or its own (floating, macOS). Host placement stays with
+/// the GPUI element; the drain awaits its own feed.
 pub const PREVIEW_COMMANDS: &[&str] = &[
     "inspect-native-preview-live-background",
     "inspect-native-preview-runtime",
@@ -467,7 +468,6 @@ pub fn start(cx: &mut App, start: SmokeStart) -> bool {
 }
 
 #[cfg(test)]
-mod preview_drain;
 mod tests {
     use super::{OpenTab, SmokeDialog};
     use serde_json::{Map, Value, json};
