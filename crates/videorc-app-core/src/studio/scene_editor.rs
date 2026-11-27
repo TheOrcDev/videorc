@@ -31,7 +31,7 @@ use crate::client::RpcError;
 use crate::editor::inspector::normalize_camera_look;
 use crate::editor::stage::{CommitOutcome, StageRect};
 use crate::log::Logger;
-use crate::notices::NoticeCommand;
+use crate::notices::{NoticeCommand, ToastRequest};
 use crate::scenes::background::{resolve_saved_background, snapshot_background};
 use crate::scenes::framing::vertical_orientation_video_patch;
 use crate::scenes::model::Origin;
@@ -1102,19 +1102,42 @@ impl<B: StudioBackend> Studio<B> {
         let resolved = match background {
             Some(style) => match resolve_saved_background(Some(style)) {
                 Some(resolved) => Some(resolved),
-                None => return false,
+                None => {
+                    self.config
+                        .logger
+                        .warn("[background] refused invalid saved background");
+                    self.post(vec![NoticeCommand::Show(
+                        ToastRequest::warning("Couldn't apply the background")
+                            .id("background-invalid")
+                            .description("This background isn't available. Choose another background or import the image again.")
+                            .finish(),
+                    )]);
+                    return false;
+                }
             },
             None => None,
         };
-        self.request_layout_transaction(
-            layout,
-            TransactionOptions {
-                quiet: true,
-                background_override: Some(resolved),
-                ..TransactionOptions::default()
-            },
-        )
-        .await
+        self.config.logger.info(format!(
+            "[background] applying {}",
+            resolved
+                .as_ref()
+                .and_then(|value| value["assetId"].as_str())
+                .unwrap_or("none"),
+        ));
+        let accepted = self
+            .request_layout_transaction(
+                layout,
+                TransactionOptions {
+                    quiet: true,
+                    background_override: Some(resolved),
+                    ..TransactionOptions::default()
+                },
+            )
+            .await;
+        self.config
+            .logger
+            .info(format!("[background] apply accepted={accepted}"));
+        accepted
     }
 
     /// `applyWorkingBackgroundStyle({ visibilityPercent })` (Screen size):

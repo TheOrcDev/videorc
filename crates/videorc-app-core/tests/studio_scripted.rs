@@ -6398,3 +6398,116 @@ async fn a_microphone_muted_before_the_takeover_stays_muted_after_it() {
     assert!(studio.snapshot().settings.capture.audio.microphone_muted);
     driver.abort();
 }
+
+// Owner 2026-11-27: Images must answer a click even on a fresh profile.
+#[tokio::test]
+async fn images_backgrounds_apply_without_capture_sources_and_remove_quietly() {
+    let (backend, studio) = scenes_studio(json!({
+        "sources": {"captureOff": true, "cameraOff": true}
+    }))
+    .await;
+    backend.with(|script| script.device_ids = Some(vec![]));
+    let mut notices = studio.notices();
+    for id in ["live-silk-satin", "builtin-bg-01"] {
+        assert!(
+            studio
+                .set_working_background(Some(&json!({"assetId": id})))
+                .await
+        );
+        settled(&studio).await;
+        assert_eq!(
+            studio.snapshot().scenes.working_background.unwrap()["assetId"],
+            id
+        );
+        let commits = layout_commits(&backend);
+        let (_, sent) = commits.last().unwrap();
+        assert_eq!(sent["background"]["assetId"], id);
+        assert_eq!(sent["sources"]["captureOff"], true);
+        assert_eq!(sent["sources"]["cameraOff"], true);
+    }
+    assert!(studio.set_working_background(None).await);
+    settled(&studio).await;
+    assert!(studio.snapshot().scenes.working_background.is_none());
+    assert!(
+        said(&mut notices).is_empty(),
+        "successful background edits never toast"
+    );
+    assert_eq!(backend.count("session.start"), 0);
+}
+
+#[tokio::test]
+async fn images_background_refusal_keeps_the_selection_and_explains_why() {
+    let (backend, studio) = scenes_studio(json!({
+        "sources": {"captureOff": true, "cameraOff": true}
+    }))
+    .await;
+    assert!(
+        studio
+            .set_working_background(Some(&json!({"assetId": "builtin-bg-01"})))
+            .await
+    );
+    settled(&studio).await;
+    let before = studio.snapshot().scenes.working_background;
+    let mut notices = studio.notices();
+    backend.with(|script| {
+        script.apply_failures.push_back((
+            RpcError::new(
+                "scene.layout.apply_preview",
+                "layout-screen-not-ready",
+                "private engine detail",
+            ),
+            false,
+        ))
+    });
+    assert!(
+        !studio
+            .set_working_background(Some(&json!({"assetId": "live-silk-satin"})))
+            .await
+    );
+    settled(&studio).await;
+    assert_eq!(studio.snapshot().scenes.working_background, before);
+    let notice = notices.try_recv().unwrap();
+    let notice = notice.notice().unwrap();
+    assert_eq!(
+        notice.description.as_deref(),
+        Some("Your screen isn't sending video. Check it in Sources, then try again.")
+    );
+    assert!(!notice.title.contains("private engine detail"));
+    assert!(
+        !notice
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("private engine detail")
+    );
+}
+
+#[tokio::test]
+async fn images_invalid_background_is_refused_with_an_answer() {
+    let (backend, studio) =
+        scenes_studio(json!({"sources": {"captureOff": true, "cameraOff": true}})).await;
+    let count = layout_commits(&backend).len();
+    let mut notices = studio.notices();
+    assert!(
+        !studio
+            .set_working_background(Some(&json!({"assetId": "../missing"})))
+            .await
+    );
+    assert_eq!(layout_commits(&backend).len(), count);
+    assert_eq!(said(&mut notices)[0].0, "Couldn't apply the background");
+}
+
+#[tokio::test]
+async fn images_background_while_disconnected_explains_reconnection() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    let mut notices = studio.notices();
+    assert!(
+        !studio
+            .set_working_background(Some(&json!({"assetId": "builtin-bg-01"})))
+            .await
+    );
+    assert!(layout_commits(&backend).is_empty());
+    assert!(studio.snapshot().scenes.working_background.is_none());
+    assert_eq!(said(&mut notices)[0].0, "Videorc is reconnecting");
+}
