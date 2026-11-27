@@ -284,6 +284,8 @@ describe('the Scene page scene list (plan 210 D6)', () => {
     const line = container.querySelector('[data-slot="scene-gallery-reason"]')!
     expect(line.textContent).toContain('Camera is off. Choose one in Sources to use Break.')
     expect(rowButton('Break').closest('[aria-describedby]')).toBeTruthy()
+    // A button, not a text link beside the reason (owner, 11-27).
+    expect(button('Open Sources')!.dataset.variant).toBe('outline')
     await act(async () => button('Open Sources')!.click())
     expect(openWorkspaceTab).toHaveBeenCalledExactlyOnceWith('sources')
   })

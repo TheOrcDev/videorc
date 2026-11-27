@@ -307,12 +307,7 @@ const CAMERA_FIT_OPTIONS: SegmentedControlOption<CameraFit>[] = [
 
 function OpenSourcesLink(): ReactElement {
   return (
-    <Button
-      className="h-auto p-0 text-xs font-normal"
-      size="xs"
-      variant="link"
-      onClick={() => openWorkspaceTab('sources')}
-    >
+    <Button size="xs" variant="outline" onClick={() => openWorkspaceTab('sources')}>
       Open Sources
     </Button>
   )
