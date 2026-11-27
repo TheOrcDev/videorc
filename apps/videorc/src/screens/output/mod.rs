@@ -1726,7 +1726,7 @@ impl OutputPanel {
                         row.id
                     )))
                     .label(label)
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(videorc_kit::button::ButtonSize::Xs)
                     .disabled(state.busy || (action == JobAction::Retry && !has_generation))
                     .on_click(cx.listener(move |this, _, _, cx| {
