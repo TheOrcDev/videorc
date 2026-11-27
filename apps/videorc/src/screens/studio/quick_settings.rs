@@ -562,10 +562,14 @@ impl QuickSettingsSection {
             selected,
             frame,
             t,
-            move |choice, window, cx| {
+            move |choice, _window, cx| {
+                // The popover stays open on a pick, as Electron's does, so
+                // "What viewers see" shows the new pick at once (owner,
+                // 2026-11-27). Escape, a click outside, Choose… and Settings
+                // close it.
                 let _ = choose_entity.update(cx, |section, cx| {
                     section.choose_background(choice);
-                    section.set_popover_open(false, window, cx);
+                    cx.notify();
                 });
             },
             move |window, cx| {
