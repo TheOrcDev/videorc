@@ -151,6 +151,32 @@ export function systemAudioSwitchView(input: SystemAudioSwitchInput): SystemAudi
   }
 }
 
+/**
+ * The switch as a System audio row draws it (Studio's Audio and Sources).
+ *
+ * Without the Screen Recording permission the row's switch still shows what
+ * the user asked for and stays theirs to flip (owner, 2026-11-27): a feature
+ * that is off shows no chip, Gain or warning. First run keeps the locked
+ * switch of `systemAudioSwitchView`, beside its own way back to permissions.
+ */
+export function systemAudioRowView(
+  view: SystemAudioSwitchView,
+  requested: boolean
+): SystemAudioSwitchView {
+  if (!view.permissionRequired) return view
+  return { ...view, checked: requested, disabled: false, stateLabel: requested ? 'On' : 'Off' }
+}
+
+/** On, with nothing in its way: the row's level and Gain have something to show. */
+export function systemAudioRowWorking(view: SystemAudioSwitchView): boolean {
+  return view.checked && !view.permissionRequired
+}
+
+/** On, but the permission is missing: the row says so, with the way to the fix. */
+export function systemAudioRowNeedsPermission(view: SystemAudioSwitchView): boolean {
+  return view.checked && view.permissionRequired
+}
+
 /** Plan 201 D6: when a resting System audio level moves, on Sources and the Studio. */
 export const SYSTEM_AUDIO_IDLE_LINE = 'Level shows while you record, go live, or keep Clips on.'
 
