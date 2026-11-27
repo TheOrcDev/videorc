@@ -1410,7 +1410,7 @@ function JoinRequests({
       </GroupedList>
       {more > 0 ? (
         <Button
-          className="self-start"
+          className="self-start text-foreground"
           size="xs"
           type="button"
           variant="outline"
@@ -1485,6 +1485,7 @@ function StagePeople({
             <span className="min-w-0 text-meta text-muted-foreground">{NOBODY_BACKSTAGE}</span>
             {/* The link's one home is the Guests page. */}
             <Button
+              className="text-foreground"
               size="xs"
               type="button"
               variant="outline"

@@ -58,16 +58,34 @@ export function SessionRuntimeAlert({
             </Button>
           ) : null}
           {savedFile && onOpenLibrary ? (
-            <Button size="xs" type="button" variant="outline" onClick={onOpenLibrary}>
+            <Button
+              className="text-foreground"
+              size="xs"
+              type="button"
+              variant="outline"
+              onClick={onOpenLibrary}
+            >
               Open Library
             </Button>
           ) : null}
           {savedFile && notice.outputPath && onRevealOutput ? (
-            <Button size="xs" type="button" variant="outline" onClick={onRevealOutput}>
+            <Button
+              className="text-foreground"
+              size="xs"
+              type="button"
+              variant="outline"
+              onClick={onRevealOutput}
+            >
               {revealInFileManagerLabel()}
             </Button>
           ) : null}
-          <Button size="xs" type="button" variant="outline" onClick={onDismiss}>
+          <Button
+            className="text-foreground"
+            size="xs"
+            type="button"
+            variant="outline"
+            onClick={onDismiss}
+          >
             Dismiss
           </Button>
         </div>

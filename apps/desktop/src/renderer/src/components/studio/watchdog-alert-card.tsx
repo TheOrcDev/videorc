@@ -98,6 +98,7 @@ export function WatchdogAlertCard({
           {more.map((fix) => (
             <Button
               key={fix.kind}
+              className="text-foreground"
               data-testid="watchdog-alert-fix"
               size="xs"
               type="button"
@@ -109,6 +110,7 @@ export function WatchdogAlertCard({
           ))}
           {compact ? null : quiet === 'I meant to' ? (
             <Button
+              className="text-foreground"
               data-testid="watchdog-alert-quiet"
               size="xs"
               type="button"
@@ -119,6 +121,7 @@ export function WatchdogAlertCard({
             </Button>
           ) : (
             <Button
+              className="text-foreground"
               data-testid="watchdog-alert-quiet"
               disabled={acknowledged}
               size="xs"

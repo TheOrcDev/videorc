@@ -34,6 +34,8 @@ describe('SessionRuntimeAlert', () => {
     expect(markup).toMatch(/<button[^>]*data-variant="outline"[^>]*>Open Library</)
     expect(markup).toMatch(/<button[^>]*data-variant="outline"[^>]*>Dismiss</)
     expect(markup).not.toContain('data-variant="ghost"')
+    // ...and its label is full foreground, not the description's grey.
+    expect(markup).toMatch(/<button[^>]*class="[^"]*text-foreground[^"]*"[^>]*>Dismiss</)
   })
 
   it('renders microphone loss as degraded without recovery-file actions', () => {

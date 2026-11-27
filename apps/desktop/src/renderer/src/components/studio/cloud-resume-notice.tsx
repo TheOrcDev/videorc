@@ -76,6 +76,7 @@ export function CloudResumeNotice({
               </Button>
             </DisabledReason>
             <Button
+              className="text-foreground"
               data-testid="cloud-end"
               disabled={pending}
               size="xs"

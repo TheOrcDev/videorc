@@ -422,6 +422,7 @@ export function SessionNotices({
             <div className="flex flex-wrap gap-1 pt-2">
               {onRetryStart ? (
                 <Button
+                  className="text-foreground"
                   disabled={startRequestPending}
                   size="xs"
                   type="button"
@@ -432,7 +433,13 @@ export function SessionNotices({
                 </Button>
               ) : null}
               {onDismissStartFailure ? (
-                <Button size="xs" type="button" variant="outline" onClick={onDismissStartFailure}>
+                <Button
+                  className="text-foreground"
+                  size="xs"
+                  type="button"
+                  variant="outline"
+                  onClick={onDismissStartFailure}
+                >
                   Dismiss
                 </Button>
               ) : null}
