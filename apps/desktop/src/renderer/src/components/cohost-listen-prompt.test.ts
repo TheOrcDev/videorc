@@ -53,6 +53,8 @@ describe('CohostListenPrompt', () => {
   it('Not now is final too, across a remount', async () => {
     const onTurnOn = vi.fn()
     await render(onTurnOn)
+    // The second answer is a button too, not ghost text (owner, 11-27).
+    expect(button('Not now').dataset.variant).toBe('outline')
     await act(async () => button('Not now').click())
     expect(onTurnOn).not.toHaveBeenCalled()
     expect(prompt()).toBeNull()
