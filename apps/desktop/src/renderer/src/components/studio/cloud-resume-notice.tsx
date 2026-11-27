@@ -76,11 +76,12 @@ export function CloudResumeNotice({
               </Button>
             </DisabledReason>
             <Button
+              className="text-foreground"
               data-testid="cloud-end"
               disabled={pending}
               size="xs"
               type="button"
-              variant="ghost"
+              variant="outline"
               onClick={() => setConfirming(true)}
             >
               {END_LIVESTREAM_LABEL}

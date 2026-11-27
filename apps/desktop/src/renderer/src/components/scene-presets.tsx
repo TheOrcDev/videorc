@@ -247,7 +247,12 @@ export function ScenesSection(): ReactElement {
       {/* Why some scenes can't be chosen, once, under the cards (B-20). */}
       <SceneGalleryReason
         action={
-          <Button size="xs" variant="ghost" onClick={() => openWorkspaceTab('sources')}>
+          <Button
+            className="text-foreground"
+            size="xs"
+            variant="outline"
+            onClick={() => openWorkspaceTab('sources')}
+          >
             Open Sources
           </Button>
         }

@@ -61,7 +61,13 @@ export function CameraBackgroundPicker({
       <div className="flex items-center gap-2 border-t border-border pt-2.5 text-xs text-muted-foreground">
         <LockIcon aria-hidden className="size-3.5 shrink-0" />
         <span className="min-w-0 flex-1">{CAMERA_BACKGROUND_LOCK_LINE}</span>
-        <Button size="xs" type="button" variant="ghost" onClick={onSettings}>
+        <Button
+          className="text-foreground"
+          size="xs"
+          type="button"
+          variant="outline"
+          onClick={onSettings}
+        >
           Settings
         </Button>
       </div>
