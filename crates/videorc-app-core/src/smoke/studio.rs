@@ -58,6 +58,9 @@ pub const STUDIO_SMOKE_COMMANDS: &[&str] = &[
     "enable-synthetic-source",
     "gallery-seed-show-stage",
     "gallery-seed-vertical-stream",
+    "scheduled-state",
+    "scheduled-mutate",
+    "studio-go-live",
     "select-camera-device",
     "select-camera-shape",
     "select-layout-preset",
@@ -950,6 +953,44 @@ impl SmokeCommandHandler for StudioSmoke {
                 "enable-synthetic-source" => self.enable_synthetic_source(params).await,
                 "gallery-seed-show-stage" => self.gallery_seed_show_stage(params).await,
                 "gallery-seed-vertical-stream" => self.gallery_seed_vertical_stream(params).await,
+                "scheduled-state" => Ok(scheduled_state_json(&self.studio.scheduled_now())),
+                "scheduled-mutate" => {
+                    let action = params
+                        .get("action")
+                        .and_then(Value::as_str)
+                        .ok_or("scheduled-mutate needs an action.")?;
+                    let fields = params
+                        .get("params")
+                        .filter(|v| v.is_object())
+                        .cloned()
+                        .ok_or("scheduled-mutate needs object params.")?;
+                    self.studio
+                        .scheduled_mutate(action, fields)
+                        .await
+                        .map_err(|error| format!("{error}"))
+                }
+                "studio-go-live" => {
+                    match params
+                        .get("action")
+                        .and_then(Value::as_str)
+                        .unwrap_or("state")
+                    {
+                        "open" => self.studio.open_go_live().await,
+                        "confirm" => self.studio.confirm_go_live().await,
+                        "cancel" => self.studio.cancel_go_live().await,
+                        "state" => {}
+                        _ => {
+                            return Err(
+                                "studio-go-live action must be open, confirm, cancel or state."
+                                    .into(),
+                            );
+                        }
+                    }
+                    let state = self.studio.go_live_now();
+                    Ok(json!({ "open": state.open, "pending": state.pending,
+                        "session": state_json(&self.studio.snapshot()),
+                        "captureConfig": scheduled_selection_json(&self.studio.snapshot().settings.capture_doc) }))
+                }
                 "studio-state" => Ok(state_json(&self.studio.snapshot())),
                 "studio-record" => self.record(params).await,
                 "studio-stop" => self.stop(params).await,
@@ -983,6 +1024,42 @@ impl SmokeCommandHandler for StudioSmoke {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn go_live_smoke_exposes_selection_without_stream_credentials() {
+        let capture = json!({ "streamEnabled": true, "microphoneId": "private-device",
+            "streaming": { "enabled": true, "targets": [{ "id": "youtube", "enabled": true,
+                "scheduledEventId": "show", "streamKey": "secret-key", "serverUrl": "private-url" }] } });
+        let selection = scheduled_selection_json(&capture);
+        assert_eq!(
+            selection,
+            json!({ "streamEnabled": true, "streaming": { "enabled": true,
+            "targets": [{ "id": "youtube", "enabled": true, "scheduledEventId": "show" }] } })
+        );
+        for private in ["private-device", "secret-key", "private-url"] {
+            assert!(!selection.to_string().contains(private));
+        }
+    }
+
+    #[test]
+    fn scheduled_snapshot_keeps_loading_pending_and_provider_errors() {
+        let mut state = crate::studio::scheduled::ScheduledState::default();
+        assert_eq!(scheduled_state_json(&state)["loading"], true);
+        state.loaded = true;
+        state.pending.push("show-1".into());
+        state.refreshing = true;
+        state.error = Some("Provider revision conflict".into());
+        let before = state.clone();
+        let answer = scheduled_state_json(&state);
+        assert_eq!(answer["loading"], false);
+        assert_eq!(answer["busy"], json!(["show-1"]));
+        assert_eq!(answer["refreshing"], true);
+        assert_eq!(answer["error"], "Provider revision conflict");
+        assert_eq!(
+            state, before,
+            "a smoke read must not refresh or mutate Upcoming"
+        );
+    }
 
     #[test]
     fn it_takes_only_studio_commands() {
@@ -1064,4 +1141,27 @@ mod tests {
         assert!(session_active(SessionPhase::Recording));
         assert!(session_active(SessionPhase::Stopping));
     }
+}
+
+/// Only the saved-event selection needed by the smoke, never ingest keys,
+/// account credentials or arbitrary capture settings.
+fn scheduled_selection_json(capture: &Value) -> Value {
+    let targets: Vec<_> = capture["streaming"]["targets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|target| {
+            json!({ "id": target["id"], "enabled": target["enabled"],
+            "scheduledEventId": target["scheduledEventId"] })
+        })
+        .collect();
+    json!({ "streamEnabled": capture["streamEnabled"], "streaming": {
+        "enabled": capture["streaming"]["enabled"], "targets": targets } })
+}
+
+/// The renderer hook's fields, read from the same owner as Upcoming.
+fn scheduled_state_json(state: &crate::studio::scheduled::ScheduledState) -> Value {
+    json!({ "events": state.events, "capabilities": state.capabilities,
+        "busy": state.pending, "loading": !state.loaded, "refreshing": state.refreshing,
+        "error": state.error })
 }

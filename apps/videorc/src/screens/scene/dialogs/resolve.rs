@@ -17,6 +17,7 @@ use videorc_kit::tokens::text;
 
 use super::super::now_iso;
 use super::SceneDialogs;
+use crate::screens::dialogs::after_open_change;
 
 pub(super) mod copy {
     pub const TITLE: &str = "Resolve scene sources";
@@ -315,11 +316,13 @@ impl SceneDialogs {
         Dialog::new("resolve-scene-dialog", &self.resolve, copy::TITLE)
             .size(DialogSize::Md)
             .description(copy::description(&resolving.scene.name))
-            .on_open_change(move |open, _, _, cx| {
+            .on_open_change(move |open, _, window, cx| {
                 if !open {
-                    let _ = page.update(cx, |page, cx| {
-                        page.resolving = None;
-                        cx.notify();
+                    after_open_change(&page, window, cx, |page, _, cx| {
+                        if !page.resolve.is_open() {
+                            page.resolving = None;
+                            cx.notify();
+                        }
                     });
                 }
             })

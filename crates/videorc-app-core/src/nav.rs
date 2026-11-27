@@ -45,7 +45,7 @@ pub enum PageId {
     Recording,
     /// Destinations (legacy trigger `streaming`).
     Live,
-    /// The talk show's room; its row shows only with talk shows, its key stays.
+    /// The talk show's room; its row and key exist only with talk shows.
     Guests,
     Avatar,
     /// Sidekick. Its id is `ai`, the id deep links and the smokes use.
@@ -259,8 +259,8 @@ impl PageId {
     }
 
     /// The page's key (`pageKeyFor`), none for Health.
-    pub fn key(self) -> Option<PageKey> {
-        page_keys()
+    pub fn key(self, guests_shown: bool) -> Option<PageKey> {
+        page_keys(guests_shown)
             .into_iter()
             .find(|(page, _)| *page == self)
             .map(|(_, key)| key)
@@ -268,13 +268,13 @@ impl PageId {
 
     /// The key main forwards for the page (`'1'`, `','`, `'G'`), as
     /// `videorc-rust` named it.
-    pub fn shortcut_key(self) -> Option<char> {
-        self.key().map(PageKey::as_char)
+    pub fn shortcut_key(self, guests_shown: bool) -> Option<char> {
+        self.key(guests_shown).map(PageKey::as_char)
     }
 
     /// The page's chord as an accelerator (`pageShortcutFor`).
-    pub fn accelerator(self) -> Option<String> {
-        self.key().map(PageKey::accelerator)
+    pub fn accelerator(self, guests_shown: bool) -> Option<String> {
+        self.key(guests_shown).map(PageKey::accelerator)
     }
 
     /// `sidebarOrderFor`: the row's position down the sidebar (0 for Health).
@@ -286,8 +286,8 @@ impl PageId {
     }
 
     /// The page a View menu item (or its key equivalent) opens.
-    pub fn from_menu_key(key: PageKey) -> Option<PageId> {
-        page_keys()
+    pub fn from_menu_key(key: PageKey, guests_shown: bool) -> Option<PageId> {
+        page_keys(guests_shown)
             .into_iter()
             .find(|(_, candidate)| *candidate == key)
             .map(|(page, _)| page)
@@ -302,7 +302,7 @@ impl PageId {
 /// `assignPageKeys(SIDEBAR_LAYOUT, PAGE_FIXED_KEYS)`: the fixed keys first,
 /// then ⌘1–⌘9 and ⌘0 down the remaining rows, minus any digit a fixed key
 /// takes.
-pub fn page_keys() -> Vec<(PageId, PageKey)> {
+pub fn page_keys(guests_shown: bool) -> Vec<(PageId, PageKey)> {
     let mut digits: Vec<u8> = (1..=9).chain([0]).collect();
     digits.retain(|digit| {
         !FIXED_KEYS
@@ -312,6 +312,7 @@ pub fn page_keys() -> Vec<(PageId, PageKey)> {
     let mut digits = digits.into_iter();
     SIDEBAR_ORDER
         .iter()
+        .filter(|page| **page != PageId::Guests || guests_shown)
         .filter_map(|page| {
             let fixed = FIXED_KEYS
                 .iter()
@@ -343,18 +344,21 @@ pub fn forwarded_key(key: char) -> Option<PageKey> {
 
 /// `navigationShortcutTab`: the page a forwarded key opens, or none: an
 /// unknown key, or a dialog that owns the keyboard.
-pub fn navigation_shortcut_tab(key: char, modal_open: bool) -> Option<PageId> {
+pub fn navigation_shortcut_tab(key: char, modal_open: bool, guests_shown: bool) -> Option<PageId> {
     if modal_open {
         return None;
     }
-    forwarded_key(key).and_then(PageId::from_menu_key)
+    forwarded_key(key).and_then(|key| PageId::from_menu_key(key, guests_shown))
 }
 
 /// The View menu's and the App menu's page items, and the Window menu's
 /// windows, from [`PORTED`].
-pub fn menu_availability(windows: &[WindowId]) -> MenuAvailability {
+pub fn menu_availability(windows: &[WindowId], guests_shown: bool) -> MenuAvailability {
     MenuAvailability {
-        pages: PORTED.iter().filter_map(|page| page.key()).collect(),
+        pages: PORTED
+            .iter()
+            .filter_map(|page| page.key(guests_shown))
+            .collect(),
         windows: windows.iter().copied().collect(),
     }
 }
@@ -704,6 +708,61 @@ mod tests {
 
     /// The labels, the layout and the keys are `shared/sidebar-pages.ts`'s.
     #[test]
+    fn visible_page_shortcuts_follow_live_availability() {
+        use crate::desktop::menu::page_groups;
+        for shown in [false, true, false] {
+            let expected = if shown {
+                vec![
+                    (PageId::Guests, PageKey::Digit(7)),
+                    (PageId::Avatar, PageKey::Digit(8)),
+                    (PageId::Ai, PageKey::Digit(9)),
+                ]
+            } else {
+                vec![
+                    (PageId::Avatar, PageKey::Digit(7)),
+                    (PageId::Ai, PageKey::Digit(8)),
+                ]
+            };
+            let keys = page_keys(shown);
+            assert_eq!(
+                keys.iter()
+                    .copied()
+                    .filter(|(_, key)| matches!(key, PageKey::Digit(7..=9)))
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                PageId::Guests.key(shown),
+                shown.then_some(PageKey::Digit(7))
+            );
+            assert_eq!(
+                navigation_shortcut_tab('9', false, shown),
+                shown.then_some(PageId::Ai)
+            );
+            for (page, key) in &keys {
+                assert_eq!(PageId::from_menu_key(*key, shown), Some(*page));
+                assert_eq!(page.accelerator(shown), Some(key.accelerator()));
+                assert_eq!(navigation_shortcut_tab(key.as_char(), true, shown), None);
+            }
+            for (page, key) in FIXED_KEYS {
+                assert_eq!(page.key(shown), Some(key));
+            }
+            let menu = page_groups(shown)
+                .into_iter()
+                .flatten()
+                .map(|entry| (entry.title, entry.key))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                menu,
+                keys.into_iter()
+                    .filter(|(page, _)| *page != PageId::Settings)
+                    .map(|(page, key)| (page.label(), key))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
     fn the_page_map_is_sidebar_pages_ts() {
         let source = SIDEBAR_PAGES_TS;
         for page in SIDEBAR_ORDER {
@@ -743,7 +802,7 @@ mod tests {
 
     #[test]
     fn the_keys_run_down_the_sidebar_after_the_fixed_ones() {
-        let keys: Vec<String> = page_keys()
+        let keys: Vec<String> = page_keys(true)
             .into_iter()
             .map(|(page, key)| format!("{} {}", page.label(), key.accelerator()))
             .collect();
@@ -765,19 +824,19 @@ mod tests {
                 "Settings CmdOrCtrl+,",
             ]
         );
-        assert_eq!(PageId::Diagnostics.key(), None, "Health has no key");
+        assert_eq!(PageId::Diagnostics.key(true), None, "Health has no key");
     }
 
     /// The menu's View items and the shell's keys are one map.
     #[test]
     fn the_view_menu_shows_the_same_keys() {
-        use crate::desktop::menu::PAGE_GROUPS;
-        let menu: Vec<(String, PageKey)> = PAGE_GROUPS
+        use crate::desktop::menu::page_groups;
+        let menu: Vec<(String, PageKey)> = page_groups(true)
             .iter()
             .flat_map(|group| group.iter())
             .map(|page| (page.title.to_string(), page.key))
             .collect();
-        let shell: Vec<(String, PageKey)> = page_keys()
+        let shell: Vec<(String, PageKey)> = page_keys(true)
             .into_iter()
             .filter(|(page, _)| *page != PageId::Settings)
             .map(|(page, key)| (page.label().to_string(), key))
@@ -815,14 +874,32 @@ mod tests {
 
     #[test]
     fn forwarded_keys_open_pages_but_not_from_under_a_dialog() {
-        assert_eq!(navigation_shortcut_tab('1', false), Some(PageId::Studio));
-        assert_eq!(navigation_shortcut_tab('7', false), Some(PageId::Guests));
-        assert_eq!(navigation_shortcut_tab('G', false), Some(PageId::Assets));
-        assert_eq!(navigation_shortcut_tab('S', false), Some(PageId::Sounds));
-        assert_eq!(navigation_shortcut_tab('0', false), Some(PageId::Library));
-        assert_eq!(navigation_shortcut_tab(',', false), Some(PageId::Settings));
-        assert_eq!(navigation_shortcut_tab('L', false), None);
-        assert_eq!(navigation_shortcut_tab('1', true), None);
+        assert_eq!(
+            navigation_shortcut_tab('1', false, true),
+            Some(PageId::Studio)
+        );
+        assert_eq!(
+            navigation_shortcut_tab('7', false, true),
+            Some(PageId::Guests)
+        );
+        assert_eq!(
+            navigation_shortcut_tab('G', false, true),
+            Some(PageId::Assets)
+        );
+        assert_eq!(
+            navigation_shortcut_tab('S', false, true),
+            Some(PageId::Sounds)
+        );
+        assert_eq!(
+            navigation_shortcut_tab('0', false, true),
+            Some(PageId::Library)
+        );
+        assert_eq!(
+            navigation_shortcut_tab(',', false, true),
+            Some(PageId::Settings)
+        );
+        assert_eq!(navigation_shortcut_tab('L', false, true), None);
+        assert_eq!(navigation_shortcut_tab('1', true, true), None);
     }
 
     /// The sub-tab ids are the page files' (`lib/*-tabs.ts`).
@@ -1063,9 +1140,13 @@ mod tests {
     #[test]
     fn installed_pages_are_reachable_but_health_has_no_sidebar_key() {
         assert!(PageId::Diagnostics.ported());
-        assert!(PageId::Diagnostics.key().is_none());
+        assert!(PageId::Diagnostics.key(true).is_none());
         assert!(PageId::Live.ported());
-        assert!(menu_availability(&[]).pages.contains(&PageKey::Settings));
+        assert!(
+            menu_availability(&[], true)
+                .pages
+                .contains(&PageKey::Settings)
+        );
         // The GPUI app draws every sidebar page, so ⌘3/⌘4/⌘5/⌘8 bind too.
         for page in [
             PageId::Layouts,

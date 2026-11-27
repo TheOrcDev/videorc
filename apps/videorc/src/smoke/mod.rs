@@ -42,6 +42,7 @@
 pub mod activate;
 pub mod capture;
 pub mod driver;
+mod preview_drain;
 pub mod shell;
 pub mod windows;
 
@@ -73,6 +74,8 @@ pub trait ShellSmoke: 'static {
     fn appearance(&self, request: UiAppearanceRequest, cx: &mut App) -> Result<Value, String>;
     /// `ui-toast`: a toast in the main window through the app's toast path.
     fn toast(&self, request: &UiToastRequest, cx: &mut App) -> Result<Value, String>;
+    /// Current bell entries and actually mounted toasts; never marks them read.
+    fn notifications(&self, cx: &mut App) -> Result<Value, String>;
     /// `open-tab`: the main window shows `page`, as its sidebar row would,
     /// on `open`'s sub-tab with its dialog over it.
     fn open_page(&self, page: PageId, open: OpenTab, cx: &mut App) -> Result<(), String>;
@@ -86,8 +89,8 @@ pub trait ShellSmoke: 'static {
 }
 
 /// The preview's commands on the GPUI app. The preview draws in the main
-/// window (docked) or its own (floating, macOS); Electron's surface and
-/// host commands have no GPUI form and stay "not supported".
+/// window (docked) or its own (floating, macOS). Host placement stays with
+/// the GPUI element; the drain awaits its own feed.
 pub const PREVIEW_COMMANDS: &[&str] = &[
     "inspect-native-preview-live-background",
     "inspect-native-preview-runtime",
@@ -177,7 +180,9 @@ pub struct ShellCommands {
 
 impl SmokeCommandHandler for ShellCommands {
     fn handles(&self, command: &str) -> bool {
-        command == "open-tab"
+        command == "drain-native-preview-host-commands"
+            || command == "notifications-state"
+            || command == "open-tab"
             || command == "main-window-id"
             || command == "studio-reveal-vertical-stream"
             || PREVIEW_COMMANDS.contains(&command)
@@ -195,12 +200,39 @@ impl SmokeCommandHandler for ShellCommands {
                     .run(move |cx| set_preview_window_bounds(&params, cx))
                     .await?;
             }
+            if command == "drain-native-preview-host-commands" {
+                if !params.is_empty() {
+                    return Err("drain-native-preview-host-commands takes no parameters.".into());
+                }
+                let answer = self
+                    .ui
+                    .run(|cx| {
+                        let preview = shell(cx)?.preview_entity().ok_or(MAIN_WINDOW_NOT_READY)?;
+                        preview.read(cx).smoke_drain_host_commands()
+                    })
+                    .await??;
+                let count = preview_drain::wait_for_drain(answer).await?;
+                return self
+                    .ui
+                    .run(move |cx| {
+                        let mut status = shell(cx)?.preview("native-preview-surface-status", cx)?;
+                        status["drainedCommandCount"] = serde_json::json!(count);
+                        Ok(status)
+                    })
+                    .await?;
+            }
             if PREVIEW_COMMANDS.contains(&command) {
                 let command = command.to_string();
                 return self
                     .ui
                     .run(move |cx| shell(cx)?.preview(&command, cx))
                     .await?;
+            }
+            if command == "notifications-state" {
+                if !params.is_empty() {
+                    return Err("notifications-state takes no parameters.".into());
+                }
+                return self.ui.run(|cx| shell(cx)?.notifications(cx)).await?;
             }
             if command == "main-window-id" {
                 return self.ui.run(main_window_id).await?;

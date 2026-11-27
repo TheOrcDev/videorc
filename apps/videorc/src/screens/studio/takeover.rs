@@ -220,7 +220,7 @@ impl TakeoverSection {
                         .child(div().min_w_0().child(EMPTY))
                         .child(
                             Button::new("takeover-add-in-images")
-                                .variant(ButtonVariant::Link)
+                                .variant(ButtonVariant::Outline)
                                 .size(ButtonSize::Xs)
                                 .label(ADD_IN_IMAGES)
                                 .on_click(

@@ -1,4 +1,4 @@
-//! Avatar ⌘8 (plan 260 Phase 3, L3): the character on the stream, from
+//! Avatar ⌘7/⌘8 (plan 260 Phase 3, L3): the character on the stream, from
 //! `videorc_app_core::buddy`, drawn with `videorc-kit`. Words and layout
 //! match Electron's `tabs/avatar-tab.tsx`: a tab strip with Profile and
 //! Greetings; Profile leads with the status row, then My avatars.

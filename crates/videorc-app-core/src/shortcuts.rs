@@ -67,10 +67,10 @@ fn window_name(index: usize) -> &'static str {
 }
 
 /// `SHORTCUTS`: every in-app key, in the reference list's order.
-pub fn app_shortcuts() -> Vec<ShortcutEntry> {
+pub fn app_shortcuts(guests_shown: bool) -> Vec<ShortcutEntry> {
     use ShortcutGroup::*;
     // Navigation: one row per page with a key, in sidebar order.
-    let mut list: Vec<ShortcutEntry> = page_keys()
+    let mut list: Vec<ShortcutEntry> = page_keys(guests_shown)
         .into_iter()
         .map(|(page, key)| ShortcutEntry {
             id: format!("nav-{}", page.id()),
@@ -226,16 +226,16 @@ pub fn app_shortcuts() -> Vec<ShortcutEntry> {
 
 /// `shortcutAccelerator`: a row's (first) key.
 pub fn shortcut_accelerator(id: &str) -> Option<String> {
-    app_shortcuts()
+    app_shortcuts(true)
         .into_iter()
         .find(|entry| entry.id == id)
         .and_then(|entry| entry.accelerators.into_iter().next())
 }
 
 /// `shortcutsByGroup`: the rows by group, groups in first-seen order.
-pub fn shortcuts_by_group() -> Vec<(ShortcutGroup, Vec<ShortcutEntry>)> {
+pub fn shortcuts_by_group(guests_shown: bool) -> Vec<(ShortcutGroup, Vec<ShortcutEntry>)> {
     let mut groups: Vec<(ShortcutGroup, Vec<ShortcutEntry>)> = Vec::new();
-    for entry in app_shortcuts() {
+    for entry in app_shortcuts(guests_shown) {
         match groups.iter_mut().find(|(group, _)| *group == entry.group) {
             Some((_, rows)) => rows.push(entry),
             None => groups.push((entry.group, vec![entry])),
@@ -247,9 +247,13 @@ pub fn shortcuts_by_group() -> Vec<(ShortcutGroup, Vec<ShortcutEntry>)> {
 /// `appShortcutOwner`: Videorc's own key for this combination, if any (plan
 /// 174 I-17). A global binding takes the key from every app, Videorc too, so
 /// ⌘K or ⌘1 bound globally would stop opening Search or Studio.
-pub fn app_shortcut_owner(accelerator: &str, platform: Option<&str>) -> Option<ShortcutEntry> {
+pub fn app_shortcut_owner(
+    accelerator: &str,
+    platform: Option<&str>,
+    guests_shown: bool,
+) -> Option<ShortcutEntry> {
     let wanted = normalize_accelerator(Some(accelerator), platform)?;
-    app_shortcuts().into_iter().find(|entry| {
+    app_shortcuts(guests_shown).into_iter().find(|entry| {
         entry.accelerators.iter().any(|key| {
             normalize_accelerator(Some(key.as_str()), platform).as_deref() == Some(wanted.as_str())
         })
@@ -315,6 +319,7 @@ pub fn shortcut_recorder_step(
     input: &KeyInput,
     platform: Option<&str>,
     validate: impl Fn(&str) -> Option<String>,
+    guests_shown: bool,
 ) -> RecorderStep {
     let mac = platform == Some("darwin");
     match accelerator_from_key_input(input, platform) {
@@ -341,10 +346,17 @@ pub fn shortcut_recorder_step(
                 }
                 Ok(()) => {}
             }
-            if let Some(owner) = app_shortcut_owner(&accelerator, platform) {
+            if let Some(owner) = app_shortcut_owner(&accelerator, platform, guests_shown) {
                 return RecorderStep::Reject(format!(
                     "{shown} is Videorc's shortcut for “{}”. Pick another.",
                     owner.label
+                ));
+            }
+            // A global key saved with Guests hidden must not take the
+            // ninth page key when talk shows become available again.
+            if app_shortcut_owner(&accelerator, platform, true).is_some() {
+                return RecorderStep::Reject(format!(
+                    "{shown} is reserved for page navigation. Pick another."
                 ));
             }
             match validate(accelerator.as_str()) {
@@ -395,6 +407,7 @@ pub struct ShortcutsView {
 /// What the page reads.
 #[derive(Debug, Clone, Copy)]
 pub struct ShortcutsInput<'a> {
+    pub guests_shown: bool,
     pub config: &'a crate::desktop::global_shortcuts::GlobalShortcutsConfig,
     pub platform: Option<&'a str>,
     /// `runtimeInfo.globalShortcutsUnavailable`.
@@ -449,7 +462,7 @@ pub fn shortcuts_view(input: ShortcutsInput<'_>) -> ShortcutsView {
                 scene_row
             })
             .collect();
-    let app_groups: ShortcutGroupRows = shortcuts_by_group()
+    let app_groups: ShortcutGroupRows = shortcuts_by_group(input.guests_shown)
         .into_iter()
         .map(|(group, rows)| {
             // Raw accelerators: the page's key chips parse them, so a
@@ -482,6 +495,63 @@ mod tests {
     const WIN: Option<&str> = Some("win32");
 
     #[test]
+    fn visible_page_shortcuts_reserve_the_ninth_global_key_while_hidden() {
+        for (platform, input) in [
+            (MAC, press("Digit9", true, false, false, false)),
+            (WIN, press("Digit9", false, true, false, false)),
+        ] {
+            let RecorderStep::Reject(hidden) =
+                shortcut_recorder_step(&input, platform, |_| None, false)
+            else {
+                panic!("hidden ninth page key must stay reserved")
+            };
+            assert!(hidden.contains("reserved for page navigation"));
+            let RecorderStep::Reject(shown) =
+                shortcut_recorder_step(&input, platform, |_| None, true)
+            else {
+                panic!("shown ninth key belongs to Sidekick")
+            };
+            assert!(shown.contains("Sidekick"));
+        }
+    }
+
+    #[test]
+    fn visible_page_shortcut_hints_and_recorder_owners_follow_availability() {
+        for shown in [false, true, false] {
+            let entries = app_shortcuts(shown);
+            assert_eq!(entries.iter().any(|row| row.id == "nav-guests"), shown);
+            for (page, key) in page_keys(shown) {
+                let row = entries
+                    .iter()
+                    .find(|row| row.id == format!("nav-{}", page.id()))
+                    .unwrap();
+                assert_eq!(row.accelerators, [key.accelerator()]);
+            }
+            assert_eq!(
+                app_shortcut_owner("CmdOrCtrl+7", MAC, shown).unwrap().label,
+                if shown { "Guests" } else { "Avatar" }
+            );
+            assert_eq!(
+                app_shortcut_owner("CmdOrCtrl+8", MAC, shown).unwrap().label,
+                if shown { "Avatar" } else { "Sidekick" }
+            );
+            let view = shortcuts_view(ShortcutsInput {
+                guests_shown: shown,
+                config: &Default::default(),
+                platform: MAC,
+                unavailable: None,
+                system_audio_available: false,
+                scenes: &[],
+                registered: &Default::default(),
+            });
+            let nav = &view.app_groups[0].1;
+            assert!(nav.iter().any(|(label, keys)| label == "Avatar"
+                && keys == &[format!("CmdOrCtrl+{}", if shown { 8 } else { 7 })]));
+            assert_eq!(nav.iter().any(|(label, _)| label == "Guests"), shown);
+        }
+    }
+
+    #[test]
     fn a_lone_modifier_from_gpui_is_held_never_refused() {
         // GPUI sends a lone modifier's press or release as its own keystroke
         // (`key` shift/control/alt/platform/function); every recorder maps it
@@ -498,7 +568,7 @@ mod tests {
                     alt: held && key == "alt",
                     shift: held && key == "shift",
                 };
-                let step = shortcut_recorder_step(&input, MAC, |_| None);
+                let step = shortcut_recorder_step(&input, MAC, |_| None, true);
                 assert!(
                     matches!(step, RecorderStep::Held(_)),
                     "{key} held={held}: {step:?}"
@@ -524,7 +594,7 @@ mod tests {
 
     #[test]
     fn the_table_starts_with_the_page_keys_and_groups_in_order() {
-        let list = app_shortcuts();
+        let list = app_shortcuts(true);
         assert_eq!(list[0].id, "nav-studio");
         assert_eq!(list[0].accelerators, ["CmdOrCtrl+1"]);
         assert_eq!(list[0].label, "Studio");
@@ -537,7 +607,7 @@ mod tests {
             Some("Space")
         );
         assert_eq!(shortcut_accelerator("nope"), None);
-        let groups: Vec<&str> = shortcuts_by_group()
+        let groups: Vec<&str> = shortcuts_by_group(true)
             .iter()
             .map(|(group, _)| group.label())
             .collect();
@@ -551,7 +621,7 @@ mod tests {
                 "Appearance"
             ]
         );
-        let windows = app_shortcuts()
+        let windows = app_shortcuts(true)
             .into_iter()
             .find(|entry| entry.id == "comments-window-show")
             .unwrap();
@@ -560,7 +630,7 @@ mod tests {
 
     #[test]
     fn the_recorder_commits_or_refuses_in_words() {
-        let step = |input: KeyInput, platform| shortcut_recorder_step(&input, platform, free);
+        let step = |input: KeyInput, platform| shortcut_recorder_step(&input, platform, free, true);
         assert_eq!(
             step(press("KeyM", true, false, false, true), MAC),
             RecorderStep::Commit("Cmd+Shift+M".into())
@@ -599,9 +669,12 @@ mod tests {
             step(press("ShiftLeft", false, false, false, true), MAC),
             RecorderStep::Held(vec![Modifier::Shift])
         );
-        let taken = shortcut_recorder_step(&press("KeyM", true, false, true, false), MAC, |_| {
-            Some("Already used by Hide screen.".into())
-        });
+        let taken = shortcut_recorder_step(
+            &press("KeyM", true, false, true, false),
+            MAC,
+            |_| Some("Already used by Hide screen.".into()),
+            true,
+        );
         assert_eq!(
             taken,
             RecorderStep::Reject("Already used by Hide screen.".into())
@@ -637,7 +710,7 @@ mod tests {
         let table = include_str!("../../../apps/desktop/src/renderer/src/lib/shortcuts.ts");
         let recorder =
             include_str!("../../../apps/desktop/src/renderer/src/lib/shortcut-recorder.ts");
-        for entry in app_shortcuts()
+        for entry in app_shortcuts(true)
             .iter()
             .filter(|entry| !entry.id.starts_with("nav-"))
         {
@@ -665,7 +738,7 @@ mod tests {
         let rows = table.matches("    id: '").count() + table.matches("  { id: '").count();
         assert_eq!(
             rows,
-            app_shortcuts()
+            app_shortcuts(true)
                 .iter()
                 .filter(|entry| !entry.id.starts_with("nav-"))
                 .count(),
@@ -699,6 +772,7 @@ mod tests {
         ];
         let registered = BTreeMap::from([("record-toggle".to_string(), false)]);
         let view = shortcuts_view(ShortcutsInput {
+            guests_shown: true,
             config: &config,
             platform: MAC,
             unavailable: None,
@@ -730,6 +804,7 @@ mod tests {
         );
 
         let wayland = shortcuts_view(ShortcutsInput {
+            guests_shown: true,
             config: &config,
             platform: Some("linux"),
             unavailable: Some("No key grab here."),

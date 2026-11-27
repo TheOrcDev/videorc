@@ -14,7 +14,13 @@ import { homedir, tmpdir } from 'node:os'
 import { connect as netConnect, createServer as createNetServer } from 'node:net'
 import { join, resolve } from 'node:path'
 
-import { launchDevApp, prebuildDevBackend, repoRoot, smokeAppEnv } from './lib/app-launcher.mjs'
+import {
+  launchDevApp,
+  prebuildDevBackend,
+  repoRoot,
+  smokeAppEnv,
+  smokeAppIsGpui
+} from './lib/app-launcher.mjs'
 import { parsePtsTimes } from './lib/cloud-solo-gates.mjs'
 import {
   evaluateCloudTalkShowReport,
@@ -97,8 +103,9 @@ const pythonPath = process.env.VIDEORC_SMOKE_PYTHON_PATH ?? 'python3'
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-cloud-talk-show-${Date.now()}`)
 )
+const gpuiApp = smokeAppIsGpui()
 const stateRoot = join(outputDirectory, 'app-state')
-const appDataDir = join(stateRoot, 'app-data')
+const appDataDir = join(stateRoot, gpuiApp ? 'user-data' : 'app-data')
 const userDataDir = join(stateRoot, 'user-data')
 const nodeRoot = join(outputDirectory, 'node')
 const mediaDir = join(outputDirectory, 'media')
@@ -137,9 +144,12 @@ const PEOPLE = {
 // the backend holds the seat.
 const hostMode =
   process.env.VIDEORC_CLOUD_TALK_HOST ??
-  (process.env.VIDEORC_ROOM_HOST === 'backend' ? 'backend' : 'renderer')
+  (gpuiApp || process.env.VIDEORC_ROOM_HOST === 'backend' ? 'backend' : 'renderer')
 if (hostMode !== 'renderer' && hostMode !== 'backend') {
   throw new Error(`VIDEORC_CLOUD_TALK_HOST is renderer or backend, not ${hostMode}`)
+}
+if (gpuiApp && hostMode !== 'backend') {
+  throw new Error('The GPUI talk-show smoke requires the backend host seat.')
 }
 const backendHosts = hostMode === 'backend'
 /** The synthetic microphone (`CAPTION_CONTRACT_TEST_DEVICE_ID`), the DEV catalog's in native microphone mode. */
@@ -196,7 +206,6 @@ let agent = null
 let fakeS3 = null
 let s3Dir = null
 let s3Credentials = null
-let livekit = null
 let runnerLogPath = null
 let exitCode = 1
 
@@ -285,7 +294,7 @@ try {
   }
 
   // 4. LiveKit, loopback only, with this run's key pair.
-  livekit = startChild('livekit-server', livekitPath, [
+  startChild('livekit-server', livekitPath, [
     '--dev',
     '--bind',
     '127.0.0.1',
@@ -487,6 +496,7 @@ try {
   backend = launch.backend
   collected = launch.collected
   await seedHostDevices(launch.smoke)
+  await checkSeatHolder('before-open')
   await waitForCloudStatus(
     backend,
     (status) => status.entitled === true && status.settings?.enabled === true,
@@ -636,9 +646,6 @@ try {
   })
   const hostIdentity = `host:${showId}`
   const identityOf = { host: hostIdentity, ada: guests.ada.guestId, bo: guests.bo.guestId }
-  const lumaOf = Object.fromEntries(
-    Object.entries(identityOf).map(([key, identity]) => [identity, media[key].luma])
-  )
   const tonesByKey = {
     host: PEOPLE.host.tone,
     ada: PEOPLE.ada.tone,
@@ -1452,6 +1459,64 @@ async function launchApp(env, attempt) {
  * or resumes (`roomFixtureDevicesSource`).
  */
 async function seedHostDevices(smoke) {
+  if (gpuiApp) {
+    const snapshot = await request(backend, 15_000, 'ui.settings.get', {
+      keys: ['videorc.settings']
+    })
+    const rawSettings = snapshot.entries?.['videorc.settings']
+    const settings = typeof rawSettings === 'string' ? JSON.parse(rawSettings) : rawSettings
+    await request(backend, 15_000, 'ui.settings.set', {
+      put: { 'videorc.settings': JSON.stringify({ ...settings, keepMicrophoneWarm: false }) }
+    })
+    await requestSmokeCommand(
+      smoke,
+      'studio-capture-configure',
+      {
+        config: {
+          sources: {
+            cameraId: 'parity-camera',
+            cameraOff: false,
+            microphoneId: SYNTHETIC_MICROPHONE_ID,
+            microphoneOff: false
+          },
+          audio: {
+            microphoneGainDb: 0,
+            microphoneNoiseSuppression: 'off',
+            microphoneSyncOffsetMs: 0,
+            microphoneMuted: false
+          }
+        }
+      },
+      { timeoutMs: 15_000 }
+    )
+    await waitFor(
+      async () => {
+        const snapshot = await request(backend, 15_000, 'ui.settings.get', {
+          keys: ['videorc.captureConfig', 'videorc.settings']
+        })
+        const rawSavedSettings = snapshot.entries?.['videorc.settings']
+        const savedSettings =
+          typeof rawSavedSettings === 'string' ? JSON.parse(rawSavedSettings) : rawSavedSettings
+        const raw = snapshot.entries?.['videorc.captureConfig']
+        const config = typeof raw === 'string' ? JSON.parse(raw) : raw
+        return (
+          savedSettings?.keepMicrophoneWarm === false &&
+          config?.sources?.cameraId === 'parity-camera' &&
+          config.sources.cameraOff === false &&
+          config.sources.microphoneId === SYNTHETIC_MICROPHONE_ID &&
+          config.sources.microphoneOff === false &&
+          config.audio?.microphoneMuted === false &&
+          config.audio.microphoneGainDb === 0 &&
+          config.audio.microphoneNoiseSuppression === 'off' &&
+          config.audio.microphoneSyncOffsetMs === 0
+        )
+      },
+      15_000,
+      'the Studio to save the room fixture sources and audio',
+      100
+    )
+    return
+  }
   const evalJs = async (code) =>
     (await requestSmokeCommand(smoke, 'eval-js', { code }, { timeoutMs: 15_000 }))?.result
   await waitFor(

@@ -476,10 +476,9 @@ pub(super) fn render_greetings(
         .description(ai_line)
         .child(
             Button::new("avatar-greetings-ai-pointer")
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .size(ButtonSize::Xs)
                 .label("Sidekick → Chat")
-                .child(icon(IconName::CaretRight, 12., hsla(t.foreground)))
                 .on_click(move |_, _, cx| {
                     open_chat.update(cx, |_, cx| {
                         cx.emit(super::OpenSidekickTab(SIDEKICK_CHAT_TAB))

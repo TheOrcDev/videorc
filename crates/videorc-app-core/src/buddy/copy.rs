@@ -1,7 +1,7 @@
 //! The Sidekick and Avatar pages' words, Electron's byte for byte. Since
 //! Electron's #1356 and #1372 the AI co-host is "Sidekick" (its page,
-//! `components/tabs/buddy-tab.tsx`, ⌘9) and the character on stream is "the
-//! avatar" (its own page, `components/tabs/avatar-tab.tsx`, ⌘8). Sources:
+//! `components/tabs/buddy-tab.tsx`, ⌘8/⌘9) and the character on stream is "the
+//! avatar" (its own page, `components/tabs/avatar-tab.tsx`, ⌘7/⌘8). Sources:
 //! `lib/buddy-tabs.ts`, `lib/avatar-tabs.ts`, `lib/buddy-tab-view.ts`,
 //! `lib/buddy-onboarding-copy.ts`, `lib/buddy-library-view.ts`,
 //! `lib/buddy-persona-view.ts`, `lib/buddy-create-gate.ts`,

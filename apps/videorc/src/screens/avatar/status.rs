@@ -88,7 +88,7 @@ pub fn render_status(
         .child(img(picture).size_full().object_fit(ObjectFit::Contain));
 
     let shortcut = PageId::Layouts
-        .key()
+        .key(true)
         .and_then(crate::app::menus::page_action)
         .map(|action| ShortcutKeys::for_action(action.as_ref()));
     let entity = cx.entity();

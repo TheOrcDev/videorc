@@ -212,12 +212,15 @@ impl SidekickPane {
                 .child(icon(IconName::UserSound, 16., muted))
                 .child(div().flex_1().min_w(px(0.)).child(pane_words::NUDGE))
                 .child(
-                    ghost("cohost-nudge-turn-on", pane_words::TURN_ON).on_click(
-                        cx.listener(|pane, _, window, cx| pane.nudge_turn_on(window, cx)),
-                    ),
+                    ghost("cohost-nudge-turn-on", pane_words::TURN_ON)
+                        .variant(ButtonVariant::Outline)
+                        .on_click(
+                            cx.listener(|pane, _, window, cx| pane.nudge_turn_on(window, cx)),
+                        ),
                 )
                 .child(
                     ghost("cohost-nudge-dismiss", pane_words::DISMISS)
+                        .variant(ButtonVariant::Outline)
                         .on_click(cx.listener(|pane, _, _, cx| pane.nudge_dismiss(cx))),
                 )
                 .into_any_element(),

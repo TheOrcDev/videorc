@@ -262,11 +262,10 @@ pub fn render_overview(
                 )
                 .child(
                     Button::new(format!("open-{tab}-for-{title}"))
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Xs)
                         .accessibility_label(words::power_button_label(label, title))
                         .label(label)
-                        .child(icon(IconName::CaretRight, 14., foreground))
                         .on_click(move |_, _, cx| {
                             let index = match tab_id.as_str() {
                                 "chat" => 1,

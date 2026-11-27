@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{AnyElement, prelude::*};
 use videorc_app_core::protocol::{Sound, SoundMode, SoundVoice};
-use videorc_app_core::soundboard::{self, press_stops};
+use videorc_app_core::soundboard::{self, pad_press_stops};
 use videorc_kit::sound_pad::{SoundPad, SoundPadGrid, SoundPadMode, SoundPadSize};
 
 /// Most pads in a row (`SoundPadBoard columns={6}`).
@@ -22,7 +22,7 @@ pub fn grid(
     for sound in sounds {
         let voice = voices.get(&sound.id);
         let playing = voice.is_some();
-        let stops = press_stops(sound.mode, playing);
+        let stops = pad_press_stops(sound.mode, playing);
         let label = soundboard::pad_label(&sound.name, stops);
         let mode = pad_mode(sound.mode);
         let progress = voice.and_then(|v| voice_progress(v, now_ms));
@@ -40,7 +40,8 @@ pub fn grid(
         .disabled(disabled)
         .accessibility_label(label)
         .on_trigger(move |_, cx| {
-            let _ = play_entity.update(cx, |section, cx| section.play(play_id.clone(), cx));
+            // The kit's Play once pad always triggers: a playing one stops here.
+            let _ = play_entity.update(cx, |section, cx| section.pad_click(play_id.clone(), cx));
         })
         .on_stop(move |_, cx| {
             let _ = stop_entity.update(cx, |section, cx| section.stop(stop_id.clone(), cx));

@@ -1646,7 +1646,7 @@ impl ScenesSection {
                 .child(div().min_w_0().child(reason))
                 .child(
                     Button::new("scenes-open-sources")
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Xs)
                         .label(copy::OPEN_SOURCES)
                         .on_click(

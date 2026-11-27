@@ -894,6 +894,30 @@ impl StreamManager {
             .update(cx, |chat, cx| chat.press_highlight(id, cx))
     }
 
+    pub fn smoke_push_snapshot(
+        &mut self,
+        fixture: &videorc_app_core::smoke::comments::SnapshotFixture,
+        cx: &mut Context<Self>,
+    ) {
+        self.facts.in_history = fixture.history;
+        self.history = fixture.history.then(|| {
+            (
+                fixture.mode["title"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                fixture.mode["startedAt"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        });
+        self.panes.pick(Pane::Chat);
+        self.chat
+            .update(cx, |chat, cx| chat.smoke_push_snapshot(fixture, cx));
+        cx.notify();
+    }
+
     /// `comments-window-reader-state`.
     pub fn smoke_reader_state(&self, cx: &App) -> Value {
         self.chat.read(cx).smoke_reader_state()

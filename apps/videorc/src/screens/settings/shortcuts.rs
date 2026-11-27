@@ -119,9 +119,14 @@ impl SettingsScreen {
             shift: key.modifiers.shift,
             key_up: false,
         };
-        let step = s::shortcut_recorder_step(&input, platform, |value| {
-            a::global_shortcut_taken_reason(&config, value, &action, platform, &scenes)
-        });
+        let step = s::shortcut_recorder_step(
+            &input,
+            platform,
+            |value| a::global_shortcut_taken_reason(&config, value, &action, platform, &scenes),
+            videorc_app_core::livestream::cloud_status::guests_visible(
+                self.studio.cloud_now().status.as_ref(),
+            ),
+        );
         let value = match step {
             s::RecorderStep::Commit(value) => value,
             s::RecorderStep::Clear => String::new(),
@@ -284,6 +289,9 @@ impl SettingsScreen {
         let config = self.shortcut_config();
         let scenes = self.shortcut_scenes();
         let model = s::shortcuts_view(s::ShortcutsInput {
+            guests_shown: videorc_app_core::livestream::cloud_status::guests_visible(
+                self.studio.cloud_now().status.as_ref(),
+            ),
             config: &config,
             platform: Some(crate::app::hotkeys::node_platform()),
             unavailable: registration.unavailable.as_deref(),

@@ -16,6 +16,7 @@ use videorc_kit::tokens::text;
 
 use super::super::now_iso;
 use super::SceneDialogs;
+use crate::screens::dialogs::after_open_change;
 
 /// `SCENE_EXTENSION_VERSION`.
 const SCENE_EXTENSION_VERSION: u64 = 1;
@@ -257,11 +258,13 @@ impl SceneDialogs {
         Dialog::new("scene-guests-dialog", &self.guests, copy::TITLE)
             .size(DialogSize::Sm)
             .description(copy::description(&guesting.scene.name))
-            .on_open_change(move |open, _, _, cx| {
+            .on_open_change(move |open, _, window, cx| {
                 if !open {
-                    let _ = page.update(cx, |page, cx| {
-                        page.guesting = None;
-                        cx.notify();
+                    after_open_change(&page, window, cx, |page, _, cx| {
+                        if !page.guests.is_open() {
+                            page.guesting = None;
+                            cx.notify();
+                        }
                     });
                 }
             })

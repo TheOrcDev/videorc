@@ -193,7 +193,7 @@ impl ScenePage {
                         line.child(
                             Button::new("scene-layout-open-sources")
                                 .label(copy::OPEN_SOURCES)
-                                .variant(ButtonVariant::Link)
+                                .variant(ButtonVariant::Outline)
                                 .size(ButtonSize::Xs)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.navigate(SceneNavigate::Page(PageId::Sources), cx)

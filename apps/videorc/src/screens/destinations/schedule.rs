@@ -14,6 +14,7 @@ use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
 
 use super::DestinationsPanel;
+use crate::screens::dialogs::after_open_change;
 
 pub(super) struct ScheduleEditor {
     pub provider: String,
@@ -216,7 +217,9 @@ impl DestinationsPanel {
                 move |open, _, window, cx| {
                     if !open {
                         // Escape / backdrop / X — same as Cancel.
-                        entity.update(cx, |this, cx| this.close_schedule(window, cx));
+                        after_open_change(&entity.downgrade(), window, cx, |this, window, cx| {
+                            this.close_schedule(window, cx)
+                        });
                     }
                 }
             })
