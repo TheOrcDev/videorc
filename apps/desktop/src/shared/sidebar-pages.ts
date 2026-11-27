@@ -130,49 +130,59 @@ export function assignPageKeys(
   layout: readonly SidebarZoneLayout[],
   fixedKeys: Readonly<Partial<Record<SidebarPageId, PageKey>>>
 ): PageKeyEntry[] {
-  const fixed = Object.values(fixedKeys)
-  const digits = DIGIT_RUN.filter((digit) => !fixed.includes(digit))
-  return layout
-    .flatMap((zone) => zone.pages)
-    .flatMap((page): PageKeyEntry[] => {
-      const key = fixedKeys[page] ?? digits.shift()
-      return key ? [{ key, page }] : []
-    })
-}
-
-/** Talk-show availability, shared by main and renderer. An open room stays controllable. */
-export function guestsVisible(status: unknown): boolean {
-  if (!status || typeof status !== 'object') return false
-  const allowance = 'allowance' in status ? status.allowance : null
-  const room = 'room' in status ? status.room : null
-  return Boolean(
-    (allowance &&
-      typeof allowance === 'object' &&
-      'enabled' in allowance &&
-      allowance.enabled === true &&
-      'talkShows' in allowance &&
-      allowance.talkShows === true) ||
-    (room &&
-      typeof room === 'object' &&
-      'phase' in room &&
-      typeof room.phase === 'string' &&
-      room.phase !== 'closed')
-  )
+  return pageKeys(true, layout, fixedKeys)
 }
 
 /** Assign digits only after filtering the visible rows. Fixed keys never move. */
-export function pageKeys(guestsShown: boolean): readonly PageKeyEntry[] {
-  return assignPageKeys(
-    SIDEBAR_LAYOUT.map((zone) => ({
-      ...zone,
-      pages: zone.pages.filter((page) => page !== 'guests' || guestsShown)
-    })),
-    PAGE_FIXED_KEYS
+export function pageKeys(
+  guestsShown: boolean,
+  layout: readonly SidebarZoneLayout[] = SIDEBAR_LAYOUT,
+  fixedKeys: Readonly<Partial<Record<SidebarPageId, PageKey>>> = PAGE_FIXED_KEYS
+): PageKeyEntry[] {
+  const fixed = Object.values(fixedKeys)
+  const digits = DIGIT_RUN.filter((digit) => !fixed.includes(digit))
+  const entries: PageKeyEntry[] = []
+  for (const { pages } of layout) {
+    for (const page of pages) {
+      if (!guestsShown && page === 'guests') continue
+      const key = fixedKeys[page] ?? digits.shift()
+      if (key) entries.push({ key, page })
+    }
+  }
+  return entries
+}
+
+interface SidebarCloudStatus {
+  allowance?: { enabled?: boolean; talkShows?: boolean } | null
+  room?: { phase: string } | null
+}
+
+/** Talk-show availability, shared by main and renderer. An open room stays controllable. */
+export function guestsVisible(status: SidebarCloudStatus | null | undefined): boolean {
+  return Boolean(
+    (status?.allowance?.enabled && status.allowance.talkShows) ||
+    (status?.room && status.room.phase !== 'closed')
   )
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object'
+}
+
+/** Main receives raw backend payloads; renderer CloudStatus is already validated. */
+export function guestsVisibleFromPayload(status: unknown): boolean {
+  if (!isRecord(status)) return false
+  const { allowance, room } = status
+  return guestsVisible({
+    allowance: isRecord(allowance)
+      ? { enabled: allowance.enabled === true, talkShows: allowance.talkShows === true }
+      : null,
+    room: isRecord(room) && typeof room.phase === 'string' ? { phase: room.phase } : null
+  })
+}
+
 /** All possible page keys, for the IPC schema; runtime consumers use pageKeys. */
-export const PAGE_KEYS: readonly PageKeyEntry[] = assignPageKeys(SIDEBAR_LAYOUT, PAGE_FIXED_KEYS)
+export const PAGE_KEYS: readonly PageKeyEntry[] = /* @__PURE__ */ pageKeys(true)
 
 /** The key of a page, if it has one. */
 export function pageKeyFor(page: string, guestsShown = true): PageKey | undefined {

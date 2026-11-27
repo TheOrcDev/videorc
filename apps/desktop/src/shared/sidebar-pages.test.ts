@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   guestsVisible,
+  guestsVisibleFromPayload,
   pageKeys,
   PAGE_FIXED_KEYS,
   PAGE_KEYS,
@@ -159,4 +160,30 @@ describe('visible page numbering (Q187)', () => {
     expect(guestsVisible({ allowance: { enabled: true, talkShows: true } })).toBe(true)
     expect(guestsVisible({ room: { phase: 'open' } })).toBe(true)
   })
+})
+
+it('validates raw main-process payloads before applying the shared visibility rule', () => {
+  for (const payload of [
+    undefined,
+    null,
+    7,
+    'open',
+    {},
+    { allowance: true },
+    { allowance: { enabled: 'true', talkShows: true } },
+    { allowance: { enabled: true, talkShows: 'true' } },
+    { room: {} },
+    { room: { phase: 1 } },
+    { room: { phase: 'closed' } }
+  ]) {
+    expect(guestsVisibleFromPayload(payload)).toBe(false)
+  }
+  for (const status of [
+    { allowance: { enabled: true, talkShows: true } },
+    { allowance: { enabled: false, talkShows: true } },
+    { room: { phase: 'open' } },
+    { room: { phase: 'closed' } }
+  ]) {
+    expect(guestsVisibleFromPayload(status)).toBe(guestsVisible(status))
+  }
 })

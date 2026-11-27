@@ -537,7 +537,7 @@ import {
 } from './live-activity'
 import { DisplaySleepGuard } from './display-sleep-guard'
 import { appMenuReleaseNotesUrl, type AppMenuWindowId } from '../shared/app-menu-items'
-import { guestsVisible, pageKeyForInput, type PageKey } from '../shared/sidebar-pages'
+import { guestsVisibleFromPayload, pageKeyForInput, type PageKey } from '../shared/sidebar-pages'
 import {
   DARK_GLASS_COATS,
   DARK_WINDOW_PALETTE,
@@ -16734,7 +16734,7 @@ function updateMainCaptureState(payload: RecordingStatus): void {
 
 /** Plan 249 S26: a `cloud.state` payload (or the `cloud.status` answer). */
 function observeCloudRoomActivity(payload: unknown): void {
-  const guestsShown = guestsVisible(payload)
+  const guestsShown = guestsVisibleFromPayload(payload)
   if (guestsShown !== sidebarGuestsShown) {
     sidebarGuestsShown = guestsShown
     installApplicationMenu()

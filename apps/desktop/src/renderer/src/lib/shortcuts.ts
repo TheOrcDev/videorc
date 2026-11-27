@@ -1,3 +1,6 @@
+/// <reference lib="es2024.collection" />
+// Map.groupBy is native in the shipping Electron 39 renderer (Chromium 142).
+
 // ST4 (Settings rework): the single source of truth for keyboard shortcuts.
 // Consumers: the Settings "Shortcuts" reference table, the app menu's mirror
 // (shared/app-menu-items), the shortcut recorder's refusals, and any surface
@@ -6,12 +9,7 @@
 // live in shared/sidebar-pages, and the Navigation rows are built from it. Plan 174 S1.2: bindings are Electron
 // accelerators, printed per platform by ShortcutKeys.
 
-import {
-  PAGE_KEYS,
-  pageKeys,
-  SIDEBAR_PAGE_LABELS,
-  pageKeyAccelerator
-} from '../../../shared/sidebar-pages'
+import { pageKeys, SIDEBAR_PAGE_LABELS, pageKeyAccelerator } from '../../../shared/sidebar-pages'
 import { WINDOW_NAMES } from '../../../shared/window-names'
 import { RECORD_SHORTCUT_LABEL } from './go-live-copy'
 
@@ -27,18 +25,7 @@ export interface ShortcutEntry {
   group: 'Navigation' | 'Studio' | 'Windows' | 'Stream Manager' | 'Appearance'
 }
 
-/** One row per page with a key; a page without one (Sidekick today) has no row. */
-const NAV_SHORTCUTS = PAGE_KEYS.map(({ key, page }) => ({
-  id: `nav-${page}` as const,
-  accelerators: [pageKeyAccelerator(key)] as const,
-  label: SIDEBAR_PAGE_LABELS[page],
-  group: 'Navigation' as const
-}))
-
-const SHORTCUT_LIST = [
-  // Navigation: the page keys, in sidebar order, from shared/sidebar-pages
-  // (the one home of the order and the key map, owner 2026-11-20).
-  ...NAV_SHORTCUTS,
+const ACTION_SHORTCUTS = [
   // ⌘K is "Search" everywhere it is named (plan 174 A-13, docs/ui-copy.md).
   { id: 'search', accelerators: ['CmdOrCtrl+K'], label: 'Search', group: 'Navigation' },
   // The list behind the bell (plan 250, D10), from anywhere in the window.
@@ -197,36 +184,30 @@ const SHORTCUT_LIST = [
   }
 ] as const satisfies readonly ShortcutEntry[]
 
-export const SHORTCUTS: readonly ShortcutEntry[] = SHORTCUT_LIST
+/** All-visible inventory for compatibility; runtime page rows use shortcutsFor. */
+export const SHORTCUTS: readonly ShortcutEntry[] = /* @__PURE__ */ shortcutsFor(true)
 
-export type ShortcutId = (typeof SHORTCUT_LIST)[number]['id']
+export type ShortcutId = (typeof ACTION_SHORTCUTS)[number]['id']
 
 /** A registered shortcut's (first) accelerator, for ShortcutKeys and aria-keyshortcuts. */
 export function shortcutAccelerator(id: ShortcutId): string {
   // Every id is a member of the list (the type says so), so the find holds.
-  return SHORTCUT_LIST.find((entry) => entry.id === id)!.accelerators[0]
+  return ACTION_SHORTCUTS.find((entry) => entry.id === id)!.accelerators[0]
 }
 
 export function shortcutsFor(guestsShown: boolean): readonly ShortcutEntry[] {
-  return [
-    ...pageKeys(guestsShown).map(({ key, page }) => ({
+  return pageKeys(guestsShown)
+    .map<ShortcutEntry>(({ key, page }) => ({
       id: `nav-${page}`,
-      accelerators: [pageKeyAccelerator(key)] as const,
+      accelerators: [pageKeyAccelerator(key)],
       label: SIDEBAR_PAGE_LABELS[page],
-      group: 'Navigation' as const
-    })),
-    ...SHORTCUTS.filter((entry) => !entry.id.startsWith('nav-'))
-  ]
+      group: 'Navigation'
+    }))
+    .concat(ACTION_SHORTCUTS)
 }
 
 export function shortcutsByGroup(guestsShown = true): Map<ShortcutEntry['group'], ShortcutEntry[]> {
-  const groups = new Map<ShortcutEntry['group'], ShortcutEntry[]>()
-  for (const entry of shortcutsFor(guestsShown)) {
-    const bucket = groups.get(entry.group) ?? []
-    bucket.push(entry)
-    groups.set(entry.group, bucket)
-  }
-  return groups
+  return Map.groupBy(shortcutsFor(guestsShown), (entry) => entry.group)
 }
 
 /** A workspace page's shortcut, by the "nav-<tab>" convention, or undefined. */

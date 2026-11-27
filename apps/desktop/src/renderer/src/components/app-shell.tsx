@@ -274,8 +274,6 @@ function AppShellContent(): ReactElement {
   } = useStudioShell()
   const { recording } = useStudioRecordingState()
   const guestsShown = guestsVisible(useStudioCloud().cloudStatus)
-  const guestsShownRef = useRef(guestsShown)
-  guestsShownRef.current = guestsShown
   const [active, setActiveTab] = useState<WorkspaceTab>('studio')
   // The page's first open suspends; render it once its chunk is in, before
   // the shell's steady updates can starve React's retry (retest 152, 0004).
@@ -547,12 +545,12 @@ function AppShellContent(): ReactElement {
       const tab = navigationShortcutTab(
         key,
         setupOpenRef.current || isModalOpen(document),
-        guestsShownRef.current
+        guestsShown
       )
       if (tab) setActive(tab)
     })
     return off
-  }, [setActive])
+  }, [setActive, guestsShown])
 
   // The window is named after its page, and after keyboard navigation the
   // page title takes the focus, so the new page is announced and the next
