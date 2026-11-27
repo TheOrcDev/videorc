@@ -1021,6 +1021,29 @@ impl SmokeCommandHandler for StudioSmoke {
     }
 }
 
+/// Only the saved-event selection needed by the smoke, never ingest keys,
+/// account credentials or arbitrary capture settings.
+fn scheduled_selection_json(capture: &Value) -> Value {
+    let targets: Vec<_> = capture["streaming"]["targets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|target| {
+            json!({ "id": target["id"], "enabled": target["enabled"],
+            "scheduledEventId": target["scheduledEventId"] })
+        })
+        .collect();
+    json!({ "streamEnabled": capture["streamEnabled"], "streaming": {
+        "enabled": capture["streaming"]["enabled"], "targets": targets } })
+}
+
+/// The renderer hook's fields, read from the same owner as Upcoming.
+fn scheduled_state_json(state: &crate::studio::scheduled::ScheduledState) -> Value {
+    json!({ "events": state.events, "capabilities": state.capabilities,
+        "busy": state.pending, "loading": !state.loaded, "refreshing": state.refreshing,
+        "error": state.error })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1141,27 +1164,4 @@ mod tests {
         assert!(session_active(SessionPhase::Recording));
         assert!(session_active(SessionPhase::Stopping));
     }
-}
-
-/// Only the saved-event selection needed by the smoke, never ingest keys,
-/// account credentials or arbitrary capture settings.
-fn scheduled_selection_json(capture: &Value) -> Value {
-    let targets: Vec<_> = capture["streaming"]["targets"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|target| {
-            json!({ "id": target["id"], "enabled": target["enabled"],
-            "scheduledEventId": target["scheduledEventId"] })
-        })
-        .collect();
-    json!({ "streamEnabled": capture["streamEnabled"], "streaming": {
-        "enabled": capture["streaming"]["enabled"], "targets": targets } })
-}
-
-/// The renderer hook's fields, read from the same owner as Upcoming.
-fn scheduled_state_json(state: &crate::studio::scheduled::ScheduledState) -> Value {
-    json!({ "events": state.events, "capabilities": state.capabilities,
-        "busy": state.pending, "loading": !state.loaded, "refreshing": state.refreshing,
-        "error": state.error })
 }
