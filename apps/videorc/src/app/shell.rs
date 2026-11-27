@@ -617,6 +617,10 @@ impl Shell {
         window.activate_window();
     }
 
+    pub(crate) fn smoke_notifications(&self, cx: &gpui::App) -> serde_json::Value {
+        self.notices.read(cx).smoke_snapshot(cx)
+    }
+
     /// The smokes' `open-tab` ([`crate::smoke::OpenTab`], the screen
     /// gallery): `page` as its sidebar row opens it, on `sub_tab`, with
     /// `dialog` over it.

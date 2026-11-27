@@ -74,6 +74,8 @@ pub trait ShellSmoke: 'static {
     fn appearance(&self, request: UiAppearanceRequest, cx: &mut App) -> Result<Value, String>;
     /// `ui-toast`: a toast in the main window through the app's toast path.
     fn toast(&self, request: &UiToastRequest, cx: &mut App) -> Result<Value, String>;
+    /// Current bell entries and actually mounted toasts; never marks them read.
+    fn notifications(&self, cx: &mut App) -> Result<Value, String>;
     /// `open-tab`: the main window shows `page`, as its sidebar row would,
     /// on `open`'s sub-tab with its dialog over it.
     fn open_page(&self, page: PageId, open: OpenTab, cx: &mut App) -> Result<(), String>;
@@ -179,6 +181,7 @@ pub struct ShellCommands {
 impl SmokeCommandHandler for ShellCommands {
     fn handles(&self, command: &str) -> bool {
         command == "drain-native-preview-host-commands"
+            || command == "notifications-state"
             || command == "open-tab"
             || command == "main-window-id"
             || command == "studio-reveal-vertical-stream"
@@ -224,6 +227,12 @@ impl SmokeCommandHandler for ShellCommands {
                     .ui
                     .run(move |cx| shell(cx)?.preview(&command, cx))
                     .await?;
+            }
+            if command == "notifications-state" {
+                if !params.is_empty() {
+                    return Err("notifications-state takes no parameters.".into());
+                }
+                return self.ui.run(|cx| shell(cx)?.notifications(cx)).await?;
             }
             if command == "main-window-id" {
                 return self.ui.run(main_window_id).await?;

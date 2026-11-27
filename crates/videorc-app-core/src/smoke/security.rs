@@ -170,6 +170,7 @@ pub const ELECTRON_SMOKE_COMMAND_NAMES: &[&str] = &[
 /// Electron's smokes reach through the renderer (`eval-js`, the remote
 /// surface) instead.
 pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
+    "notifications-state",
     // S3.0j: the account: what it did (names, plan, the sign-in that
     // waits, each link's outcome; never a code, a verifier or an email),
     // the sign-in as the menu starts it (a smoke run opens no browser; the
@@ -267,6 +268,7 @@ pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     // (`state`, `save`, `apply`, `remove`, `layout`, `background`,
     // `configure`).
     "studio-capture-configure",
+    "studio-go-live",
     "studio-scene-apply",
     "studio-scene-background",
     "studio-scene-delete",

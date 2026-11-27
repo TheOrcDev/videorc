@@ -134,6 +134,12 @@ impl ShellSmoke for ShellWindows {
         Ok(json!({ "shown": true, "id": id }))
     }
 
+    fn notifications(&self, cx: &mut App) -> Result<Value, String> {
+        self.main
+            .update(cx, |shell, _, cx| shell.smoke_notifications(cx))
+            .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())
+    }
+
     fn open_page(&self, page: PageId, open: super::OpenTab, cx: &mut App) -> Result<(), String> {
         self.main
             .update(cx, |shell, window, cx| {
