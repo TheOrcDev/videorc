@@ -1590,12 +1590,12 @@ export function SceneStage({
               Elsewhere the plain preview toggle stays. */}
           {onPopOut && onShowLive ? (
             liveDocked ? (
-              <Button data-videorc-stage-pop-out variant="ghost" onClick={onPopOut}>
+              <Button data-videorc-stage-pop-out variant="outline" onClick={onPopOut}>
                 <ExternalLinkIcon data-icon="inline-start" />
                 Pop out
               </Button>
             ) : (
-              <Button data-videorc-stage-show-live variant="ghost" onClick={onShowLive}>
+              <Button data-videorc-stage-show-live variant="outline" onClick={onShowLive}>
                 <PreviewIcon data-icon="inline-start" />
                 Show preview here
               </Button>

@@ -24,7 +24,7 @@ export function CameraLookControls({
       action={
         <Button
           size="xs"
-          variant="ghost"
+          variant="outline"
           aria-label="Reset camera look"
           disabled={!look || Boolean(disabledReason)}
           onClick={() => onChange(NEUTRAL_CAMERA_LOOK)}

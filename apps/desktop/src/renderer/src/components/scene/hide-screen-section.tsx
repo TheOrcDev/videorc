@@ -146,7 +146,7 @@ function PasswordManagerList(): ReactElement {
         <AddPasswordManagerButton entries={entries} />
         {builtInPasswordManagersRemoved(privacy) ? (
           <Button
-            variant="ghost"
+            variant="outline"
             onClick={() => updatePrivacySettings(restoreBuiltInPasswordManagers)}
           >
             Restore built-in apps

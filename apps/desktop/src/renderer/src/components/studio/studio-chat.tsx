@@ -113,7 +113,7 @@ export function StudioChatSection(): ReactElement {
               <Button
                 data-testid="studio-chat-open-stream-manager"
                 type="button"
-                variant="ghost"
+                variant="outline"
                 onClick={() => void openCommentsWindow()}
               >
                 Open {WINDOW_NAMES.streamManager}

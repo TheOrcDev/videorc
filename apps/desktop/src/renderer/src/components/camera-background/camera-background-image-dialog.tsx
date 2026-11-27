@@ -62,7 +62,7 @@ export function CameraBackgroundImageDialog({
         <DialogFooter>
           <Button
             type="button"
-            variant="ghost"
+            variant="outline"
             onClick={() => {
               onOpenChange(false)
               openWorkspaceTab('assets')
