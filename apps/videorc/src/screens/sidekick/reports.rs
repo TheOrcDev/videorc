@@ -281,7 +281,7 @@ pub fn render_reports(
         let open = entity.clone();
         section = section.action(
             Button::new("report-markers")
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .icon(IconName::BookmarkSimple)
                 .label(rv::MARKERS)
                 .on_click(move |_, window, cx| {
@@ -871,7 +871,7 @@ fn report_list<T>(
         block = block.child(
             div().flex().child(
                 Button::new(format!("report-toggle-{id}"))
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .label(words)
                     .on_click(move |_, _, cx| {

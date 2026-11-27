@@ -1945,7 +1945,7 @@ fn render_person_card(
     } else {
         actions = actions.child(
             Button::new("same-person")
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .size(ButtonSize::Xs)
                 .label(SAME_PERSON_AS)
                 .disabled(!known || busy)

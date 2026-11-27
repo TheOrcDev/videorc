@@ -784,7 +784,7 @@ fn line_editor(
             .child(div().flex_1())
             .child(
                 Button::new("avatar-greeting-add-variant")
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .label("Add variant")
                     .child(ShortcutKeys::accelerator(ADD_VARIANT_ACCELERATOR))

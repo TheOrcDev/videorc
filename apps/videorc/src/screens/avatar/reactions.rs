@@ -280,7 +280,7 @@ pub(super) fn render_reactions(
             };
             let play = entity.clone();
             let try_it = Button::new(SharedString::from(format!("avatar-reaction-try-{key}")))
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .size(ButtonSize::Xs)
                 .icon(IconName::Play)
                 .label("Try")

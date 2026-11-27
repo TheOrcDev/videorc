@@ -1120,7 +1120,7 @@ fn preview_column(
         )
         .child(
             Button::new("avatar-test-open")
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .size(ButtonSize::Xs)
                 .icon(IconName::Play)
                 .label("Test")
@@ -1205,7 +1205,7 @@ fn still_panel(
                     let reason = gate.as_ref().map(|gate| gate.reason.clone());
                     let mut button =
                         Button::new(SharedString::from(format!("avatar-look-redo-{state}")))
-                            .variant(ButtonVariant::Ghost)
+                            .variant(ButtonVariant::Outline)
                             .size(ButtonSize::Xs)
                             .label(redo_label("Redo"))
                             .disabled(busy || gate.is_some())
@@ -1310,7 +1310,7 @@ fn still_panel(
                                 )
                                 .child(
                                     Button::new("avatar-look-discard")
-                                        .variant(ButtonVariant::Ghost)
+                                        .variant(ButtonVariant::Outline)
                                         .label("Delete…")
                                         .disabled(busy)
                                         .on_click(move |_, _, cx| {
@@ -1501,7 +1501,7 @@ fn alive_panel(screen: &AvatarScreen, t: &Theme, cx: &mut Context<AvatarScreen>)
                 .child(div().flex_1())
                 .child(
                     Button::new("avatar-pack-remove")
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .icon(IconName::Trash)
                         .label("Remove")
                         .disabled(worn_row.as_ref().is_none_or(PackRow::shipped))

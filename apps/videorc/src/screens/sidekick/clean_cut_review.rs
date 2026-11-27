@@ -2411,7 +2411,7 @@ fn footer(
     {
         row = row.child(
             Button::new("clean-cut-review-open-library")
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .label(OPEN_IN_LIBRARY)
                 .on_click(
                     cx.listener(move |_, _, _, cx| cx.emit(OpenLibrarySession(output.clone()))),
@@ -2421,7 +2421,7 @@ fn footer(
     if changes > 0 {
         row = row.child(
             Button::new("clean-cut-review-discard")
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .label(DISCARD)
                 .disabled(review.saving)
                 .on_click(cx.listener(|screen, _, _, cx| screen.review_edit(Draft::default(), cx))),

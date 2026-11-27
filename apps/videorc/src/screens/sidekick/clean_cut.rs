@@ -630,7 +630,7 @@ fn recording_list(
         list = list.child(
             div().child(
                 Button::new("clean-cut-show-all")
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .label(view::show_all_label(state.show_all, matches.len()))
                     .on_click(move |_, _, cx| {
@@ -795,7 +795,7 @@ fn selected_recording(
             let job_id = job.id.clone();
             actions = actions.child(
                 Button::new("clean-cut-failed-review")
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .label(REVIEW)
                     .on_click(move |_, window, cx| {
@@ -895,7 +895,7 @@ fn status_row(
         Some(job) if !matches!(status.kind, StatusKind::None | StatusKind::Cancelled) => {
             if status.busy {
                 if status.can_review {
-                    row = row.child(review("clean-cut-review", ButtonVariant::Ghost, job));
+                    row = row.child(review("clean-cut-review", ButtonVariant::Outline, job));
                 }
                 let entity = entity.clone();
                 let job_id = job.id.clone();
@@ -931,7 +931,7 @@ fn status_row(
                         )
                         .child(
                             Button::new("clean-cut-open-library")
-                                .variant(ButtonVariant::Ghost)
+                                .variant(ButtonVariant::Outline)
                                 .icon(IconName::FilmReel)
                                 .label(OPEN_IN_LIBRARY)
                                 .on_click(move |_, _, cx| {

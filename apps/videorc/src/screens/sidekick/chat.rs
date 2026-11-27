@@ -444,7 +444,7 @@ pub fn render_chat(
             .end(
                 InputGroupAddon::end().child(
                     Button::new("add-chat-rule")
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Xs)
                         .label("Add")
                         .child(ShortcutKeys::accelerator("Enter"))
