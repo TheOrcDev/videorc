@@ -21,6 +21,7 @@ import {
   smokeAppEnv,
   smokeAppIsGpui
 } from './lib/app-launcher.mjs'
+import { requireAppRunLock } from './lib/app-run-lock.mjs'
 import { parsePtsTimes } from './lib/cloud-solo-gates.mjs'
 import {
   evaluateCloudTalkShowReport,
@@ -224,6 +225,11 @@ try {
   const livekitClientEsm = resolveLivekitClientEsm()
   log(`runner checkout ${cloudDir}; Chrome ${chrome}`)
   await prebuildBackendOrThrow(process.env)
+  // Built; from here the run drives the app, and only one such run at a time.
+  await requireAppRunLock({
+    lane: 'cloud-talk-show',
+    onWait: (owner) => log(`waiting for the app-run lock held by ${owner?.lane ?? 'another run'}`)
+  })
 
   // 2. Ports: every listener per run, but LiveKit's RTC ports are fixed.
   const ports = {
