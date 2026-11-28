@@ -3650,6 +3650,12 @@ impl RecordingStartBarrier {
         let deadline = Instant::now() + Duration::from_secs(4);
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let index = state.stores.len();
+        tracing::debug!(
+            index,
+            participants = self.participants,
+            member = ?self.member_for(store.as_ref()).map(|member| member.role),
+            "ISO start barrier arrival"
+        );
         state.stores.push(store);
         if state.stores.len() == self.participants {
             state.frames = state
@@ -3668,6 +3674,10 @@ impl RecordingStartBarrier {
                     }
                 })
                 .collect();
+            tracing::debug!(
+                frames = ?state.frames.iter().map(Option::is_some).collect::<Vec<_>>(),
+                "ISO start barrier full"
+            );
             anyhow::ensure!(
                 state.frames.iter().all(Option::is_some),
                 "A separate recording encoder has no initial compositor frame"
@@ -3775,8 +3785,10 @@ pub fn start_synthetic_recording_bridge(
         effective_encoder_bridge_output_role(diagnostics_context),
     );
     let stop = Arc::new(AtomicBool::new(false));
+    // #1631: Media Foundation legs share the ISO stop boundary too, so every
+    // file of a take ends on the Combined file's last frame.
     let graceful_stop_at = (start_barrier.is_some()
-        && video_output.uses_video_toolbox()
+        && video_output.uses_encoded_h264()
         && effective_encoder_bridge_output_role(diagnostics_context)
             != EncoderBridgeOutputRole::Stream)
         .then(|| {
@@ -4167,7 +4179,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let direct_d3d11_enabled = false;
     let mut output_queue_policy = encoder_bridge_output_queue_policy(diagnostics_context)
         .for_arrival_stamped_raw_input(video_output);
-    if video_output.uses_video_toolbox()
+    if video_output.uses_encoded_h264()
         && let Some(barrier) = start_barrier.as_ref()
     {
         output_queue_policy =
@@ -4282,6 +4294,28 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     } else {
         None
     };
+    // #1631: a Windows named pipe's writer waits here until FFmpeg connects,
+    // and FFmpeg opens its inputs one at a time, probing each. A split stream
+    // leg's pipe is opened only once the recording input carries data, which
+    // the ISO start barrier holds back until every member has arrived, so a
+    // member waiting on its pipe first deadlocks the take. Windows members
+    // join the barrier before they open the pipe; Unix keeps a bootstrap
+    // reader on the FIFO instead.
+    #[cfg(target_os = "windows")]
+    let mut barrier_start = match start_barrier.as_ref() {
+        Some(barrier) => match barrier.prepared(frame_store.clone(), &video_epoch, &stop) {
+            Ok(start) => Some(start),
+            Err(error) => {
+                let error =
+                    record_encoder_bridge_terminal_failure(&terminal_failure, error.to_string());
+                signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error));
+                return;
+            }
+        },
+        None => None,
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut barrier_start: Option<(Instant, Option<FedCompositorFrame>)> = None;
     let fifo = match open_recording_fifo_writer(&fifo_path, &stop, true) {
         Ok(fifo) => {
             startup_trace.stamp(RecordingStartPhase::BridgeFifoOpen);
@@ -4637,7 +4671,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             thread::sleep(Duration::from_millis(delay.min(1000)));
         }
     }
-    let (clock_start, mut initial_frame) = if let Some(barrier) = start_barrier.as_ref() {
+    let (clock_start, mut initial_frame) = if let Some(start) = barrier_start.take() {
+        start
+    } else if let Some(barrier) = start_barrier.as_ref() {
         match barrier.prepared(frame_store.clone(), &video_epoch, &stop) {
             Ok(start) => start,
             Err(error) => {
@@ -5994,6 +6030,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                                     .encode_frame(&frame.frame.bytes, sequence.saturating_sub(1))
                                 {
                                     Ok(frames) => {
+                                        // #1631: the ISO Stop drain counts
+                                        // ticks the encoder accepted, as
+                                        // VideoToolbox's `Submitted` does.
+                                        last_submitted_video_end = sequence;
                                         let encode_elapsed = encode_started_at.elapsed();
                                         video_toolbox_submit_times_ms
                                             .push(encode_elapsed.as_secs_f64() * 1000.0);

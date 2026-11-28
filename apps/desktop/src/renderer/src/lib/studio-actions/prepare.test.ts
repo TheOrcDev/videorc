@@ -414,11 +414,12 @@ describe('get_settings and update_settings (plan 209 S14, D16)', () => {
     expect(
       await executeAgentIntent(
         call('update_settings', { separateSourceRecordings: true }),
-        context({ settings: settingsAccess({ platform: 'win32' }) })
+        context({ settings: settingsAccess({ platform: 'linux' }) })
       )
     ).toEqual({
       ok: false,
-      message: 'Works on Mac only for now. On this computer every recording is the Combined file.'
+      message:
+        'Works on Mac and Windows only for now. On this computer every recording is the Combined file.'
     })
     expect(
       await executeAgentIntent(

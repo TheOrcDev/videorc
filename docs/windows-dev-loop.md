@@ -103,7 +103,9 @@ pnpm smoke:hide-screen:windows                 # or pnpm smoke:smart-scenes
 pnpm smoke:hide-screen:windows -- --media cpu  # force the CPU compositor bridge
 ```
 
-The Screen file is a named SKIP: separate source recordings are Mac only.
+Separate source recordings run only off the D3D11 media path (#1631), so the
+Screen file is judged under `--media cpu` with a camera present and is a named
+SKIP otherwise.
 Keep the display awake and unlocked. While it is off or the session is
 locked, Windows refuses Desktop Duplication to every process (`0x80070005`,
 FFmpeg's `ddagrab` included) and Windows Graphics Capture drops to a few

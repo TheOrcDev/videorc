@@ -52,7 +52,7 @@ describe('separate files encoder notice (plan 200 D4)', () => {
         'darwin'
       )
     ).toBe(
-      'Separate files at 4K · 30 fps use about 3× the encoder. If your Mac falls behind, Videorc stops the separate files and keeps the main recording.'
+      'Separate files at 4K · 30 fps use about 3× the encoder. If your computer falls behind, Videorc stops the separate files and keeps the main recording.'
     )
     expect(
       separateSourceRecordingsEncoderNotice(
@@ -93,7 +93,7 @@ describe('separate files encoder notice (plan 200 D4)', () => {
     expect(
       separateSourceRecordingsEncoderNotice(
         config({ separateSourceRecordings: on, video: video(3840, 2160, 60) }),
-        'win32'
+        'linux'
       )
     ).toBeNull()
   })
@@ -194,23 +194,29 @@ describe('separate source recordings (plan 157)', () => {
     expect(params.output.recordEnabled).toBe(true)
   })
 
-  it('never arms on Linux or Windows, and says why (release test 146, plan 0001)', () => {
+  it('never arms on Linux, and says why (release test 146, plan 0001)', () => {
     const armed = config({ separateSourceRecordings: { enabled: true, keepCombined: true } })
-    for (const platform of ['linux', 'win32']) {
-      expect(separateSourceRecordingsIneligibility(armed, platform)).toBe('unsupported-platform')
-      expect(separateSourceRecordingsForSession(armed, platform)).toBeUndefined()
+    expect(separateSourceRecordingsIneligibility(armed, 'linux')).toBe('unsupported-platform')
+    expect(separateSourceRecordingsForSession(armed, 'linux')).toBeUndefined()
+    expect(
+      buildStartSessionParams({ captureConfig: armed, scene, settings, platform: 'linux' }).output
+        .separateSourceRecordings
+    ).toBeUndefined()
+    expect(separateSourceRecordingsIneligibilityCopy('unsupported-platform')).toContain(
+      'Mac and Windows only'
+    )
+    // macOS, Windows (#1631), and a start before runtime info arrived arm.
+    for (const platform of ['darwin', 'win32']) {
+      expect(separateSourceRecordingsIneligibility(armed, platform)).toBeNull()
+      expect(separateSourceRecordingsForSession(armed, platform)).toEqual({
+        enabled: true,
+        keepCombined: true
+      })
       expect(
         buildStartSessionParams({ captureConfig: armed, scene, settings, platform }).output
           .separateSourceRecordings
-      ).toBeUndefined()
+      ).toEqual({ enabled: true, keepCombined: true })
     }
-    expect(separateSourceRecordingsIneligibilityCopy('unsupported-platform')).toContain('Mac only')
-    // macOS, and a start before runtime info arrived, behave as before.
-    expect(separateSourceRecordingsIneligibility(armed, 'darwin')).toBeNull()
-    expect(separateSourceRecordingsForSession(armed, 'darwin')).toEqual({
-      enabled: true,
-      keepCombined: true
-    })
     expect(separateSourceRecordingsForSession(armed)).toEqual({ enabled: true, keepCombined: true })
   })
 

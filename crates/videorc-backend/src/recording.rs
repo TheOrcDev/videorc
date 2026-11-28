@@ -5319,10 +5319,13 @@ async fn start_session_with_timeline(
         );
     }
     let encoder_bridge_video_output = windows_encoded_bridge_decision.effective;
-    if source_iso_plan.is_some() {
-        anyhow::ensure!(
-            encoder_bridge_video_output == EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
-            "Separate source recordings require the timestamped MPEG-TS recording transport"
+    if source_iso_plan.is_some() && !source_iso_video_output_supported(encoder_bridge_video_output)
+    {
+        // #1631: a Windows session whose Media Foundation probe fell back to
+        // the raw OpenH264 bridge cannot stream-copy the ISO legs.
+        bail!(
+            "{}: Separate source recordings need a hardware video encoder, and this session fell back to software encoding. Turn them off in Output to record.",
+            crate::source_iso::HEALTH_UNAVAILABLE
         );
     }
     // Intel iGPU MFTs that reject the requested CBR at probe time are only kept
@@ -5552,6 +5555,12 @@ async fn start_session_with_timeline(
             // auxiliary; the vertical leg needs its OWN scene, which only the
             // synthetic compositor composes today.
             unsupported_scene_features.push("dual-orientation-simulcast".to_string());
+        }
+        if source_iso_plan.is_some() {
+            // #1631: the D3D11 session has Primary and Auxiliary outputs only;
+            // the Screen and Camera files come from the CPU compositor's ISO
+            // legs.
+            unsupported_scene_features.push("separate-source-recordings".to_string());
         }
         // #1067: an explicit scene (a background, or a start from the scene
         // editor) is drawn by the D3D11 scene plan; only the layers it cannot
@@ -6166,6 +6175,9 @@ async fn start_session_with_timeline(
     #[cfg(target_os = "windows")]
     let (direct_d3d11_recording_source, direct_d3d11_camera_overlay) = if !use_windows_d3d11_media
         && use_encoder_bridge
+        // #1631: the direct path writes one output; the ISO legs need the CPU
+        // compositor's frame stores.
+        && source_iso_plan.is_none()
         && matches!(
             encoder_bridge_video_output,
             EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
@@ -18483,7 +18495,9 @@ async fn prepare_source_iso_selected_capture(
             {
                 status
             } else {
-                crate::preview_camera::start_preview_camera(
+                // #1631: wait for the outcome; on Windows the public start
+                // replies while a DirectShow camera is still opening.
+                crate::preview_camera::start_preview_camera_and_wait(
                     state.clone(),
                     crate::protocol::PreviewCameraStartParams {
                         sources: params.sources.clone(),
@@ -19000,6 +19014,17 @@ fn windows_bridge_envelope_refusal(
     Some(format!(
         "{name} at {fps} fps isn't supported on Windows yet. Choose {name} at 30 fps or {cap} at {fps} fps."
     ))
+}
+
+/// Plan 157 / #1631: the bridge outputs whose timestamped MPEG-TS the ISO
+/// muxers can stream-copy: VideoToolbox on macOS, Media Foundation on
+/// Windows. Raw YUV (Linux, or a Windows software fallback) cannot carry them.
+fn source_iso_video_output_supported(video_output: EncoderBridgeVideoOutput) -> bool {
+    matches!(
+        video_output,
+        EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+            | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    )
 }
 
 /// The video output the encoder bridge is asked for, or the raw legacy
@@ -43125,6 +43150,25 @@ mod tests {
     /// Plan 198: Clips' buffer-only session arms no Separate source files
     /// (0.11.0 refused it 62 times in 40 s: "need a local recording path"),
     /// while Record with the same Output settings still arms them.
+    #[test]
+    fn separate_source_recordings_ride_only_a_stream_copyable_bridge() {
+        // #1631: Media Foundation's timestamped MPEG-TS carries the ISO legs on
+        // Windows as VideoToolbox's does on macOS; raw YUV (Linux, or a
+        // Windows session whose hardware probe fell back to OpenH264) cannot.
+        assert!(source_iso_video_output_supported(
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+        ));
+        assert!(source_iso_video_output_supported(
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        ));
+        assert!(!source_iso_video_output_supported(
+            EncoderBridgeVideoOutput::RawYuv420p
+        ));
+        assert!(!source_iso_video_output_supported(
+            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+        ));
+    }
+
     #[test]
     fn buffer_only_session_never_arms_separate_source_recordings() {
         let separate = Some(crate::protocol::SeparateSourceRecordingsSettings {

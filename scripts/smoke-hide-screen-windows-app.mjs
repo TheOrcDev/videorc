@@ -3,8 +3,11 @@
 // Windows port of smoke:smart-scenes step 5). The promise is made at the
 // capture source, so the recording, a local RTMP sink and a Clips save must
 // each show a frosted, still picture for the hidden span and the sharp,
-// moving live picture again after Show. (Windows writes no Screen file:
-// Separate source recordings are Mac only, so that leg is a named SKIP.)
+// moving live picture again after Show. Under `--media cpu` with a camera
+// present, Separate source recordings are on and the Screen file is judged
+// by the same bar (#1631). The D3D11 media path cannot write the separate
+// files, so on the default path, or without a camera, that leg is a named
+// SKIP.
 //
 // Setup: the Windows fixture window (scripts/fixtures/windows-fixture-window:
 // Fixture Alpha's picture, red with a motion strip, borderless and
@@ -41,6 +44,8 @@
 //                 (VIDEORC_WINDOWS_D3D11_MEDIA=disabled); auto (default) is
 //                 the shipping choice, and the summary names the path it took.
 //   --probe-capture  stops after the 5 s capture-rate sample.
+//   --no-screen-file keeps Separate source recordings off under --media cpu,
+//                 camera still on (the A/B baseline for what the files cost).
 //   VIDEORC_SMOKE_TIMEOUT_MS, VIDEORC_SMOKE_RTMP_PORT (13937),
 //   VIDEORC_SMOKE_FFMPEG_PATH, VIDEORC_SMOKE_FFPROBE_PATH
 
@@ -53,6 +58,7 @@ import { fileURLToPath } from 'node:url'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
+import { takeSiblingPaths } from './lib/separate-source-take-gates.mjs'
 import {
   anchorHideFile,
   captureAlignedHideBudget,
@@ -289,12 +295,23 @@ async function hideStep({ renderer, smoke, screen }) {
   const privacyBefore = await request(ws, timeoutMs, 'screen.privacy.get')
   if (privacyBefore.hidden)
     fail(`the screen is already hidden before the step: ${JSON.stringify(privacyBefore)}`)
-  // Separate source recordings are Mac only: session.start refuses them on
-  // Windows (separate-source-recordings-unsupported-platform), so no Screen
-  // file exists here to carry or leak the live picture.
-  const screenFileSkip =
-    'Separate source recordings are Mac only (session.start refuses them on Windows with separate-source-recordings-unsupported-platform), so Windows writes no Screen file'
-  log(`  Screen file: SKIP (${screenFileSkip})`)
+  // #1631: the Screen file is written only off the D3D11 media path (the
+  // CPU compositor's ISO legs), and Separate source recordings need a camera
+  // beside the screen.
+  const cameraList = await request(ws, timeoutMs, 'devices.list', { ffmpegPath })
+  const camera = (cameraList.devices ?? []).find(
+    (device) => device.kind === 'camera' && device.status === 'available'
+  )
+  const screenFileSkip = options.noScreenFile
+    ? '--no-screen-file: Separate source recordings off for this run'
+    : options.media !== 'cpu'
+      ? 'the D3D11 media path cannot write separate source files, so this run takes no Screen file; run with --media cpu to judge it'
+      : camera
+        ? null
+        : 'no available camera, and Separate source recordings need a camera and a screen, so no Screen file is written'
+  if (screenFileSkip) log(`  Screen file: SKIP (${screenFileSkip})`)
+  else log(`  Screen file: Separate source recordings on, camera ${camera.name}`)
+  const sessionEventsFrom = events.length
 
   const rtmpPort = await freeTcpPort(rtmpPortBase)
   log(`  RTMP sink on 127.0.0.1:${rtmpPort}`)
@@ -332,14 +349,38 @@ async function hideStep({ renderer, smoke, screen }) {
     createdAt: '2026-01-01T00:00:00Z',
     updatedAt: '2026-01-01T00:00:00Z'
   }
+  // `--no-screen-file` keeps the camera, so it is the same take with the
+  // separate files off: the A/B control for what they cost.
+  const withCamera = camera && (!screenFileSkip || options.noScreenFile)
+  const cameraSources = withCamera
+    ? { ...visual.sources, cameraId: camera.id, cameraName: camera.name, cameraOff: false }
+    : null
+  if (cameraSources) {
+    // The camera live first, as the Studio's Preview has it: session.start
+    // only starts a camera for the separate files, so without this the
+    // baseline would record a camera that never captured.
+    await request(ws, timeoutMs, 'preview.camera.start', {
+      sources: cameraSources,
+      layout: visual.layout,
+      video
+    })
+    await waitForBackendState(
+      'preview.camera.status',
+      (status) => status.state === 'live' && status.framesCaptured > 0,
+      `camera ${camera.name} live with frames`
+    )
+  }
   const started = await request(ws, timeoutMs, 'session.start', {
-    sources: visual.sources,
+    sources: cameraSources ?? visual.sources,
     layout: visual.layout,
     background: null,
     output: {
       recordEnabled: true,
       streamEnabled: true,
       outputDirectoryCapability: directory.capabilityId,
+      ...(screenFileSkip
+        ? {}
+        : { separateSourceRecordings: { enabled: true, keepCombined: true } }),
       video,
       rtmp: { preset: 'custom', serverUrl: target.serverUrl, streamKey: target.streamKey }
     },
@@ -441,7 +482,16 @@ async function hideStep({ renderer, smoke, screen }) {
   await renderer.waitFor((state) => state.recording === 'idle', 'session stopped')
   const combined = await resolveFinalRecordingPath({ started, stopped, timeoutMs })
   await waitForReceiverExit(receiver, 20_000)
-  const files = { recording: combined, stream: receiver.path, screenFile: null, clip: clipPath }
+  const screenFile = screenFileSkip ? null : takeSiblingPaths(combined).screen
+  // Plan 200 D1: under load the separate files are shed so Combined keeps
+  // up, and the Screen file ends there. Named in its result if it happened.
+  const shedEvent = events
+    .slice(sessionEventsFrom)
+    .find(
+      (entry) =>
+        entry.event === 'health.event' && entry.payload?.code === 'separate-source-recordings-shed'
+    )
+  const files = { recording: combined, stream: receiver.path, screenFile, clip: clipPath }
   const outputs = {}
   const analysed = []
   for (const [name, file] of Object.entries(files)) {
@@ -507,6 +557,10 @@ async function hideStep({ renderer, smoke, screen }) {
       verdict.failures.push(leadFailure)
       verdict.ok = false
     }
+    if (name === 'screenFile' && shedEvent && !verdict.ok)
+      verdict.failures.push(
+        `separate files were shed under load (plan 200 D1) ${shedEvent.atMs - hideAtMs} ms from the hide`
+      )
     outputs[name] = {
       ...verdict,
       file,
@@ -973,7 +1027,7 @@ function printHuman(summaryValue) {
   if (hide.d3d11Skip) console.log(`SKIP d3d11-media path: ${hide.d3d11Skip.reason}`)
   console.log(
     hide.ok
-      ? `smoke:hide-screen:windows: PASS (hide on the recording, the stream and the clip; ${hide.session?.path ?? 'unknown'} path; Screen file SKIP, Windows writes none)`
+      ? `smoke:hide-screen:windows: PASS (hide on the recording, the stream${hide.outputs?.screenFile?.skipped ? '' : ', the Screen file'} and the clip; ${hide.session?.path ?? 'unknown'} path${hide.outputs?.screenFile?.skipped ? `; Screen file SKIP: ${hide.outputs.screenFile.reason}` : ''})`
       : `smoke:hide-screen:windows: FAIL ${hide.failures?.join('; ') ?? ''}`
   )
 }
@@ -988,6 +1042,7 @@ function parseArgs(argv) {
     // switch count belongs to the macOS-only switches step.
     else if (value === '--switches') index += 1
     else if (value === '--probe-capture') parsed.probeOnly = true
+    else if (value === '--no-screen-file') parsed.noScreenFile = true
     else if (value === '--media') {
       parsed.media = values[++index]
       if (!['auto', 'cpu'].includes(parsed.media))

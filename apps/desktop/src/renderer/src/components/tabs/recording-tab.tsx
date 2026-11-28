@@ -222,8 +222,8 @@ function LocalRecordingSection(): ReactElement {
   const compatibilityMessage = compatibility.blockingReason ?? compatibility.warning
   // Plan 157: the switch stays available; when the current selection cannot
   // produce both files the copy says so and the session records Combined only.
-  // Release test 146, plan 0001: only macOS can write the Screen and Camera
-  // files, so elsewhere the switch is off, locked and says why.
+  // Release test 146, plan 0001: only macOS and Windows can write the Screen
+  // and Camera files, so elsewhere the switch is off, locked and says why.
   const separateUnsupported = !separateSourceRecordingsSupported(runtimeInfo?.platform)
   const separateIneligibility = separateUnsupported
     ? 'unsupported-platform'
@@ -231,7 +231,7 @@ function LocalRecordingSection(): ReactElement {
       ? separateSourceRecordingsIneligibility(captureConfig, runtimeInfo?.platform)
       : null
   // Plan 200 D4: at 4K or 60 fps the separate files triple the encoder work;
-  // say what happens if the Mac falls behind before Record is pressed.
+  // say what happens if the computer falls behind before Record is pressed.
   const separateEncoderNotice = separateSourceRecordingsEncoderNotice(
     captureConfig,
     runtimeInfo?.platform

@@ -11124,6 +11124,160 @@ fn publish_compositor_frame(
                     || frame.metadata.has_d3d11_texture()
                     || metadata_only_preview)
         });
+    // The separate-source legs render before the stream leg (#1631): the
+    // Combined recording takes its frame from the completed batch, which is
+    // published only after these legs, so every leg drawn ahead of the
+    // publish delays Combined toward its CFR deadline and shows up as
+    // repeated frames. The stream leg reads its own store and is not in the
+    // batch.
+    if let (Some(iso_output), Some(iso_stores)) = (source_iso_output, source_iso_frame_stores) {
+        let batch_store = iso_stores.batches.clone();
+        let membership = batch_store.membership();
+        let batch_frames = [
+            frame_store.clone(),
+            iso_stores.screen.clone(),
+            iso_stores.camera.clone(),
+        ];
+        // Plan 200 D2: the Camera leg at the camera's own size fills it
+        // exactly (no bars from rounding to even). A camera whose format
+        // changed mid-take keeps the arm-time size and fits, as before.
+        let iso_camera_snapshot = iso_camera_snapshot.map(|mut leg| {
+            if let Some((frame, _)) = camera_frame.as_ref()
+                && source_iso_camera_fills(
+                    (frame.width, frame.height),
+                    (iso_output.camera_width, iso_output.camera_height),
+                )
+            {
+                leg.layout.camera_fit = crate::protocol::CameraFit::Fill;
+            }
+            leg
+        });
+        // Screen leg: the Screen/Window source alone (image stand-ins apply,
+        // they are screen-like). Camera leg: the camera alone. A committed
+        // source removal is handled by the role supervisor; never publish
+        // black filler as if its selected source were still present.
+        let legs: [SourceIsoLeg<'_>; 2] = [
+            SourceIsoLeg {
+                snapshot: iso_screen_snapshot.as_ref(),
+                store: iso_stores.screen,
+                gpu: iso_screen_gpu,
+                image_source: active_image_source.as_ref(),
+                size: (iso_output.width, iso_output.height),
+            },
+            SourceIsoLeg {
+                snapshot: iso_camera_snapshot.as_ref(),
+                store: iso_stores.camera,
+                gpu: iso_camera_gpu,
+                image_source: None,
+                size: (iso_output.camera_width, iso_output.camera_height),
+            },
+        ];
+        for (
+            leg_index,
+            SourceIsoLeg {
+                snapshot: leg_snapshot,
+                store,
+                gpu,
+                image_source,
+                size: (leg_width, leg_height),
+            },
+        ) in legs.into_iter().enumerate()
+        {
+            // A leg whose file ended (shed under encoder pressure, its source
+            // removed, or Stop) no longer renders: after a shed the GPU work
+            // goes back to the Combined recording (plan 200 D1).
+            if leg_snapshot.is_none() || !membership.active[leg_index + 1] {
+                continue;
+            }
+            let leg_camera_frame = camera_frame
+                .as_ref()
+                .filter(|_| scene_accepts_source(leg_snapshot, camera_key))
+                .map(|(frame, _)| frame);
+            // The ISO legs derive from the program's scene, so they share
+            // its hold.
+            let leg_screen_frame = leg_screen_frame(
+                screen_frame.as_ref(),
+                screen_frame_current,
+                leg_screen_holds.primary.frame.as_ref(),
+                leg_snapshot,
+                screen_key,
+            );
+            // A contended capture authority cannot prove current source pixels.
+            // Keep the last published ISO frame instead of encoding a black
+            // frame; the supervisor owns committed removal/terminal failure.
+            if (scene_needs_live_camera_frame(leg_snapshot, image_source)
+                && leg_camera_frame.is_none())
+                || (scene_needs_live_screen_frame(leg_snapshot, image_source)
+                    && leg_screen_frame.is_none())
+            {
+                continue;
+            }
+            // Each ISO frame is stamped with ITS source's capture time (the
+            // bridge seeds the shared recording epoch from it); a leg with no
+            // live frame this tick is a continuity frame dated at publish.
+            let leg_captured_at = compositor_frame_content_captured_at(
+                leg_camera_frame,
+                leg_screen_frame,
+                published_at,
+            );
+            let inputs = CompositorRenderInputs {
+                sequence,
+                width: leg_width.max(1),
+                height: leg_height.max(1),
+                snapshot: leg_snapshot,
+                active_image_source: image_source,
+                background_image_source: None,
+                camera_frame: leg_camera_frame,
+                screen_frame: leg_screen_frame,
+                caption_overlay: None,
+                highlight_overlay: None,
+                chat_overlay: None,
+                // A source take is the source alone: no Buddy and no banners
+                // either (plan 157), whatever the Combined legs carry.
+                buddy_overlay: None,
+                buddy_leg: None,
+                banners: &[],
+                live_background: None,
+                shared_live_frame: None,
+                shared_live_output: None,
+            };
+            #[cfg(test)]
+            let trace_role = leg_index + 1;
+            let iso_leg_started_at = Instant::now();
+            let iso_timings = publish_auxiliary_compositor_frame(
+                sequence,
+                leg_captured_at,
+                published_at,
+                store,
+                inputs,
+                gpu,
+                iso_output.frame_consumer,
+                &[],
+                #[cfg(test)]
+                trace_role,
+            );
+            timings.record_auxiliary_leg(
+                if leg_index == 0 {
+                    CompositorLeg::IsoScreen
+                } else {
+                    CompositorLeg::IsoCamera
+                },
+                iso_leg_started_at,
+                iso_timings,
+            );
+        }
+        let frames = std::array::from_fn(|role| {
+            membership.active[role]
+                .then(|| {
+                    batch_frames[role]
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .latest()
+                })
+                .flatten()
+        });
+        batch_store.publish(membership, sequence, frames);
+    }
     let auxiliary_required = stream_output.is_some();
     let mut auxiliary_proof = None;
     if let (Some(stream_output), Some(stream_frame_store)) = (stream_output, stream_frame_store) {
@@ -11286,154 +11440,6 @@ fn publish_compositor_frame(
                         || frame.metadata.has_d3d11_texture())
             });
         auxiliary_proof = Some((aux_snapshot, published));
-    }
-    if let (Some(iso_output), Some(iso_stores)) = (source_iso_output, source_iso_frame_stores) {
-        let batch_store = iso_stores.batches.clone();
-        let membership = batch_store.membership();
-        let batch_frames = [
-            frame_store.clone(),
-            iso_stores.screen.clone(),
-            iso_stores.camera.clone(),
-        ];
-        // Plan 200 D2: the Camera leg at the camera's own size fills it
-        // exactly (no bars from rounding to even). A camera whose format
-        // changed mid-take keeps the arm-time size and fits, as before.
-        let iso_camera_snapshot = iso_camera_snapshot.map(|mut leg| {
-            if let Some((frame, _)) = camera_frame.as_ref()
-                && source_iso_camera_fills(
-                    (frame.width, frame.height),
-                    (iso_output.camera_width, iso_output.camera_height),
-                )
-            {
-                leg.layout.camera_fit = crate::protocol::CameraFit::Fill;
-            }
-            leg
-        });
-        // Screen leg: the Screen/Window source alone (image stand-ins apply,
-        // they are screen-like). Camera leg: the camera alone. A committed
-        // source removal is handled by the role supervisor; never publish
-        // black filler as if its selected source were still present.
-        let legs: [SourceIsoLeg<'_>; 2] = [
-            SourceIsoLeg {
-                snapshot: iso_screen_snapshot.as_ref(),
-                store: iso_stores.screen,
-                gpu: iso_screen_gpu,
-                image_source: active_image_source.as_ref(),
-                size: (iso_output.width, iso_output.height),
-            },
-            SourceIsoLeg {
-                snapshot: iso_camera_snapshot.as_ref(),
-                store: iso_stores.camera,
-                gpu: iso_camera_gpu,
-                image_source: None,
-                size: (iso_output.camera_width, iso_output.camera_height),
-            },
-        ];
-        for (
-            leg_index,
-            SourceIsoLeg {
-                snapshot: leg_snapshot,
-                store,
-                gpu,
-                image_source,
-                size: (leg_width, leg_height),
-            },
-        ) in legs.into_iter().enumerate()
-        {
-            // A leg whose file ended (shed under encoder pressure, its source
-            // removed, or Stop) no longer renders: after a shed the GPU work
-            // goes back to the Combined recording (plan 200 D1).
-            if leg_snapshot.is_none() || !membership.active[leg_index + 1] {
-                continue;
-            }
-            let leg_camera_frame = camera_frame
-                .as_ref()
-                .filter(|_| scene_accepts_source(leg_snapshot, camera_key))
-                .map(|(frame, _)| frame);
-            // The ISO legs derive from the program's scene, so they share
-            // its hold.
-            let leg_screen_frame = leg_screen_frame(
-                screen_frame.as_ref(),
-                screen_frame_current,
-                leg_screen_holds.primary.frame.as_ref(),
-                leg_snapshot,
-                screen_key,
-            );
-            // A contended capture authority cannot prove current source pixels.
-            // Keep the last published ISO frame instead of encoding a black
-            // frame; the supervisor owns committed removal/terminal failure.
-            if (scene_needs_live_camera_frame(leg_snapshot, image_source)
-                && leg_camera_frame.is_none())
-                || (scene_needs_live_screen_frame(leg_snapshot, image_source)
-                    && leg_screen_frame.is_none())
-            {
-                continue;
-            }
-            // Each ISO frame is stamped with ITS source's capture time (the
-            // bridge seeds the shared recording epoch from it); a leg with no
-            // live frame this tick is a continuity frame dated at publish.
-            let leg_captured_at = compositor_frame_content_captured_at(
-                leg_camera_frame,
-                leg_screen_frame,
-                published_at,
-            );
-            let inputs = CompositorRenderInputs {
-                sequence,
-                width: leg_width.max(1),
-                height: leg_height.max(1),
-                snapshot: leg_snapshot,
-                active_image_source: image_source,
-                background_image_source: None,
-                camera_frame: leg_camera_frame,
-                screen_frame: leg_screen_frame,
-                caption_overlay: None,
-                highlight_overlay: None,
-                chat_overlay: None,
-                // A source take is the source alone: no Buddy and no banners
-                // either (plan 157), whatever the Combined legs carry.
-                buddy_overlay: None,
-                buddy_leg: None,
-                banners: &[],
-                live_background: None,
-                shared_live_frame: None,
-                shared_live_output: None,
-            };
-            #[cfg(test)]
-            let trace_role = leg_index + 1;
-            let iso_leg_started_at = Instant::now();
-            let iso_timings = publish_auxiliary_compositor_frame(
-                sequence,
-                leg_captured_at,
-                published_at,
-                store,
-                inputs,
-                gpu,
-                iso_output.frame_consumer,
-                &[],
-                #[cfg(test)]
-                trace_role,
-            );
-            timings.record_auxiliary_leg(
-                if leg_index == 0 {
-                    CompositorLeg::IsoScreen
-                } else {
-                    CompositorLeg::IsoCamera
-                },
-                iso_leg_started_at,
-                iso_timings,
-            );
-        }
-        let frames = std::array::from_fn(|role| {
-            membership.active[role]
-                .then(|| {
-                    batch_frames[role]
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .latest()
-                })
-                .flatten()
-        });
-        batch_store.publish(membership, sequence, frames);
     }
     // Plan 205 S6: the Preview's own picture, the program leg ("twin"),
     // decided last, after every encoded leg. Since PH-01 it composes only
@@ -14352,6 +14358,42 @@ fn blit_untransformed_rgba_to_yuv420p(
     dest: &mut [u8],
     canvas_width: usize,
     canvas_height: usize,
+    draw: (usize, usize, usize, usize),
+    cut: (usize, usize),
+) {
+    // The channel order is fixed per blit, so each row runs a loop
+    // specialised for it (#1631: the per-pixel generic read was the CPU
+    // compositor's largest cost, once per leg and per separate source file).
+    match source.format {
+        SourcePixelFormat::Bgra => blit_untransformed_ordered_to_yuv420p::<2, 0>(
+            source,
+            dest,
+            canvas_width,
+            canvas_height,
+            draw,
+            cut,
+        ),
+        SourcePixelFormat::Rgba => blit_untransformed_ordered_to_yuv420p::<0, 2>(
+            source,
+            dest,
+            canvas_width,
+            canvas_height,
+            draw,
+            cut,
+        ),
+    }
+}
+
+/// `blit_untransformed_rgba_to_yuv420p` for one channel order: `R` and `B`
+/// are the byte offsets of red and blue in a source pixel. Writes exactly what
+/// the per-pixel form did: each luma texel from its own source pixel, each
+/// chroma texel from the pixel at its even column and row, and nothing where
+/// that pixel's alpha is under 16.
+fn blit_untransformed_ordered_to_yuv420p<const R: usize, const B: usize>(
+    source: &RgbaSource<'_>,
+    dest: &mut [u8],
+    canvas_width: usize,
+    canvas_height: usize,
     (draw_left, draw_top, draw_right, draw_bottom): (usize, usize, usize, usize),
     (cut_left, cut_top): (usize, usize),
 ) {
@@ -14362,6 +14404,11 @@ fn blit_untransformed_rgba_to_yuv420p(
     let uv_top = draw_top / 2;
     let uv_right = draw_right.div_ceil(2).min(uv_width);
     let uv_bottom = draw_bottom.div_ceil(2).min(uv_height);
+    let source_stride = source.width as usize * 4;
+    let source_row = |source_y: usize| {
+        let start = source_y * source_stride;
+        &source.bytes[start..start + source_stride]
+    };
     let (y_plane, chroma_planes) = dest.split_at_mut(y_len);
     let (u_plane, v_plane) = chroma_planes.split_at_mut(uv_width * uv_height);
     rayon::join(
@@ -14370,18 +14417,9 @@ fn blit_untransformed_rgba_to_yuv420p(
                 .par_chunks_mut(canvas_width)
                 .enumerate()
                 .for_each(|(relative_y, row)| {
-                    let dest_y = draw_top + relative_y;
-                    let source_y = (dest_y - draw_top + cut_top) as u32;
-                    for (dest_x, output) in
-                        row.iter_mut().enumerate().take(draw_right).skip(draw_left)
-                    {
-                        let source_x = (dest_x - draw_left + cut_left) as u32;
-                        let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
-                        if a >= 16 {
-                            // Luma only (plan 191).
-                            *output = rgb_to_y(r, g, b);
-                        }
-                    }
+                    let pixels = &source_row(relative_y + cut_top)[cut_left * 4..];
+                    // Luma only (plan 191).
+                    luma_row::<R, B>(&mut row[draw_left..draw_right], pixels);
                 });
         },
         || {
@@ -14391,19 +14429,115 @@ fn blit_untransformed_rgba_to_yuv420p(
                 .enumerate()
                 .for_each(|(relative_y, (u_row, v_row))| {
                     let uv_y = uv_top + relative_y;
-                    let source_y = ((uv_y * 2).saturating_sub(draw_top) + cut_top) as u32;
-                    for uv_x in uv_left..uv_right {
-                        let source_x = ((uv_x * 2).saturating_sub(draw_left) + cut_left) as u32;
-                        let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
-                        if a >= 16 {
-                            let (u_value, v_value) = rgb_to_uv(r, g, b);
-                            u_row[uv_x] = u_value;
-                            v_row[uv_x] = v_value;
-                        }
+                    let row = source_row((uv_y * 2).saturating_sub(draw_top) + cut_top);
+                    let mut uv_x = uv_left;
+                    // An odd left edge: its first chroma texel reads the
+                    // first drawn pixel.
+                    if uv_x < uv_right && uv_x * 2 < draw_left {
+                        chroma_texel::<R, B>(
+                            &mut u_row[uv_x],
+                            &mut v_row[uv_x],
+                            &row[cut_left * 4..cut_left * 4 + 4],
+                        );
+                        uv_x += 1;
+                    }
+                    if uv_x >= uv_right {
+                        return;
+                    }
+                    // From here every texel reads every second pixel.
+                    let pixels = &row[(uv_x * 2 - draw_left + cut_left) * 4..];
+                    let paired = (pixels.len() / 8).min(uv_right - uv_x);
+                    chroma_row::<R, B>(
+                        &mut u_row[uv_x..uv_x + paired],
+                        &mut v_row[uv_x..uv_x + paired],
+                        &pixels[..paired * 8],
+                    );
+                    uv_x += paired;
+                    // The last texel of an odd right edge has no pair.
+                    if uv_x < uv_right {
+                        chroma_texel::<R, B>(
+                            &mut u_row[uv_x],
+                            &mut v_row[uv_x],
+                            &pixels[paired * 8..paired * 8 + 4],
+                        );
                     }
                 });
         },
     );
+}
+
+/// One row of 1:1 luma: each output texel from its own source pixel, kept
+/// where that pixel's alpha is under 16. On x86-64 the loop runs with AVX2
+/// when the CPU has it: the baseline target has no packed 32-bit multiply,
+/// so the portable build barely vectorises it (#1631). Same integer math,
+/// same bytes, either way.
+fn luma_row<const R: usize, const B: usize>(output: &mut [u8], pixels: &[u8]) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU reports AVX2.
+        return unsafe { luma_row_avx2::<R, B>(output, pixels) };
+    }
+    luma_row_portable::<R, B>(output, pixels);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn luma_row_avx2<const R: usize, const B: usize>(output: &mut [u8], pixels: &[u8]) {
+    luma_row_portable::<R, B>(output, pixels);
+}
+
+#[inline(always)]
+fn luma_row_portable<const R: usize, const B: usize>(output: &mut [u8], pixels: &[u8]) {
+    for (output, pixel) in output.iter_mut().zip(pixels.chunks_exact(4)) {
+        let luma = rgb_to_y(pixel[R], pixel[1], pixel[B]);
+        *output = if pixel[3] >= 16 { luma } else { *output };
+    }
+}
+
+/// One row of 1:1 chroma: texel `i` from the pixel at `pixels[i * 8..]`
+/// (every second source pixel), as `luma_row`.
+fn chroma_row<const R: usize, const B: usize>(u_row: &mut [u8], v_row: &mut [u8], pixels: &[u8]) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU reports AVX2.
+        return unsafe { chroma_row_avx2::<R, B>(u_row, v_row, pixels) };
+    }
+    chroma_row_portable::<R, B>(u_row, v_row, pixels);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn chroma_row_avx2<const R: usize, const B: usize>(
+    u_row: &mut [u8],
+    v_row: &mut [u8],
+    pixels: &[u8],
+) {
+    chroma_row_portable::<R, B>(u_row, v_row, pixels);
+}
+
+#[inline(always)]
+fn chroma_row_portable<const R: usize, const B: usize>(
+    u_row: &mut [u8],
+    v_row: &mut [u8],
+    pixels: &[u8],
+) {
+    for ((u_value, v_value), pair) in u_row
+        .iter_mut()
+        .zip(v_row.iter_mut())
+        .zip(pixels.chunks_exact(8))
+    {
+        let (u, v) = rgb_to_uv(pair[R], pair[1], pair[B]);
+        let keep = pair[3] < 16;
+        *u_value = if keep { *u_value } else { u };
+        *v_value = if keep { *v_value } else { v };
+    }
+}
+
+#[inline(always)]
+fn chroma_texel<const R: usize, const B: usize>(u_value: &mut u8, v_value: &mut u8, pixel: &[u8]) {
+    if pixel[3] >= 16 {
+        (*u_value, *v_value) = rgb_to_uv(pixel[R], pixel[1], pixel[B]);
+    }
 }
 
 /// Where a source lands: its fitted box in canvas pixels (signed, uncut: the
@@ -16530,6 +16664,153 @@ mod tests {
         let blue = rgb_to_yuv(0, 0, 255);
         let white = rgb_to_yuv(255, 255, 255);
         assert_eq!(bytes, [red.0, green.0, blue.0, white.0, red.1, red.2]);
+    }
+
+    /// The per-pixel form `blit_untransformed_rgba_to_yuv420p` had before
+    /// #1631, kept as the oracle for the row loops that replaced it.
+    fn blit_untransformed_per_pixel_reference(
+        source: &RgbaSource<'_>,
+        dest: &mut [u8],
+        canvas_width: usize,
+        canvas_height: usize,
+        (draw_left, draw_top, draw_right, draw_bottom): (usize, usize, usize, usize),
+        (cut_left, cut_top): (usize, usize),
+    ) {
+        let y_len = canvas_width * canvas_height;
+        let uv_width = canvas_width.div_ceil(2);
+        let uv_height = canvas_height.div_ceil(2);
+        for dest_y in draw_top..draw_bottom {
+            let source_y = (dest_y - draw_top + cut_top) as u32;
+            for dest_x in draw_left..draw_right {
+                let source_x = (dest_x - draw_left + cut_left) as u32;
+                let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
+                if a >= 16 {
+                    dest[dest_y * canvas_width + dest_x] = rgb_to_y(r, g, b);
+                }
+            }
+        }
+        let uv_right = draw_right.div_ceil(2).min(uv_width);
+        let uv_bottom = draw_bottom.div_ceil(2).min(uv_height);
+        for uv_y in draw_top / 2..uv_bottom {
+            let source_y = ((uv_y * 2).saturating_sub(draw_top) + cut_top) as u32;
+            for uv_x in draw_left / 2..uv_right {
+                let source_x = ((uv_x * 2).saturating_sub(draw_left) + cut_left) as u32;
+                let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
+                if a >= 16 {
+                    let (u_value, v_value) = rgb_to_uv(r, g, b);
+                    dest[y_len + uv_y * uv_width + uv_x] = u_value;
+                    dest[y_len + uv_width * uv_height + uv_y * uv_width + uv_x] = v_value;
+                }
+            }
+        }
+    }
+
+    fn noisy_rgba(width: u32, height: u32, seed: u64) -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..width as usize * height as usize * 4)
+            .map(|_| xorshift64(&mut state) as u8)
+            .collect()
+    }
+
+    /// Canvas size, source size, draw box (left, top, right, bottom), and
+    /// the source cut (left, top).
+    type UntransformedCase = (
+        (u32, u32),
+        (u32, u32),
+        (usize, usize, usize, usize),
+        (usize, usize),
+    );
+
+    #[test]
+    fn untransformed_row_loops_match_the_per_pixel_form() {
+        // Odd and even canvases, draws at odd and even offsets, a source cut
+        // on its left and top (a box hanging off the canvas), partial alpha
+        // (the noise covers 0..255), and both channel orders.
+        let cases: [UntransformedCase; 7] = [
+            ((8, 6), (8, 6), (0, 0, 8, 6), (0, 0)),
+            ((9, 7), (9, 7), (0, 0, 9, 7), (0, 0)),
+            ((20, 12), (7, 5), (3, 1, 10, 6), (0, 0)),
+            ((20, 12), (7, 5), (4, 2, 11, 7), (0, 0)),
+            ((21, 13), (12, 9), (0, 0, 9, 6), (3, 3)),
+            ((21, 13), (12, 9), (5, 3, 16, 11), (1, 1)),
+            ((64, 36), (64, 36), (0, 0, 64, 36), (0, 0)),
+        ];
+        for (index, ((canvas_w, canvas_h), (source_w, source_h), draw, cut)) in
+            cases.into_iter().enumerate()
+        {
+            for format in [SourcePixelFormat::Bgra, SourcePixelFormat::Rgba] {
+                let pixels = noisy_rgba(source_w, source_h, 0x9e37_79b9 + index as u64);
+                let source = RgbaSource {
+                    bytes: &pixels,
+                    width: source_w,
+                    height: source_h,
+                    format,
+                };
+                let canvas = noisy_rgba(canvas_w, canvas_h, 7 + index as u64);
+                let mut expected = canvas[..raw_yuv420p_len(canvas_w, canvas_h)].to_vec();
+                let mut actual = expected.clone();
+                let (w, h) = (canvas_w as usize, canvas_h as usize);
+                blit_untransformed_per_pixel_reference(&source, &mut expected, w, h, draw, cut);
+                blit_untransformed_rgba_to_yuv420p(&source, &mut actual, w, h, draw, cut);
+                assert_eq!(actual, expected, "case {index} {format:?}");
+            }
+        }
+    }
+
+    /// `cargo test -p videorc-backend --lib untransformed_1080p_cost -- --ignored --nocapture`
+    /// at the dev profile's opt-level 2 (#1631).
+    #[test]
+    #[ignore = "timing probe, run by hand"]
+    fn untransformed_1080p_cost() {
+        let (width, height) = (1920_u32, 1080_u32);
+        let pixels = noisy_rgba(width, height, 42);
+        let source = RgbaSource {
+            bytes: &pixels,
+            width,
+            height,
+            format: SourcePixelFormat::Bgra,
+        };
+        let mut bytes = vec![0; raw_yuv420p_len(width, height)];
+        let draw = (0, 0, width as usize, height as usize);
+        fn time(label: &str, bytes: &mut [u8], run: &mut dyn FnMut(&mut [u8])) {
+            for _ in 0..10 {
+                run(bytes);
+            }
+            let started = Instant::now();
+            let rounds = 200;
+            for _ in 0..rounds {
+                run(bytes);
+            }
+            let wall = started.elapsed().as_secs_f64() * 1000.0 / f64::from(rounds);
+            eprintln!("{label}: {wall:.3} ms/frame wall");
+        }
+        let canvas = (width as usize, height as usize);
+        time("row loops (rayon)", &mut bytes, &mut |dest| {
+            blit_untransformed_rgba_to_yuv420p(&source, dest, canvas.0, canvas.1, draw, (0, 0))
+        });
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            time("row loops (one thread)", &mut bytes, &mut |dest| {
+                blit_untransformed_rgba_to_yuv420p(&source, dest, canvas.0, canvas.1, draw, (0, 0))
+            })
+        });
+        time(
+            "per-pixel reference (one thread)",
+            &mut bytes,
+            &mut |dest| {
+                blit_untransformed_per_pixel_reference(
+                    &source,
+                    dest,
+                    canvas.0,
+                    canvas.1,
+                    draw,
+                    (0, 0),
+                )
+            },
+        );
     }
 
     /// Even and odd canvases, the degenerate 0x0 (sized as 1x1), and 1080p.
