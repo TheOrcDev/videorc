@@ -26,6 +26,8 @@ mod linux;
 pub(crate) mod macos;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod scene;
+#[cfg(any(test, not(any(target_os = "macos", target_os = "linux"))))]
+mod scene_follower;
 
 #[cfg(not(target_os = "linux"))]
 use gpui::AppContext;
@@ -167,11 +169,14 @@ impl Preview {
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            let _ = (setup.runtime, setup.backend, window);
+            let _ = (setup.backend, window);
             setup.logger.log(
                 Level::Warn,
                 "[preview] no preview element on this platform yet (S2.3b on Windows)",
             );
+            // The feed would commit the Studio's scene; without it the
+            // engine held none (no Scene page sources, no Clips ring).
+            scene_follower::follow(&setup.studio, &setup.runtime, setup.logger.clone());
             cx.new(|_| Self {
                 phase: Phase::Fallback,
                 mode: WindowMode::Docked,

@@ -699,6 +699,16 @@ impl<B: StudioBackend> Studio<B> {
         }
     }
 
+    /// `reloadSceneFromCaptureConfig` where no preview element commits the
+    /// scene (Windows until plan 260 S2.3b). On macOS and Linux the preview
+    /// feed commits the Studio's scene; without it the backend held no
+    /// scene at all, so the Scene page listed no sources and the Clips ring
+    /// waited for a camera that never started. The app's follower calls
+    /// this on the triggers the feed uses.
+    pub async fn reload_scene_from_capture_config(&self) -> Result<(), crate::client::RpcError> {
+        self.load_scene_from_capture_config().await
+    }
+
     /// `loadScene` with the capture config (`reloadSceneFromCaptureConfig`):
     /// the capture config's scene with the working background is committed
     /// (`scene.load_from_capture_config`, `applyCommittedScene`), and the
