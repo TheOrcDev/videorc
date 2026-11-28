@@ -17,7 +17,7 @@ use gpui::{
 use videorc_app_core::studio::camera_background_art::{Art, BlurStrength, choice_art};
 use videorc_app_core::studio::camera_background_view::{
     BLUR_CAVEAT, CHOOSE_COMPACT_LABEL, CHOOSE_IMAGE_LABEL, Choice, ChoiceId, Group, LABEL,
-    LOCK_LINE, SETTINGS_BUTTON, WHAT_VIEWERS_SEE_LABEL,
+    SETTINGS_BUTTON, WHAT_VIEWERS_SEE_LABEL, lock_line,
 };
 use videorc_kit::button::{Button, ButtonSize, ButtonVariant};
 use videorc_kit::icon::{IconName, icon};
@@ -442,7 +442,12 @@ pub fn picker_body(
             .type_scale(text::META)
             .text_color(hsla(t.muted_foreground))
             .child(icon(IconName::LockKey, 14., hsla(t.muted_foreground)))
-            .child(div().min_w_0().flex_1().child(LOCK_LINE))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .child(lock_line(Some(crate::app::hotkeys::node_platform()))),
+            )
             .child(
                 Button::new("camera-background-settings")
                     .label(SETTINGS_BUTTON)

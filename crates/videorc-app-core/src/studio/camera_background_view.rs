@@ -34,6 +34,27 @@ pub const DONE_LABEL: &str = "Done";
 pub const DESCRIPTION: &str = "Blurs or replaces what's behind you in the recording, the livestream, Clips, Videorc Camera and the room. This camera keeps it in every scene.";
 pub const HINT: &str =
     "Works best with light on your face. Done on this Mac, before anything is recorded or sent.";
+/// [`LOCK_LINE`] on this platform: the computer the effect runs on, by the
+/// platform's own noun (`format::device_noun`). Electron says "Mac"
+/// everywhere; on Windows that named the wrong computer. An unknown
+/// platform keeps the Mac words.
+pub fn lock_line(platform: Option<&str>) -> String {
+    match platform {
+        None | Some("darwin") => LOCK_LINE.to_string(),
+        Some(platform) => format!(
+            "Done on this {}, before anything is recorded or sent.",
+            crate::format::device_noun(platform)
+        ),
+    }
+}
+
+/// [`HINT`] on this platform (see [`lock_line`]).
+pub fn hint(platform: Option<&str>) -> String {
+    format!(
+        "Works best with light on your face. {}",
+        lock_line(platform)
+    )
+}
 /// The blur caveat: a blur never promises the room is gone.
 pub const BLUR_CAVEAT: &str =
     "A blur can still show large shapes and colors behind you. For full privacy, pick a picture.";
@@ -608,9 +629,9 @@ pub fn background_section_view(
             hide_edges: key_edges_of(key.get("hideEdges")),
         }),
         hint: camera_selected.then(|| match mode {
-            "blur" => format!("{HINT} {BLUR_CAVEAT}"),
+            "blur" => format!("{} {BLUR_CAVEAT}", hint(platform)),
             _ if screen => SCREEN_HINT.to_string(),
-            _ => HINT.to_string(),
+            _ => hint(platform),
         }),
     }
 }
