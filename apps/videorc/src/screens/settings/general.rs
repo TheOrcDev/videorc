@@ -80,7 +80,10 @@ impl SettingsScreen {
             stream_manager_enabled: true,
             chat: &self.chat,
             usage: &self.usage,
-            session_active: snapshot.session.phase.is_active(),
+            // `firstRunReplayLocked`: a recording or livestream, never the
+            // Clips ring alone (#2478). Clips is on by default, so with the
+            // phase alone both buttons were off at every launch.
+            session_active: videorc_app_core::first_run::replay_locked(&snapshot.session.status),
             first_run_ported: true,
             account_name: self.account_name(),
         });
@@ -289,7 +292,12 @@ impl SettingsScreen {
                             Button::new("import-obs")
                                 .accessibility_label(c::IMPORT_FROM_OBS)
                                 .variant(ButtonVariant::Outline)
-                                .disabled(self.disabled() || snapshot.session.phase.is_active())
+                                .disabled(
+                                    self.disabled()
+                                        || videorc_app_core::first_run::replay_locked(
+                                            &snapshot.session.status,
+                                        ),
+                                )
                                 .child(icon(IconName::DownloadSimple, 16., hsla(t.foreground)))
                                 .child(c::IMPORT_FROM_OBS)
                                 .on_click(
