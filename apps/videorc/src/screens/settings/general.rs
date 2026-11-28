@@ -80,7 +80,7 @@ impl SettingsScreen {
             stream_manager_enabled: true,
             chat: &self.chat,
             usage: &self.usage,
-            session_active: snapshot.session.owns_transport(),
+            session_active: snapshot.session.phase.is_active(),
             first_run_ported: true,
             account_name: self.account_name(),
         });

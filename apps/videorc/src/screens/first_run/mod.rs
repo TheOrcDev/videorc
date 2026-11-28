@@ -439,7 +439,7 @@ impl FirstRunScreen {
     }
 
     pub fn open_replay(&mut self, return_to: PageId, cx: &mut Context<Self>) {
-        if self.studio.snapshot().session.owns_transport() {
+        if fr::replay_locked(&self.studio.snapshot().session.status) {
             return;
         }
         let platform = Some(self.platform());
@@ -507,7 +507,7 @@ impl FirstRunScreen {
             return;
         };
         self.performance_decided = true;
-        let session_active = snapshot.session.owns_transport();
+        let session_active = fr::replay_locked(&snapshot.session.status);
         if !perf::first_run_starts(true, session_active, Some(state)) {
             self.logger.info(format!(
                 "[first-run] performance check not started (running={}, take={}, measured={}, stale={})",
@@ -714,7 +714,7 @@ impl FirstRunScreen {
             "count": self.open.then_some(count),
             "goal": self.goal.map(|goal| goal.id()),
             "primary": primary,
-            "locked": self.studio.snapshot().session.owns_transport(),
+            "locked": fr::replay_locked(&self.studio.snapshot().session.status),
             "backdrop": {
                 "mode": mode,
                 "reason": reason,
@@ -848,7 +848,7 @@ impl FirstRunScreen {
     }
 
     fn pick_microphone(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.studio.snapshot().session.owns_transport() {
+        if fr::replay_locked(&self.studio.snapshot().session.status) {
             return;
         }
         let studio = self.studio.clone();
@@ -864,7 +864,7 @@ impl FirstRunScreen {
     }
 
     fn set_system_audio(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.studio.snapshot().session.owns_transport() {
+        if fr::replay_locked(&self.studio.snapshot().session.status) {
             return;
         }
         let studio = self.studio.clone();
@@ -874,7 +874,7 @@ impl FirstRunScreen {
     }
 
     fn set_layout(&mut self, preset: String, cx: &mut Context<Self>) {
-        if self.studio.snapshot().session.owns_transport() {
+        if fr::replay_locked(&self.studio.snapshot().session.status) {
             return;
         }
         self.layout_preset = Some(preset.clone());
@@ -889,7 +889,7 @@ impl FirstRunScreen {
     /// commits one, not only remembered here, so what setup shows is what
     /// Studio opens with. None takes the background off.
     fn set_background(&mut self, id: Option<&'static str>, cx: &mut Context<Self>) {
-        if self.studio.snapshot().session.owns_transport() {
+        if fr::replay_locked(&self.studio.snapshot().session.status) {
             return;
         }
         self.live_background = id;
@@ -1004,7 +1004,7 @@ impl FirstRunScreen {
         let snapshot = self.studio.snapshot();
         let vertical = self.orientation == Orientation::Vertical;
         let (camera_gap, screen_gap) = look_gaps(self, &snapshot);
-        let locked = snapshot.session.owns_transport();
+        let locked = fr::replay_locked(&snapshot.session.status);
         LAYOUT_PRESET_LABELS
             .iter()
             .filter(|(layout, _)| layout.starts_with("vertical-") == vertical)
@@ -1348,7 +1348,7 @@ impl Render for FirstRunScreen {
         let entity = cx.entity();
         let noun = device_noun(platform);
         let snapshot = self.studio.snapshot();
-        let locked = snapshot.session.owns_transport();
+        let locked = fr::replay_locked(&snapshot.session.status);
         let offline = !self.studio.is_connected();
         let grants_ready = self.grants_ready();
 
