@@ -534,6 +534,16 @@ try {
   backend = launch.backend
   collected = launch.collected
   await seedHostDevices(launch.smoke)
+  // `VIDEORC_CLOUD_TALK_THEME=light|dark`: the GPUI app's look for window
+  // shots (its `ui-appearance` command; the Electron renderer ignores it).
+  if (process.env.VIDEORC_CLOUD_TALK_THEME && process.env.VIDEORC_APP === 'gpui') {
+    await requestSmokeCommand(
+      launch.smoke,
+      'ui-appearance',
+      { theme: process.env.VIDEORC_CLOUD_TALK_THEME },
+      { timeoutMs: 15_000 }
+    )
+  }
   await checkSeatHolder('before-open')
   await waitForCloudStatus(
     backend,

@@ -125,7 +125,7 @@ struct ViewerFeed {
 }
 
 /// One poll, read off the main thread: a new frame is decoded there.
-enum ViewerPoll {
+pub(super) enum ViewerPoll {
     Frame(FrameCursor, Arc<RenderImage>),
     /// No camera frame: back to the pick's picture.
     Empty,
@@ -133,7 +133,7 @@ enum ViewerPoll {
 }
 
 /// The poll's BMP as a picture GPUI draws (BGRA, mirrored like the outputs).
-fn viewer_poll(poll: FramePoll, mirror: bool) -> ViewerPoll {
+pub(super) fn viewer_poll(poll: FramePoll, mirror: bool) -> ViewerPoll {
     match poll {
         FramePoll::Frame { cursor, bmp } => bgra_from_bmp(&bmp, mirror)
             .and_then(|frame| image::RgbaImage::from_raw(frame.width, frame.height, frame.pixels))

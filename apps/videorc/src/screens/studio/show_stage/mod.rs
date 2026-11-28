@@ -110,6 +110,37 @@ const MUTE_PROGRAM: &str = "Mute the program";
 const ROOM_HOST_PENDING: &str = "Opens once the talk-show room host joins.";
 const REQUESTS_SHOWN: usize = 3;
 
+/// Which picture a tile draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TilePicture {
+    /// The room's published track, polled from the backend.
+    Remote,
+    /// The host's own camera preview: the backend hosts the room, so their
+    /// own tile has no published track to draw (Q193, 2026-11-28).
+    OwnCamera,
+    /// Nothing yet: "No picture yet" (the camera-off state is drawn before).
+    None,
+}
+
+/// A tile draws the room's own picture when it has one. The host's person
+/// tile falls back to their own camera preview, never a screen tile and never
+/// anyone else's. The host's camera being off is the tile's camera-off
+/// avatar, decided before this.
+fn tile_picture(
+    kind: StageTileKind,
+    is_host: bool,
+    has_remote: bool,
+    has_own: bool,
+) -> TilePicture {
+    if has_remote {
+        TilePicture::Remote
+    } else if kind == StageTileKind::Person && is_host && has_own {
+        TilePicture::OwnCamera
+    } else {
+        TilePicture::None
+    }
+}
+
 fn cloud_facts(status: Option<&CloudStatus>) -> Option<CloudRoomFacts> {
     status.map(|status| CloudRoomFacts {
         entitled: status.entitled,
@@ -319,6 +350,13 @@ impl ShowStage {
         self.room_host
             .as_ref()
             .and_then(|host| host.read(cx).remote_frame(identity, source))
+    }
+
+    /// The host's own camera, for their tile ([`tile_picture`]).
+    fn own_camera_frame(&self, cx: &App) -> Option<Arc<RenderImage>> {
+        self.room_host
+            .as_ref()
+            .and_then(|host| host.read(cx).own_camera_frame())
     }
 
     /// Node shows: turn the Program monitor on while the room is open (as
@@ -683,7 +721,14 @@ impl ShowStage {
         } else {
             RemoteSource::Camera
         };
-        let frame = self.remote_frame(&tile.identity, source, cx);
+        let is_host = host_identity == Some(tile.identity.as_str());
+        let remote = self.remote_frame(&tile.identity, source, cx);
+        let own = self.own_camera_frame(cx);
+        let frame = match tile_picture(tile.kind, is_host, remote.is_some(), own.is_some()) {
+            TilePicture::Remote => remote,
+            TilePicture::OwnCamera => own,
+            TilePicture::None => None,
+        };
 
         let mut body = div()
             .absolute()
@@ -1740,5 +1785,60 @@ impl Render for ShowStage {
             .child(close_dialog)
             .child(self.share_dialog(window, cx))
             .child(self.moderation.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_host_tile_draws_their_own_camera_when_the_room_has_no_track_for_it() {
+        // A backend-held room publishes no track for the host: the poll finds
+        // none, and their own camera preview is what the tile draws.
+        assert_eq!(
+            tile_picture(StageTileKind::Person, true, false, true),
+            TilePicture::OwnCamera
+        );
+    }
+
+    #[test]
+    fn a_published_track_wins_over_the_own_camera() {
+        assert_eq!(
+            tile_picture(StageTileKind::Person, true, true, true),
+            TilePicture::Remote
+        );
+    }
+
+    #[test]
+    fn the_host_tile_with_no_own_camera_picture_yet_says_no_picture_yet() {
+        assert_eq!(
+            tile_picture(StageTileKind::Person, true, false, false),
+            TilePicture::None
+        );
+    }
+
+    #[test]
+    fn a_guest_tile_never_draws_the_hosts_camera() {
+        assert_eq!(
+            tile_picture(StageTileKind::Person, false, false, true),
+            TilePicture::None
+        );
+        assert_eq!(
+            tile_picture(StageTileKind::Person, false, true, true),
+            TilePicture::Remote
+        );
+    }
+
+    #[test]
+    fn a_screen_tile_never_draws_the_hosts_camera() {
+        assert_eq!(
+            tile_picture(StageTileKind::Screen, true, false, true),
+            TilePicture::None
+        );
+        assert_eq!(
+            tile_picture(StageTileKind::Screen, true, true, true),
+            TilePicture::Remote
+        );
     }
 }
