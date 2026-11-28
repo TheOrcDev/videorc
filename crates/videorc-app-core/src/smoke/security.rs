@@ -382,6 +382,9 @@ pub const SMOKE_BACKEND_RPC_METHOD_NAMES: &[&str] = &[
     "audio.test.inject-pcm",
     "captions.test.inject-audio",
     "captions.test.snapshot",
+    // Read-only: the backend room's last published presentation (the
+    // cloud-parity smokes on the GPUI app).
+    "cloud.room.presentation.get",
     "cohost.pet.import",
     "compositor.scene.update",
     "diagnostics.stats",
@@ -1659,6 +1662,7 @@ mod tests {
                 "audio.test.inject-pcm",
                 "captions.test.inject-audio",
                 "captions.test.snapshot",
+                "cloud.room.presentation.get",
                 "cohost.pet.import",
                 "compositor.scene.update",
                 "diagnostics.stats",

@@ -140,6 +140,7 @@ mod room_media;
 mod room_overlays;
 #[cfg(backend_room)]
 mod room_playout;
+mod room_presentation;
 mod room_program_camera;
 #[cfg(backend_room)]
 mod room_remote;
@@ -6793,6 +6794,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         // barrier with a 10 s recycle contract (2.3 to 6.1 s polls in the
         // 2026-11-18 owner log).
         | "cloud.graphics.snapshot"
+        // The backend room's last published presentation (`room_presentation`).
+        | "cloud.room.presentation.get"
         | "cloud.archive.status"
         | "cloud.recordings.downloads"
         | "cloud.iso.imports"
@@ -14389,6 +14392,23 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
+        }
+        // The backend room's presentation as it last published it, merged
+        // per part (`room_presentation`): what the Studio heard as
+        // `cloud.room.presentation`, read at once (the cloud-parity smokes on
+        // the GPUI app, where no renderer holds the room's snapshot).
+        "cloud.room.presentation.get" => {
+            #[cfg(backend_room)]
+            let held = room_host::holds_seat();
+            #[cfg(not(backend_room))]
+            let held = false;
+            ServerResponse::ok(
+                command.id,
+                serde_json::json!({
+                    "held": held,
+                    "presentation": room_presentation::latest(),
+                }),
+            )
         }
         // Plan 260 S1.8b: the room's presentation switches (Graphics first),
         // for the topics the backend sends while it holds the host seat.
@@ -23012,6 +23032,7 @@ mod tests {
             "cloud.recordings.downloads",
             "cloud.iso.imports",
             "cloud.graphics.snapshot",
+            "cloud.room.presentation.get",
             CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD,
             CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD,
         ] {

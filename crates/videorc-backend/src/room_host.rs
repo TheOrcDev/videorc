@@ -631,11 +631,13 @@ async fn hold(
                         };
                         report(&state, CloudRoomClientState::Disconnected, detail);
                         HOLDS_SEAT.store(false, Ordering::Release);
+                        crate::room_presentation::forget();
                         return;
                     }
                     DisconnectReason::RoomDeleted | DisconnectReason::ParticipantRemoved => {
                         report(&state, CloudRoomClientState::Disconnected, None);
                         HOLDS_SEAT.store(false, Ordering::Release);
+                        crate::room_presentation::forget();
                         return;
                     }
                     _ => report(&state, CloudRoomClientState::Disconnected, None),
@@ -745,6 +747,7 @@ async fn leave(state: &AppState, room: Option<Arc<Room>>) {
     crate::room_routing::clear();
     crate::room_aux::clear();
     crate::room_html::clear();
+    crate::room_presentation::forget();
     crate::room_remote::clear();
     crate::room_guest_speech::clear();
     crate::room_playout::clear();
