@@ -749,7 +749,10 @@ impl ShowStage {
             );
         }
 
-        let mut stack = div().child(body);
+        // The tile and its plate are placed by fractions of the well, so their
+        // layer fills the well: in an unsized parent they had no height and
+        // the whole stage drew nothing (2026-11-28).
+        let mut stack = div().absolute().inset_0().child(body);
         if let Some(plate) = tile.plate {
             // `tileVoice`: who talks and who can't be heard, on the picture.
             let voice = (tile.kind == StageTileKind::Person)
