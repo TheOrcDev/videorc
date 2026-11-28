@@ -33,6 +33,7 @@ use videorc_app_core::guests::session::ControllerFacts;
 use videorc_app_core::guests::view::stage_with_screen;
 use videorc_app_core::guests::wire::{RoomStatus, Stage};
 use videorc_app_core::library::cloud::{CloudRecordingStop, CloudRecordingWatch};
+use videorc_app_core::studio::camera_background_frames::poll_camera_frame;
 use videorc_app_core::studio::preview_scene::studio_scene_params;
 use videorc_app_core::studio::room_background::{self, LiveClockMemory};
 use videorc_app_core::studio::room_frames::{
@@ -55,6 +56,7 @@ use videorc_app_core::{BackendEvent, ConnectionState};
 use videorc_kit::toast::{ToastData, ToastKind};
 use videorc_protocol::Scene;
 
+use super::quick_settings::{ViewerPoll, viewer_poll};
 use super::room_picture::{self, background_with_encoded};
 use super::transport::AppStudio;
 use crate::app::bridge::Mirror;
@@ -176,6 +178,14 @@ pub struct TalkShowRoomHost {
     /// Each feed's last poll outcome, logged when it changes (a tile that
     /// stays empty names its cause once, not 15 times a second).
     poll_outcomes: HashMap<(String, RemoteSource), String>,
+    /// The host's own camera, from the camera preview frames the app already
+    /// polls for the Background popover (`camera_background_frames`): the
+    /// backend hosts the room, so the host's tile has no published track to
+    /// draw. There only while the room is open and the host's camera is on.
+    own_camera: Option<(FrameCursor, Arc<RenderImage>)>,
+    /// The own camera poll's last outcome, logged when it changes (a tile
+    /// that stays empty names its cause once).
+    own_camera_outcome: String,
     /// The feeds last asked for, logged when the set changes.
     logged_wanted: Vec<(String, RemoteSource)>,
     /// R4: the Program monitor takes the runner's return, and Listen.
@@ -299,6 +309,8 @@ impl TalkShowRoomHost {
         // on the backend's loopback server while the room publishes them.
         let poll_studio = studio.clone();
         let poll_runtime = runtime.clone();
+        let studio_for_own_camera = studio.clone();
+        let runtime_for_own_camera = runtime.clone();
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(TILE_INTERVAL).await;
@@ -343,6 +355,45 @@ impl TalkShowRoomHost {
             }
         })
         .detach();
+        // The host's own camera for their tile: the camera's frames the app
+        // already has (the route the Background popover polls), at the tiles'
+        // pace, only while the room is open and the host's camera is on.
+        let own_studio = studio_for_own_camera.clone();
+        let own_runtime = runtime_for_own_camera.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(TILE_INTERVAL).await;
+                let Ok(wanted) = this.update(cx, |host, cx| host.own_camera_wanted(cx)) else {
+                    break;
+                };
+                let Some((after, mirror)) = wanted else {
+                    continue;
+                };
+                let ConnectionState::Connected { ready, .. } = own_studio.backend().current_state()
+                else {
+                    continue;
+                };
+                let (port, token) = (ready.port, ready.token.clone());
+                let job = own_runtime.spawn(async move {
+                    poll_camera_frame(port, &token, after.as_ref())
+                        .await
+                        .map(|poll| viewer_poll(poll, mirror))
+                });
+                // A failed poll is asked again on the next tick.
+                let poll = match job.await {
+                    Ok(Ok(poll)) => Ok(poll),
+                    Ok(Err(error)) => Err(format!("poll failed: {error:#}")),
+                    Err(error) => Err(format!("poll task failed: {error}")),
+                };
+                if this
+                    .update(cx, |host, cx| host.take_own_camera_poll(poll, cx))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        })
+        .detach();
         // The cloud-controller entry's Turn on.
         if let Some(hub) = cx
             .try_global::<crate::screens::notifications::Shared>()
@@ -380,6 +431,8 @@ impl TalkShowRoomHost {
             avatar_guests: false,
             frames: HashMap::new(),
             poll_outcomes: HashMap::new(),
+            own_camera: None,
+            own_camera_outcome: String::new(),
             logged_wanted: Vec::new(),
             monitor: false,
             listening: false,
@@ -539,6 +592,65 @@ impl TalkShowRoomHost {
         self.frames
             .get(&(key.to_string(), source))
             .map(|(_, image)| image.clone())
+    }
+
+    /// The host's own camera picture, while the room is open and their camera
+    /// is on: the Show stage draws it in the host's tile when the room has no
+    /// published track for it (a backend-held room never does).
+    pub fn own_camera_frame(&self) -> Option<Arc<RenderImage>> {
+        self.own_camera.as_ref().map(|(_, image)| image.clone())
+    }
+
+    /// What to ask the camera route after, and which way round the camera is,
+    /// while the host's own camera should be drawn; otherwise the picture
+    /// goes (it leaves the GPU) and nothing is asked.
+    fn own_camera_wanted(&mut self, cx: &mut Context<Self>) -> Option<(Option<FrameCursor>, bool)> {
+        let wanted = self.room_open() && self.room_media.as_ref().is_some_and(|media| media.camera);
+        if !wanted {
+            if let Some((_, frame)) = self.own_camera.take() {
+                cx.drop_image(frame, None);
+                cx.notify();
+            }
+            return None;
+        }
+        let mirror = self
+            .studio
+            .watch()
+            .borrow()
+            .settings
+            .capture
+            .layout
+            .camera_mirror;
+        let after = self.own_camera.as_ref().map(|(cursor, _)| cursor.clone());
+        Some((after, mirror))
+    }
+
+    fn take_own_camera_poll(&mut self, poll: Result<ViewerPoll, String>, cx: &mut Context<Self>) {
+        let outcome = match &poll {
+            Ok(ViewerPoll::Frame(..)) => "frames".to_string(),
+            Ok(ViewerPoll::Empty) => "no picture (the camera preview has no frame)".to_string(),
+            Ok(ViewerPoll::Unchanged) => String::new(),
+            Err(why) => why.clone(),
+        };
+        if !outcome.is_empty() && self.own_camera_outcome != outcome {
+            eprintln!("[videorc-app] host own camera tile: {outcome}");
+            self.own_camera_outcome = outcome;
+        }
+        match poll {
+            Ok(ViewerPoll::Frame(cursor, image)) => {
+                if let Some((_, before)) = self.own_camera.replace((cursor, image)) {
+                    cx.drop_image(before, None);
+                }
+                cx.notify();
+            }
+            Ok(ViewerPoll::Empty) => {
+                if let Some((_, before)) = self.own_camera.take() {
+                    cx.drop_image(before, None);
+                    cx.notify();
+                }
+            }
+            Ok(ViewerPoll::Unchanged) | Err(_) => {}
+        }
     }
 
     /// The pictures to poll now, each with its cursor; the ones no longer
