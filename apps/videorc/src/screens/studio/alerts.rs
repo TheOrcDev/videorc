@@ -360,7 +360,7 @@ pub fn resume_card_of(
     cloud: &CloudState,
     snapshot: &StudioSnapshot,
 ) -> Option<CloudResumeCardView> {
-    let blocked = live_stream_blocked_reason(snapshot, &StartGates::default());
+    let blocked = live_stream_blocked_reason(snapshot, &StartGates::of_snapshot(snapshot));
     cloud_resume_card(CloudResumeInputs {
         status: cloud.status.as_ref(),
         session_active: transport_active(&snapshot.session),

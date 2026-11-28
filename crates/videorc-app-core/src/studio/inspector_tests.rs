@@ -323,6 +323,76 @@ fn the_gates_block_in_the_renderers_order() {
     );
 }
 
+/// A destination on with no key: on, but not ready to start.
+fn keyless(id: &str) -> videorc_protocol::streaming::StreamTargetSettings {
+    let mut target = destination(id, "Custom RTMP", true);
+    target.stream_key.clear();
+    target.stream_key_present = false;
+    target
+}
+
+#[test]
+fn a_destination_on_but_not_ready_blocks_go_live_with_the_finish_setup_reason() {
+    // The app fills the gate from the saved settings (`StartGates::of_snapshot`).
+    let mut snapshot = idle();
+    set_destinations(&mut snapshot, vec![keyless("custom")]);
+    let gates = StartGates::of_snapshot(&snapshot);
+    assert!(gates.destination_not_ready);
+    assert_eq!(
+        live_stream_blocked_reason(&snapshot, &gates).as_deref(),
+        Some(start_blocked_copy::DESTINATION_SETUP)
+    );
+    // Record is free: Record never needs a destination.
+    assert_eq!(record_blocked_reason(&snapshot, &gates), None);
+    assert_eq!(
+        blocked_jump(&snapshot, &gates),
+        Some(BlockedJump {
+            label: "Open Destinations",
+            page: PageId::Live,
+        })
+    );
+    // One ready destination beside the unfinished one still blocks (every
+    // destination on must be ready).
+    set_destinations(
+        &mut snapshot,
+        vec![destination("custom", "Custom RTMP", true), keyless("other")],
+    );
+    assert!(StartGates::of_snapshot(&snapshot).destination_not_ready);
+}
+
+#[test]
+fn ready_and_absent_destinations_leave_the_gate_off() {
+    let ready = idle();
+    assert!(!StartGates::of_snapshot(&ready).destination_not_ready);
+    assert_eq!(
+        live_stream_blocked_reason(&ready, &StartGates::of_snapshot(&ready)),
+        None
+    );
+    // None on: "no destination" is its own reason, not "finish setting up".
+    let mut none_on = idle();
+    set_destinations(
+        &mut none_on,
+        vec![destination("custom", "Custom RTMP", false)],
+    );
+    let gates = StartGates::of_snapshot(&none_on);
+    assert!(!gates.destination_not_ready);
+    assert_eq!(
+        live_stream_blocked_reason(&none_on, &gates).as_deref(),
+        Some(start_blocked_copy::NO_DESTINATION)
+    );
+    // An unfinished destination that is OFF does not block.
+    let mut off = idle();
+    set_destinations(
+        &mut off,
+        vec![destination("custom", "Custom RTMP", true), {
+            let mut target = keyless("other");
+            target.enabled = false;
+            target
+        }],
+    );
+    assert!(!StartGates::of_snapshot(&off).destination_not_ready);
+}
+
 #[test]
 fn a_blocked_go_live_jumps_to_destinations() {
     let cap = StartGates {

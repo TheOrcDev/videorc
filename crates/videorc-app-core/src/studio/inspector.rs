@@ -113,6 +113,17 @@ pub struct StartGates {
 }
 
 impl StartGates {
+    /// The gates the saved settings alone decide, which the app can always
+    /// fill in: a destination that is on but not ready to start. The
+    /// entitlement and topology gates stay off until their inputs land
+    /// (S1.6c, #1814).
+    pub fn of_snapshot(snapshot: &StudioSnapshot) -> Self {
+        Self {
+            destination_not_ready: destination_not_ready(snapshot),
+            ..Self::default()
+        }
+    }
+
     fn compatibility(&self, intent: SessionStartIntent) -> Option<&String> {
         if intent.stream {
             self.live_compatibility.as_ref()
@@ -120,6 +131,22 @@ impl StartGates {
             self.record_compatibility.as_ref()
         }
     }
+}
+
+/// `!areEnabledStreamTargetsStartReady` with a destination on: one that is
+/// on is not ready to start (`isStreamTargetStartReady`: a stream key and a
+/// valid server, or an account that can sign in). With none on, the gate is
+/// off: "no destination" is its own reason.
+pub fn destination_not_ready(snapshot: &StudioSnapshot) -> bool {
+    let Some(streaming) = snapshot.settings.capture.streaming.as_ref() else {
+        return false;
+    };
+    let Ok(streaming) = serde_json::to_value(streaming) else {
+        return false;
+    };
+    crate::livestream::lifecycle::typed_targets(&streaming)
+        .iter()
+        .any(|target| target.enabled && !crate::livestream::lifecycle::start_ready(target))
 }
 
 /// A destination is turned on in the saved config.

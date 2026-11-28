@@ -381,7 +381,7 @@ impl TransportView {
 mod tests {
     use super::*;
     use crate::studio::session::{SessionStartIntent, initial_status};
-    use crate::studio::test_support::{ready_snapshot, set_status};
+    use crate::studio::test_support::{destination, ready_snapshot, set_destinations, set_status};
     use chrono::TimeZone;
     use videorc_protocol::RecordingStatus;
 
@@ -661,6 +661,30 @@ mod tests {
         let overran = TransportView::from_snapshot(&overran, &gates, false);
         assert!(overran.stop_overrun);
         assert_eq!(overran.stop_label, "Force stop");
+    }
+
+    #[test]
+    fn a_destination_on_but_not_ready_disables_go_live_and_offers_the_jump() {
+        // What the GPUI app builds for its transport: the gate from the
+        // saved settings (`SessionControls::of`).
+        let mut snapshot = ready_snapshot();
+        let mut unfinished = destination("custom", "Custom RTMP", true);
+        unfinished.stream_key.clear();
+        unfinished.stream_key_present = false;
+        set_destinations(&mut snapshot, vec![unfinished]);
+        let view =
+            TransportView::from_snapshot(&snapshot, &StartGates::of_snapshot(&snapshot), false);
+        assert!(view.record_enabled && !view.go_live_enabled);
+        let reason = "Finish setting up your destination in Destinations before you go live.";
+        assert_eq!(view.go_live_blocked.as_deref(), Some(reason));
+        assert_eq!(view.blocked_reason.as_deref(), Some(reason));
+        assert_eq!(
+            view.blocked_jump,
+            Some(BlockedJump {
+                label: "Open Destinations",
+                page: crate::nav::PageId::Live,
+            })
+        );
     }
 
     #[test]
