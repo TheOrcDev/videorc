@@ -116,6 +116,7 @@ pub fn show(cx: &mut App) {
     options.window_min_size = Some(min_size);
     options.app_id = Some(app_id.into());
     let opened = cx.open_window(options, move |window, cx| {
+        crate::platform::install_title_bar_appearance_sync(window, cx);
         cx.new(|cx| Notes::new(frame, window, cx))
     });
     match opened {

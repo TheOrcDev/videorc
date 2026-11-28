@@ -741,6 +741,7 @@ fn main() -> Result<()> {
                 ..videorc_kit::window::options(nav::window_title(PageId::Studio), window_bounds)
             },
             |window, cx| {
+                platform::install_title_bar_appearance_sync(window, cx);
                 let preview = preview::Preview::new(
                     preview::PreviewSetup {
                         runtime: preview_runtime.clone(),
