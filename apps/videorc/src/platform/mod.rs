@@ -305,6 +305,65 @@ pub fn current() -> &'static dyn Platform {
     }
 }
 
+/// Whether a window's native title bar should use dark chrome for the app's
+/// theme override (`None` = System) and the OS window's current appearance.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn effective_title_bar_dark(
+    override_appearance: Option<gpui::WindowAppearance>,
+    window_appearance: gpui::WindowAppearance,
+) -> bool {
+    matches!(
+        override_appearance.unwrap_or(window_appearance),
+        gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+    )
+}
+
+/// Sync a window's Windows DWM title bar dark/light mode to the app's
+/// effective appearance. macOS and Linux are untouched.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn sync_window_title_bar_appearance(window: &Window, cx: &gpui::App) {
+    #[cfg(target_os = "windows")]
+    {
+        let override_appearance = cx
+            .try_global::<videorc_kit::theme::AppearanceOverride>()
+            .and_then(|override_value| override_value.0);
+        let dark = effective_title_bar_dark(override_appearance, window.appearance());
+        let _ = windows::set_title_bar_dark_mode(window, dark);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (window, cx);
+}
+
+/// Apply the current appearance to a newly opened window's title bar and keep
+/// it updated when Windows' own OS theme flips while Videorc is on System.
+pub fn install_title_bar_appearance_sync(window: &mut Window, cx: &gpui::App) {
+    #[cfg(target_os = "windows")]
+    {
+        sync_window_title_bar_appearance(window, cx);
+        window
+            .observe_window_appearance(|window, cx| {
+                sync_window_title_bar_appearance(window, cx);
+            })
+            .detach();
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (window, cx);
+}
+
+/// Apply the app's appearance override (`None` = System), update every open
+/// window's native title bar on Windows, and refresh all windows.
+pub fn apply_window_appearance(appearance: Option<gpui::WindowAppearance>, cx: &mut gpui::App) {
+    cx.set_window_appearance(appearance);
+    cx.set_global(videorc_kit::theme::AppearanceOverride(appearance));
+    #[cfg(target_os = "windows")]
+    for handle in cx.windows() {
+        let _ = handle.update(cx, |_, window, cx| {
+            sync_window_title_bar_appearance(window, cx);
+        });
+    }
+    cx.refresh_windows();
+}
+
 /// How this computer writes a day and a time (`format::day_label`), as
 /// `Intl.DateTimeFormat` with the system locale writes it in Electron: on
 /// macOS the system's own pattern for the user's region and 12/24-hour
@@ -322,5 +381,47 @@ pub fn system_date_style() -> Option<videorc_app_core::format::DateStyle> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::WindowAppearance;
+
+    use super::effective_title_bar_dark;
+
+    #[test]
+    fn title_bar_dark_mode_matches_light_dark_and_system_against_both_windows_modes() {
+        // Explicit Light override turns off immersive dark mode even when Windows is dark.
+        assert!(!effective_title_bar_dark(
+            Some(WindowAppearance::Light),
+            WindowAppearance::Dark
+        ));
+        assert!(!effective_title_bar_dark(
+            Some(WindowAppearance::Light),
+            WindowAppearance::Light
+        ));
+
+        // Explicit Dark override turns on immersive dark mode even when Windows is light.
+        assert!(effective_title_bar_dark(
+            Some(WindowAppearance::Dark),
+            WindowAppearance::Light
+        ));
+        assert!(effective_title_bar_dark(
+            Some(WindowAppearance::Dark),
+            WindowAppearance::Dark
+        ));
+
+        // System (None) follows Windows' own appearance.
+        assert!(!effective_title_bar_dark(None, WindowAppearance::Light));
+        assert!(effective_title_bar_dark(None, WindowAppearance::Dark));
+        assert!(!effective_title_bar_dark(
+            None,
+            WindowAppearance::VibrantLight
+        ));
+        assert!(effective_title_bar_dark(
+            None,
+            WindowAppearance::VibrantDark
+        ));
     }
 }
