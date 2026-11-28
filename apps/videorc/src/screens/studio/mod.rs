@@ -86,7 +86,7 @@ use soundboard::SoundboardSection;
 use space::{KEY_CONTEXT, SPACE, SpaceAction, SpacePress, ToggleRecord, space_action};
 use takeover::TakeoverSection;
 use talk_show_host::TalkShowRoomHost;
-use transport::{AppStudio, OpenPage, Transport};
+use transport::{AppStudio, OpenPage, RecordOrigin, Transport};
 use vertical_stream::VerticalStreamSection;
 
 /// Binds the page's keys; call once at start.
@@ -357,7 +357,7 @@ impl StudioPage {
             SpaceAction::Pass => cx.propagate(),
             SpaceAction::Swallow => {}
             SpaceAction::Stop => self.transport.read(cx).stop(StopOrigin::Space),
-            SpaceAction::Record => self.transport.read(cx).record(),
+            SpaceAction::Record => self.transport.read(cx).record(RecordOrigin::Space),
         }
     }
 }

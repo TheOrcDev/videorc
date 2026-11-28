@@ -14,9 +14,13 @@
 //! Go Live opens the confirmation dialog (`studio::go_live::open_go_live`);
 //! End livestream is the shell's dialog (`screens::dialogs`, P1436–P1439).
 
+use std::fmt;
 use std::sync::Arc;
 
-use gpui::{AnyElement, Context, Entity, EventEmitter, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, ClickEvent, Context, Entity, EventEmitter, KeyboardButton, Window, div, prelude::*,
+    px,
+};
 use videorc_app_core::nav::PageId;
 use videorc_app_core::settings_page::SettingsTab;
 use videorc_app_core::studio::cloud::CloudState;
@@ -247,11 +251,13 @@ impl Transport {
         self.studio.clone()
     }
 
-    pub fn record(&self) {
+    /// Starts a recording. The log line names what pressed Record, so a
+    /// recording nobody meant to start says where it came from (#2512 item 2).
+    pub fn record(&self, origin: RecordOrigin) {
         let studio = self.studio.clone();
         self.runtime.spawn(async move {
             let outcome = studio.start_recording().await;
-            eprintln!("[videorc-app] Record: {outcome:?}");
+            eprintln!("[videorc-app] Record: {outcome:?} (from {origin})");
         });
     }
 
@@ -355,13 +361,13 @@ impl Transport {
             .when_some(record.reason.clone(), |button, reason| {
                 button.tooltip(reason)
             })
-            .on_click(cx.listener(move |this, _, _, _| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, _| {
                 if stops_cloud {
                     this.stop_cloud_recording();
                 } else if stops {
                     this.stop(StopOrigin::Button);
                 } else {
-                    this.record();
+                    this.record(RecordOrigin::of_click(event));
                 }
             }));
         let mut buttons = div()
@@ -481,6 +487,70 @@ impl Render for Transport {
         let view = &controls.transport;
         let outputs = self.talk_show.read(cx).value().transport_outputs();
         self.render_default(theme, view, outputs.as_ref(), cx)
+    }
+}
+
+/// What pressed Record, as the log names it (#2512 item 2: recordings that
+/// nobody started, seen after a UI Automation Invoke).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RecordOrigin {
+    /// Space on the Studio page itself (`space::space_action`).
+    Space,
+    /// The Record button, pressed and released by a pointer at these window
+    /// points. An assistive Invoke arrives this way too: GPUI clicks the
+    /// centre of the button's accessibility node, so down and up match
+    /// exactly and `first_mouse` is false.
+    Pointer {
+        down: (f32, f32),
+        up: (f32, f32),
+        clicks: usize,
+        first_mouse: bool,
+    },
+    /// The Record button, from the keyboard while it has focus.
+    Keyboard(KeyboardButton),
+    /// The Record button, tapped on a touch screen.
+    Touch { at: (f32, f32) },
+}
+
+impl RecordOrigin {
+    pub fn of_click(event: &ClickEvent) -> Self {
+        let point = |p: gpui::Point<gpui::Pixels>| (f32::from(p.x), f32::from(p.y));
+        match event {
+            ClickEvent::Mouse(click) => Self::Pointer {
+                down: point(click.down.position),
+                up: point(click.up.position),
+                clicks: click.down.click_count,
+                first_mouse: click.down.first_mouse,
+            },
+            ClickEvent::Keyboard(key) => Self::Keyboard(key.button),
+            ClickEvent::Touch(tap) => Self::Touch {
+                at: point(tap.position),
+            },
+        }
+    }
+}
+
+impl fmt::Display for RecordOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Space => write!(f, "Space on the Studio page"),
+            Self::Pointer {
+                down,
+                up,
+                clicks,
+                first_mouse,
+            } => write!(
+                f,
+                "the Record button: pointer down at ({:.1}, {:.1}), up at ({:.1}, {:.1}), click {clicks}{}",
+                down.0,
+                down.1,
+                up.0,
+                up.1,
+                if *first_mouse { ", first mouse" } else { "" }
+            ),
+            Self::Keyboard(key) => write!(f, "the Record button: {key:?} key"),
+            Self::Touch { at } => write!(f, "the Record button: tap at ({:.1}, {:.1})", at.0, at.1),
+        }
     }
 }
 
@@ -636,5 +706,50 @@ mod tests {
         let go_live = GoLiveFace::of(&idle(), Some(&outputs)).unwrap();
         assert_eq!(go_live.label, "Go Live");
         assert!(!go_live.ends_livestream);
+    }
+
+    #[test]
+    fn a_pointer_press_on_record_names_where_it_landed() {
+        let event = ClickEvent::Mouse(gpui::MouseClickEvent {
+            down: gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position: gpui::point(px(1130.), px(122.5)),
+                click_count: 1,
+                ..Default::default()
+            },
+            up: gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position: gpui::point(px(1130.), px(122.5)),
+                click_count: 1,
+                ..Default::default()
+            },
+        });
+        let origin = RecordOrigin::of_click(&event);
+        assert_eq!(
+            origin,
+            RecordOrigin::Pointer {
+                down: (1130.0, 122.5),
+                up: (1130.0, 122.5),
+                clicks: 1,
+                first_mouse: false,
+            }
+        );
+        assert_eq!(
+            origin.to_string(),
+            "the Record button: pointer down at (1130.0, 122.5), up at (1130.0, 122.5), click 1"
+        );
+    }
+
+    #[test]
+    fn space_and_the_keyboard_are_told_apart() {
+        let key = ClickEvent::Keyboard(gpui::KeyboardClickEvent {
+            button: KeyboardButton::Enter,
+            bounds: Default::default(),
+        });
+        assert_eq!(
+            RecordOrigin::of_click(&key).to_string(),
+            "the Record button: Enter key"
+        );
+        assert_eq!(RecordOrigin::Space.to_string(), "Space on the Studio page");
     }
 }
