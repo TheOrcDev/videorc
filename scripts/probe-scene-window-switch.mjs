@@ -51,7 +51,7 @@
 //
 // Usage: pnpm probe:scene-window-switch [-- --switches 20 --budget-ms 150
 //   --variants idle,recording,layout --mode scenes|direct --canvas 1920x1080
-//   --fps 30 --settle-ms 1200 --out <dir>]
+//   --fps 30 --settle-ms 1200 --out <dir> --start backend|studio]
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
@@ -345,6 +345,24 @@ process.exit(exitCode)
 
 // ---------------------------------------------------------------------------
 
+function startedBy() {
+  return options.start === 'studio' ? 'the Studio\'s Record (studio-record)' : 'session.start'
+}
+
+// `--start studio` (GPUI): the take starts and stops the way Record and Stop
+// do (the Studio's own session.start), into the Studio's recordings folder;
+// the backend's status names the file.
+async function startFromStudio(smoke) {
+  if (!smokeAppIsGpui()) throw new Error('--start studio needs the GPUI app (VIDEORC_APP=gpui)')
+  await requestSmokeCommand(smoke, 'studio-record', {}, { timeoutMs })
+  return request(ws, timeoutMs, 'recording.status')
+}
+
+async function stopFromStudio(smoke) {
+  await requestSmokeCommand(smoke, 'studio-stop', {}, { timeoutMs })
+  return request(ws, timeoutMs, 'recording.status')
+}
+
 async function runVariant(name, { renderer, targets, record, smoke, layoutMark = null }) {
   log(`variant ${name}: ${options.switches} switches, ${record ? 'recording' : 'idle'}`)
   const variant = {
@@ -367,7 +385,9 @@ async function runVariant(name, { renderer, targets, record, smoke, layoutMark =
       { timeoutMs }
     )
     const visual = (await renderer.state()).visual
-    started = await request(ws, timeoutMs, 'session.start', {
+    started = options.start === 'studio'
+      ? await startFromStudio(smoke)
+      : await request(ws, timeoutMs, 'session.start', {
       sources: visual.sources,
       layout: visual.layout,
       background: null,
@@ -380,7 +400,7 @@ async function runVariant(name, { renderer, targets, record, smoke, layoutMark =
       }
     })
     if (!['recording', 'streaming'].includes(started.state)) {
-      fail(`[${name}] expected a recording after session.start, got ${started.state}`)
+      fail(`[${name}] expected a recording after ${startedBy()}, got ${started.state}`)
     }
     await renderer.waitFor(
       (state) => ['recording', 'streaming'].includes(state.recording),
@@ -411,7 +431,9 @@ async function runVariant(name, { renderer, targets, record, smoke, layoutMark =
       variant.flashes.push(await flashFixture(targets.alpha.fixture, 'end'))
     }
     await sleep(900)
-    const stopped = await request(ws, timeoutMs, 'session.stop')
+    const stopped = options.start === 'studio'
+      ? await stopFromStudio(smoke)
+      : await request(ws, timeoutMs, 'session.stop')
     await renderer.waitFor((state) => state.recording === 'idle', `${name}: session stopped`)
     const file = await resolveFinalRecordingPath({ started, stopped, timeoutMs })
     if (!file || !existsSync(file)) fail(`[${name}] recording file missing: ${file}`)
@@ -1218,7 +1240,8 @@ function parseArgs(argv) {
     settleMs: 1200,
     out: null,
     summaryOut: null,
-    fixtureDir: null
+    fixtureDir: null,
+    start: 'backend'
   }
   const take = (index) => {
     if (index + 1 >= argv.length) throw new Error(`${argv[index]} needs a value`)
@@ -1268,6 +1291,9 @@ function parseArgs(argv) {
         break
       case '--fixture-dir':
         parsed.fixtureDir = value()
+        break
+      case '--start':
+        parsed.start = value() === 'studio' ? 'studio' : 'backend'
         break
       default:
         throw new Error(`Unknown argument ${argument}`)
