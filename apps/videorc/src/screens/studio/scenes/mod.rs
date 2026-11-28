@@ -1039,17 +1039,31 @@ fn card_keys(keys: &[CardKey]) -> Option<AnyElement> {
     if keys.is_empty() {
         return None;
     }
+    let row = div().flex().items_center().gap(px(4.));
+    // A conflict's words ("Another app uses Ctrl+Alt+Shift+1") are much
+    // wider than a key chip on Windows and Linux. They give way to the card
+    // and end in "…" instead of drawing over the next card; the chips keep
+    // their size.
+    let row = if keys
+        .iter()
+        .any(|key| matches!(key, CardKey::Conflict { .. }))
+    {
+        row.min_w_0().overflow_hidden()
+    } else {
+        row.flex_none()
+    };
     Some(
-        div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(4.))
-            .children(keys.iter().map(|key| match key {
+        row.children(keys.iter().map(|key| {
+            match key {
                 CardKey::Chip { label, .. } => Kbd::new(label.clone()).into_any_element(),
-                CardKey::Conflict { reason, .. } => div().child(reason.clone()).into_any_element(),
-            }))
-            .into_any_element(),
+                CardKey::Conflict { reason, .. } => div()
+                    .min_w_0()
+                    .truncate()
+                    .child(reason.clone())
+                    .into_any_element(),
+            }
+        }))
+        .into_any_element(),
     )
 }
 
