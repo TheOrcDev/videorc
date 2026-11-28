@@ -1,0 +1,225 @@
+{
+  "about": "isStreamTargetStartReady for every destination kind, shared by apps/desktop (lib/stream-target-start-ready.test.ts) and videorc-app-core (studio/inspector_tests.rs, livestream::lifecycle::start_ready and StartGates::of_snapshot). A case is `base` with `target` laid over it. `ready` is the answer both must give. Sign-in state is not part of the answer: an account kind is ready whenever its platform can sign in at all.",
+  "base": {
+    "id": "t",
+    "platform": "custom",
+    "label": "Destination",
+    "enabled": true,
+    "serverUrl": "",
+    "urlMode": "server-and-key",
+    "streamKey": "",
+    "streamKeyPresent": false,
+    "authMode": "manual-rtmp",
+    "createdAt": "2026-11-28T00:00:00Z",
+    "updatedAt": "2026-11-28T00:00:00Z"
+  },
+  "cases": [
+    {
+      "name": "signed-in YouTube account, no key in settings",
+      "kind": "youtube-oauth",
+      "ready": true,
+      "target": {
+        "platform": "youtube",
+        "authMode": "oauth",
+        "accountId": "acc-yt",
+        "accountLabel": "My channel"
+      }
+    },
+    {
+      "name": "YouTube account kind with nothing else is still ready (sign-in state is not read)",
+      "kind": "youtube-oauth",
+      "ready": true,
+      "target": {
+        "platform": "youtube",
+        "authMode": "oauth"
+      }
+    },
+    {
+      "name": "signed-in X account, no key in settings",
+      "kind": "x-oauth",
+      "ready": true,
+      "target": {
+        "platform": "x",
+        "authMode": "oauth",
+        "accountId": "acc-x",
+        "accountLabel": "@me"
+      }
+    },
+    {
+      "name": "signed-in Twitch account, no key in settings",
+      "kind": "twitch-oauth",
+      "ready": true,
+      "target": {
+        "platform": "twitch",
+        "authMode": "oauth",
+        "accountId": "acc-tw",
+        "accountLabel": "me"
+      }
+    },
+    {
+      "name": "signed-in Kick account, no key in settings",
+      "kind": "kick-oauth",
+      "ready": true,
+      "target": {
+        "platform": "kick",
+        "authMode": "oauth",
+        "accountId": "acc-kick",
+        "accountLabel": "me"
+      }
+    },
+    {
+      "name": "Facebook has no sign-in, so an oauth Facebook card is not ready",
+      "kind": "facebook-oauth",
+      "ready": false,
+      "target": {
+        "platform": "facebook",
+        "authMode": "oauth"
+      }
+    },
+    {
+      "name": "Custom RTMP set to oauth is not ready (no account to sign in to)",
+      "kind": "custom-oauth",
+      "ready": false,
+      "target": {
+        "platform": "custom",
+        "authMode": "oauth"
+      }
+    },
+    {
+      "name": "Custom RTMP with server and key",
+      "kind": "custom-key",
+      "ready": true,
+      "target": {
+        "serverUrl": "rtmp://127.0.0.1/live",
+        "streamKey": "abc123"
+      }
+    },
+    {
+      "name": "Custom RTMP with server and no key",
+      "kind": "custom-key",
+      "ready": false,
+      "target": {
+        "serverUrl": "rtmp://127.0.0.1/live"
+      }
+    },
+    {
+      "name": "Custom RTMP with a key and no server",
+      "kind": "custom-key",
+      "ready": false,
+      "target": {
+        "streamKey": "abc123"
+      }
+    },
+    {
+      "name": "Custom RTMP with a whitespace-only key",
+      "kind": "custom-key",
+      "ready": false,
+      "target": {
+        "serverUrl": "rtmp://127.0.0.1/live",
+        "streamKey": "   "
+      }
+    },
+    {
+      "name": "Custom RTMP with a server that is not rtmp or rtmps",
+      "kind": "custom-key",
+      "ready": false,
+      "target": {
+        "serverUrl": "http://example.com/live",
+        "streamKey": "abc123"
+      }
+    },
+    {
+      "name": "Custom RTMP with rtmps and no host",
+      "kind": "custom-key",
+      "ready": false,
+      "target": {
+        "serverUrl": "rtmps://",
+        "streamKey": "abc123"
+      }
+    },
+    {
+      "name": "Custom RTMP with rtmps, host, port and path",
+      "kind": "custom-key",
+      "ready": true,
+      "target": {
+        "serverUrl": "rtmps://live.example.com:443/app",
+        "streamKey": "abc123"
+      }
+    },
+    {
+      "name": "key kept in the secret store: a reference and no key in the snapshot",
+      "kind": "secret-store-key",
+      "ready": true,
+      "target": {
+        "platform": "twitch",
+        "serverUrl": "rtmp://live.twitch.tv/app",
+        "streamKeySecretRef": "secret://stream-key/twitch"
+      }
+    },
+    {
+      "name": "key kept in the secret store: only the present flag",
+      "kind": "secret-store-key",
+      "ready": true,
+      "target": {
+        "platform": "twitch",
+        "serverUrl": "rtmp://live.twitch.tv/app",
+        "streamKeyPresent": true
+      }
+    },
+    {
+      "name": "key kept in the secret store: an empty reference and no flag is no key",
+      "kind": "secret-store-key",
+      "ready": false,
+      "target": {
+        "platform": "twitch",
+        "serverUrl": "rtmp://live.twitch.tv/app",
+        "streamKeySecretRef": ""
+      }
+    },
+    {
+      "name": "manual YouTube card with its default server and a stored key",
+      "kind": "youtube-key",
+      "ready": true,
+      "target": {
+        "platform": "youtube",
+        "serverUrl": "rtmp://a.rtmp.youtube.com/live2",
+        "streamKeyPresent": true
+      }
+    },
+    {
+      "name": "manual YouTube card with its default server and no key",
+      "kind": "youtube-key",
+      "ready": false,
+      "target": {
+        "platform": "youtube",
+        "serverUrl": "rtmp://a.rtmp.youtube.com/live2"
+      }
+    },
+    {
+      "name": "full-URL mode with a stored full URL (no server field)",
+      "kind": "full-url",
+      "ready": true,
+      "target": {
+        "urlMode": "full-url",
+        "streamKeySecretRef": "secret://stream-key/custom"
+      }
+    },
+    {
+      "name": "full-URL mode with the full URL typed in the server field",
+      "kind": "full-url",
+      "ready": true,
+      "target": {
+        "urlMode": "full-url",
+        "serverUrl": "rtmp://example.com/live/key"
+      }
+    },
+    {
+      "name": "full-URL mode with nothing",
+      "kind": "full-url",
+      "ready": false,
+      "target": {
+        "urlMode": "full-url"
+      }
+    }
+  ]
+}

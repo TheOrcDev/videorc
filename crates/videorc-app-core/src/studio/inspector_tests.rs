@@ -331,6 +331,68 @@ fn keyless(id: &str) -> videorc_protocol::streaming::StreamTargetSettings {
     target
 }
 
+/// `protocol-fixtures/stream-target-start-ready.json`: `isStreamTargetStartReady`
+/// for every destination kind, the same cases the desktop's
+/// `lib/stream-target-start-ready.test.ts` runs through the TypeScript.
+fn start_ready_cases() -> Vec<(String, String, bool, serde_json::Value)> {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../protocol-fixtures/stream-target-start-ready.json"
+    ))
+    .expect("the start-ready fixture");
+    let base = fixture["base"].clone();
+    fixture["cases"]
+        .as_array()
+        .expect("cases")
+        .iter()
+        .map(|case| {
+            let mut target = base.clone();
+            for (key, value) in case["target"].as_object().expect("target") {
+                target[key] = value.clone();
+            }
+            (
+                case["kind"].as_str().expect("kind").to_string(),
+                case["name"].as_str().expect("name").to_string(),
+                case["ready"].as_bool().expect("ready"),
+                target,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn start_ready_answers_as_electron_for_every_destination_kind() {
+    let cases = start_ready_cases();
+    assert!(cases.len() >= 20, "the fixture lost cases");
+    for (kind, name, ready, target) in &cases {
+        let parsed: crate::livestream::targets::Target =
+            serde_json::from_value(target.clone()).expect("a target");
+        assert_eq!(
+            crate::livestream::lifecycle::start_ready(&parsed),
+            *ready,
+            "{kind}: {name}"
+        );
+    }
+}
+
+#[test]
+fn the_transport_gate_answers_as_electron_for_every_destination_kind() {
+    // Through the whole chain the app uses: the typed settings in the
+    // snapshot, to JSON, to the gate (`StartGates::of_snapshot`).
+    for (kind, name, ready, target) in start_ready_cases() {
+        let typed: videorc_protocol::streaming::StreamTargetSettings =
+            serde_json::from_value(target).expect("a typed stream target");
+        let mut snapshot = idle();
+        set_destinations(&mut snapshot, vec![typed]);
+        let gates = StartGates::of_snapshot(&snapshot);
+        assert_eq!(gates.destination_not_ready, !ready, "{kind}: {name}");
+        assert_eq!(
+            live_stream_blocked_reason(&snapshot, &gates).as_deref(),
+            (!ready).then_some(start_blocked_copy::DESTINATION_SETUP),
+            "{kind}: {name}"
+        );
+    }
+}
+
 #[test]
 fn a_destination_on_but_not_ready_blocks_go_live_with_the_finish_setup_reason() {
     // The app fills the gate from the saved settings (`StartGates::of_snapshot`).
