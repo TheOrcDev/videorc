@@ -252,9 +252,9 @@ fn main() -> Result<()> {
         .extra_env
         .extend(bundled.backend_env(&paths.user_data_dir));
     // A package's own FFmpeg (S5.1a), as Electron's main hands it over: the
-    // binary named, and its folder first on PATH. A dev build on Windows and
-    // Linux takes the checkout's pinned vendor FFmpeg the same way, as
-    // Electron's dev main does; macOS dev keeps the one on PATH.
+    // binary named, and its folder first on PATH. A dev build on Windows
+    // takes the checkout's pinned vendor FFmpeg the same way, as Electron's
+    // dev main does; macOS and Linux dev keep the one on PATH.
     let bundled_ffmpeg = match resources.as_deref() {
         Some(resources) => videorc_app_core::bundled::bundled_ffmpeg(resources),
         None => videorc_app_core::bundled::workspace_ffmpeg(&root),
