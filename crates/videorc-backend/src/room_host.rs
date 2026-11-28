@@ -68,8 +68,12 @@ fn needs_stage(identity: &str) -> bool {
 
 /// The rejoin backoff, as the renderer's (seconds).
 const REJOIN_BACKOFF_S: [u64; 5] = [1, 2, 4, 8, 15];
-/// How long a duplicate identity waits before it reports the take-over.
+/// How long a duplicate identity waits for `onAir` to name another device
+/// before it stops waiting (`TAKEN_OVER_GRACE_MS` in `talk-show-room.ts`).
 const TAKE_OVER_WAIT: Duration = Duration::from_secs(3);
+/// How often a duplicate identity checks whether `onAir` already moved to
+/// another device (`TAKEN_OVER_POLL_MS` in `talk-show-room.ts`).
+const TAKE_OVER_POLL: Duration = Duration::from_millis(100);
 
 /// Whether the backend holds (or is getting) the host seat.
 static HOLDS_SEAT: AtomicBool = AtomicBool::new(false);
@@ -255,6 +259,39 @@ async fn follow(state: AppState) {
             _ => {}
         }
     }
+}
+
+fn live_elsewhere(state: &AppState) -> bool {
+    crate::cloud_show::lock(&state.cloud_show).live_elsewhere()
+}
+
+/// Plan 243 C5 (`#duplicateHost` in `talk-show-room.ts`): after
+/// `DuplicateIdentity`, return immediately once `onAir` already names another
+/// device (so `reclaim_host`'s 5 s timer cannot beat the disconnect report), or
+/// poll up to `max_wait` if the state poll has not landed yet. Returns `None`
+/// if `stop` fired while waiting.
+async fn wait_for_takeover_detail<F>(
+    stop: &mut oneshot::Receiver<()>,
+    max_wait: Duration,
+    poll: Duration,
+    mut is_elsewhere: F,
+) -> Option<Option<&'static str>>
+where
+    F: FnMut() -> bool,
+{
+    let mut waited = Duration::ZERO;
+    while !is_elsewhere() && waited < max_wait {
+        let step = poll.min(max_wait.saturating_sub(waited));
+        if step.is_zero() {
+            break;
+        }
+        tokio::select! {
+            _ = &mut *stop => return None,
+            _ = tokio::time::sleep(step) => {}
+        }
+        waited += step;
+    }
+    Some(is_elsewhere().then_some(TAKEN_OVER_DETAIL))
 }
 
 fn report(state: &AppState, client: CloudRoomClientState, detail: Option<&str>) {
@@ -582,15 +619,17 @@ async fn hold(
                 tracing::info!("The talk show's room disconnected the backend: {reason:?}");
                 match reason {
                     DisconnectReason::DuplicateIdentity => {
-                        tokio::select! {
-                            _ = &mut stop => return leave(&state, None).await,
-                            _ = tokio::time::sleep(TAKE_OVER_WAIT) => {}
-                        }
-                        report(
-                            &state,
-                            CloudRoomClientState::Disconnected,
-                            Some(TAKEN_OVER_DETAIL),
-                        );
+                        let Some(detail) = wait_for_takeover_detail(
+                            &mut stop,
+                            TAKE_OVER_WAIT,
+                            TAKE_OVER_POLL,
+                            || live_elsewhere(&state),
+                        )
+                        .await
+                        else {
+                            return leave(&state, None).await;
+                        };
+                        report(&state, CloudRoomClientState::Disconnected, detail);
                         HOLDS_SEAT.store(false, Ordering::Release);
                         return;
                     }
@@ -812,5 +851,50 @@ mod tests {
         assert_eq!(REJOIN_BACKOFF_S, [1, 2, 4, 8, 15]);
         let options = room_options();
         assert!(!options.auto_subscribe && !options.adaptive_stream && options.dynacast);
+    }
+
+    #[tokio::test]
+    async fn duplicate_identity_reports_immediately_when_already_elsewhere() {
+        let (_tx, mut stop) = oneshot::channel();
+        let started = tokio::time::Instant::now();
+        let detail = wait_for_takeover_detail(
+            &mut stop,
+            Duration::from_secs(3),
+            Duration::from_millis(100),
+            || true,
+        )
+        .await;
+        assert_eq!(detail, Some(Some(TAKEN_OVER_DETAIL)));
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "already-elsewhere duplicate host must not sleep for the full grace window"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_identity_waits_for_elsewhere_or_falls_back_to_room_lost() {
+        let (_tx1, mut stop1) = oneshot::channel();
+        let mut polls = 0usize;
+        let detail = wait_for_takeover_detail(
+            &mut stop1,
+            Duration::from_millis(200),
+            Duration::from_millis(10),
+            || {
+                polls += 1;
+                polls >= 3
+            },
+        )
+        .await;
+        assert_eq!(detail, Some(Some(TAKEN_OVER_DETAIL)));
+
+        let (_tx2, mut stop2) = oneshot::channel();
+        let lost = wait_for_takeover_detail(
+            &mut stop2,
+            Duration::from_millis(30),
+            Duration::from_millis(10),
+            || false,
+        )
+        .await;
+        assert_eq!(lost, Some(None));
     }
 }
