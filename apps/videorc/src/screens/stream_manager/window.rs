@@ -9,8 +9,8 @@
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext, Bounds, Context, FocusHandle, Global, KeyBinding, Subscription, Window,
-    WindowHandle, actions, div, prelude::*, px, size,
+    App, AppContext, Context, FocusHandle, Global, KeyBinding, Subscription, Window, WindowHandle,
+    actions, div, prelude::*, px, size,
 };
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -173,17 +173,16 @@ fn show_at(target: Option<gpui::Bounds<gpui::Pixels>>, focus: bool, cx: &mut App
         )
     };
     let saved = frame.opening(cx);
-    let bounds = target.or(saved).unwrap_or_else(|| {
-        Bounds::centered(
-            None,
-            size(px(DEFAULT_WIDTH as f32), px(DEFAULT_HEIGHT as f32)),
-            cx,
-        )
-    });
+    let (bounds, min_size) = crate::app::frames::clamp_opening_bounds(
+        target.or(saved),
+        (DEFAULT_WIDTH, DEFAULT_HEIGHT),
+        (f64::from(MIN_WIDTH), f64::from(MIN_HEIGHT)),
+        cx,
+    );
     let mut options = window::options(TITLE, bounds);
     options.focus = focus;
     options.show = target.is_none();
-    options.window_min_size = Some(size(px(MIN_WIDTH), px(MIN_HEIGHT)));
+    options.window_min_size = Some(min_size);
     options.app_id = Some(app_id.into());
     let opened = cx.open_window(options, move |window, cx| {
         cx.new(|cx| StreamManager::new(frame, dashboard, studio, runtime, window, cx))
