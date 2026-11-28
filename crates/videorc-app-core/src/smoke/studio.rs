@@ -73,6 +73,7 @@ pub const STUDIO_SMOKE_COMMANDS: &[&str] = &[
     "studio-room-fixture-devices",
     "studio-privacy-add-app",
     "studio-privacy-state",
+    "studio-put-setting",
     "studio-scene-apply",
     "studio-scene-background",
     "studio-scene-delete",
@@ -428,6 +429,28 @@ impl StudioSmoke {
             .await
             .map_err(|error| format!("The capture config was not saved: {error}"))?;
         Ok(json!({ "configured": true, "state": state_json(&self.studio.snapshot()) }))
+    }
+
+    /// `studio-put-setting {key, value}`: one field of the Studio's settings
+    /// (`videorc.settings`) through the Studio's own write, as the renderer's
+    /// `setSettings(current => ({...current, [key]: value}))`. A write from
+    /// outside the app (`ui.settings.set`) is overwritten by the next one the
+    /// Studio makes from what it holds.
+    async fn put_setting(&self, params: Map<String, Value>) -> Result<Value, String> {
+        self.settings_ready().await?;
+        let key = text_param(&params, "key")
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| "studio-put-setting needs a key.".to_string())?
+            .to_string();
+        let value = params
+            .get("value")
+            .cloned()
+            .ok_or_else(|| "studio-put-setting needs a value.".to_string())?;
+        self.studio
+            .update_studio_settings(|settings| settings.set(&key, value.clone()))
+            .await
+            .map_err(|error| format!("The setting was not saved: {}", error.message))?;
+        Ok(json!({ "key": key, "value": value }))
     }
 
     /// `__videorcSmokeScenePresets.roomFixtureDevices()` with
@@ -1040,6 +1063,7 @@ impl SmokeCommandHandler for StudioSmoke {
                 "studio-capture-configure" => self.capture_configure(params).await,
                 "studio-replay-buffer" => self.replay_buffer(params),
                 "studio-room-fixture-devices" => Ok(self.room_fixture_devices(&params)),
+                "studio-put-setting" => self.put_setting(params).await,
                 "studio-performance-check" => self.performance_check(params),
                 "select-screen-device" => self.select_screen(params).await,
                 "select-camera-device" => self.select_camera(params).await,

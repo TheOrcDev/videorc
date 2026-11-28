@@ -1460,14 +1460,14 @@ async function launchApp(env, attempt) {
  */
 async function seedHostDevices(smoke) {
   if (gpuiApp) {
-    const snapshot = await request(backend, 15_000, 'ui.settings.get', {
-      keys: ['videorc.settings']
-    })
-    const rawSettings = snapshot.entries?.['videorc.settings']
-    const settings = typeof rawSettings === 'string' ? JSON.parse(rawSettings) : rawSettings
-    await request(backend, 15_000, 'ui.settings.set', {
-      put: { 'videorc.settings': JSON.stringify({ ...settings, keepMicrophoneWarm: false }) }
-    })
+    // Through the Studio: a `ui.settings.set` from here is overwritten by the
+    // Studio's next settings write, made from what it holds.
+    await requestSmokeCommand(
+      smoke,
+      'studio-put-setting',
+      { key: 'keepMicrophoneWarm', value: false },
+      { timeoutMs: 15_000 }
+    )
     // `roomFixtureDevices` with the native microphone, as the renderer seeds
     // them: without them in the device list, Sources clears the synthetic
     // microphone as unavailable before the room reads it.
