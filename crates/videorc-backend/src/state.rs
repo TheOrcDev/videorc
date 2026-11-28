@@ -468,6 +468,9 @@ pub struct PreviewMetricsState {
     pub present_fps: Option<f64>,
     pub repeated_frames: u64,
     pub surface_resize_count: u64,
+    /// When a present report last broadcast `diagnostics.stats` (see
+    /// `preview_surface::present_diagnostics_broadcast_due`).
+    pub last_present_diagnostics_broadcast_at: Option<Instant>,
 }
 
 #[derive(Debug, Default)]

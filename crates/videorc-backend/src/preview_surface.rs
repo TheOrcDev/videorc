@@ -26,6 +26,7 @@ use crate::windows_d3d11_device::DxgiAdapterLuid;
 #[cfg(target_os = "windows")]
 use crate::windows_d3d11_preview::{WindowsD3d11PresenterStatus, WindowsD3d11PreviewPlacement};
 use chrono::Utc;
+use std::time::{Duration, Instant};
 
 pub type PreviewSurfaceSlot = std::sync::Arc<tokio::sync::Mutex<PreviewSurfaceRuntime>>;
 
@@ -2075,10 +2076,41 @@ async fn emit_preview_surface_present_diagnostics(state: &AppState, status: &Pre
         *diagnostics = next.clone();
         next
     };
+    // The stored diagnostics above are current after every report (a
+    // `diagnostics.stats` request reads them). The broadcast is the whole
+    // snapshot, about 13 KB, and a present report arrives every 250 ms: at that
+    // rate it was 60 of the 86 KiB/s the native preview probe measured on the
+    // WebSocket, against its 80 KiB/s budget. Broadcast it at most every
+    // `PRESENT_DIAGNOSTICS_BROADCAST_INTERVAL`; the compositor's own 2 s window
+    // and every explicit request still publish the latest.
+    let due = {
+        let mut metrics = state.preview_metrics.lock().await;
+        let now = Instant::now();
+        let due =
+            present_diagnostics_broadcast_due(metrics.last_present_diagnostics_broadcast_at, now);
+        if due {
+            metrics.last_present_diagnostics_broadcast_at = Some(now);
+        }
+        due
+    };
+    if !due {
+        return;
+    }
     state.emit_event(
         "diagnostics.stats",
         apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
     );
+}
+
+/// How often a present report may rebroadcast the whole diagnostics snapshot.
+/// Electron main reports every 250 ms; every second report passes (the interval
+/// is shorter than two reports so timer jitter cannot skip one).
+const PRESENT_DIAGNOSTICS_BROADCAST_INTERVAL: Duration = Duration::from_millis(400);
+
+fn present_diagnostics_broadcast_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| {
+        now.saturating_duration_since(last) >= PRESENT_DIAGNOSTICS_BROADCAST_INTERVAL
+    })
 }
 
 fn pending_host_command_count(slot: &PreviewSurfaceRuntime) -> u64 {
@@ -2527,6 +2559,90 @@ mod tests {
         );
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].kind, NativePreviewHostCommandKind::UpdateBounds);
+    }
+
+    #[test]
+    fn present_reports_rebroadcast_the_diagnostics_snapshot_at_most_every_interval() {
+        let start = Instant::now();
+        assert!(present_diagnostics_broadcast_due(None, start));
+        assert!(!present_diagnostics_broadcast_due(
+            Some(start),
+            start + Duration::from_millis(250)
+        ));
+        assert!(present_diagnostics_broadcast_due(
+            Some(start),
+            start + Duration::from_millis(400)
+        ));
+        // Electron main reports every 250 ms, with a little timer jitter: every
+        // second report broadcasts, none is skipped twice in a row.
+        let mut last = None;
+        let mut broadcasts = 0;
+        for report in 0..40u64 {
+            let at = start + Duration::from_millis(report * 250 + (report % 3) * 7);
+            if present_diagnostics_broadcast_due(last, at) {
+                last = Some(at);
+                broadcasts += 1;
+            }
+        }
+        assert_eq!(
+            broadcasts, 20,
+            "40 reports at 4 Hz broadcast 20 times, not 40"
+        );
+    }
+
+    /// The probe measured `diagnostics.stats` at 60 of the 86 KiB/s on the
+    /// WebSocket because every 250 ms present report rebroadcast the snapshot.
+    /// The stored diagnostics must still follow every report.
+    #[tokio::test]
+    async fn back_to_back_present_reports_broadcast_diagnostics_once_and_store_both() {
+        let state = test_state();
+        create_preview_surface(
+            state.clone(),
+            PreviewSurfaceCreateParams {
+                bounds: bounds(800.0, 450.0),
+                target_fps: 60,
+                source: PreviewSurfaceSource::Synthetic,
+            },
+        )
+        .await
+        .expect("preview surface lifecycle available");
+        take_native_preview_host_commands(&state).await;
+        // The create above may have broadcast; count from here, with the
+        // interval clear so the first report is due whatever came before.
+        let mut events = state.events.subscribe();
+        state
+            .preview_metrics
+            .lock()
+            .await
+            .last_present_diagnostics_broadcast_at = None;
+
+        let mut first = native_presenter_report(1);
+        first.present_fps = Some(59.0);
+        update_preview_surface_present(&state, first).await;
+        let mut second = native_presenter_report(1);
+        second.present_fps = Some(31.0);
+        update_preview_surface_present(&state, second).await;
+
+        let mut diagnostics_events = Vec::new();
+        let mut surface_status_events = 0;
+        while let Ok(event) = events.try_recv() {
+            match event.event.as_str() {
+                "diagnostics.stats" => diagnostics_events.push(event.payload),
+                "preview.surface.status" => surface_status_events += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            diagnostics_events.len(),
+            1,
+            "the second report, inside the interval, must not rebroadcast the snapshot"
+        );
+        assert_eq!(diagnostics_events[0]["previewPresentFps"], 59.0);
+        // The status event is small and every report still publishes it.
+        assert_eq!(surface_status_events, 2);
+        // The stored diagnostics follow the later report, so a request reads it.
+        let stored = state.diagnostics.lock().await.clone();
+        assert_eq!(stored.preview_present_fps, Some(31.0));
     }
 
     fn native_presenter_report(live_count: u64) -> PreviewSurfacePresentParams {
