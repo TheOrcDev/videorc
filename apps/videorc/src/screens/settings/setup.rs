@@ -41,7 +41,9 @@ impl SettingsScreen {
         )
     }
     pub fn open_setup(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.disabled() || self.studio.snapshot().session.phase.is_active() {
+        if self.disabled()
+            || videorc_app_core::first_run::replay_locked(&self.studio.snapshot().session.status)
+        {
             return;
         }
         // Full-window FirstRunScreen owns the replay (Electron's first-run

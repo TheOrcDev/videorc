@@ -60,7 +60,7 @@ impl SettingsScreen {
     pub(super) fn open_obs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.disabled()
             || self.obs.state.applying
-            || self.studio.snapshot().session.phase.is_active()
+            || videorc_app_core::first_run::replay_locked(&self.studio.snapshot().session.status)
         {
             return;
         }
