@@ -44,6 +44,11 @@ macro_rules! secondary {
 
 mod app;
 mod platform;
+
+/// The version this build is released as: apps/desktop/package.json's, the
+/// one a release bumps (build.rs). The backend's `Videorc-Desktop/<version>`,
+/// the About page, the update check and the release notes all read it.
+pub const APP_VERSION: &str = env!("VIDEORC_APP_VERSION");
 mod preview;
 mod screens;
 // Plan 260 S2.5 (L6): the smoke command server and the UI driver, started
@@ -240,7 +245,7 @@ fn main() -> Result<()> {
         BackendLaunch::binary(backend, &root, paths.user_data_dir.clone())
     };
     launch.isolation = paths.isolation;
-    launch.app_version = Some(env!("CARGO_PKG_VERSION").to_string());
+    launch.app_version = Some(APP_VERSION.to_string());
     // Electron's `extraResources` (preset pictures and live posters, pet
     // packs, starter sounds): this checkout's in a dev build, the package's
     // resources once there is one. The backend gets the managed roots
@@ -353,7 +358,7 @@ fn main() -> Result<()> {
         StudioConfig {
             logger: logger.clone(),
             settings_journal: Some(paths.ui_settings_journal_file()),
-            app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            app_version: Some(APP_VERSION.to_string()),
             // The app picks a first device for a slot nobody chose, as
             // Electron does; a smoke run keeps it off.
             withhold_device_defaults: smoke_run,
@@ -1350,5 +1355,19 @@ mod backend_event_filter_tests {
                 "{wanted} is not in the event filter"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod app_version_tests {
+    /// The app reports the release's version (apps/desktop/package.json's),
+    /// never the crate's own: below 0.26.0 videorc.com refuses managed shows
+    /// and hand-off (`Videorc-Desktop/0.1.0`, 2026-11-28).
+    #[test]
+    fn the_app_reports_the_release_version() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../desktop/package.json");
+        let package: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(super::APP_VERSION, package["version"].as_str().unwrap());
     }
 }

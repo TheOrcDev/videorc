@@ -396,9 +396,7 @@ pub fn install(cx: &mut App) {
         with_active_window(cx, |window| window.toggle_fullscreen())
     });
     cx.on_action(|_: &CloseWindow, cx| super::exit::ExitGuard::close_active_window(cx));
-    cx.on_action(|_: &OpenReleaseNotes, cx| {
-        cx.open_url(&release_notes_url(env!("CARGO_PKG_VERSION")))
-    });
+    cx.on_action(|_: &OpenReleaseNotes, cx| cx.open_url(&release_notes_url(crate::APP_VERSION)));
     #[cfg(target_os = "macos")]
     {
         cx.on_action(|_: &StartSpeaking, cx| {

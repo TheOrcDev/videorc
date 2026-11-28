@@ -113,13 +113,14 @@ fn running_version() -> String {
         .ok()
         .and_then(|exe| bundle_of_executable(&exe))
         .and_then(|bundle| bundle_version(&bundle))
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+        .unwrap_or_else(|| crate::APP_VERSION.to_string())
 }
 
-/// The version this build is released as (the packaging sets the crate's).
+/// The version this build is released as (apps/desktop/package.json's,
+/// compiled in: [`crate::APP_VERSION`]).
 #[cfg(target_os = "linux")]
 fn running_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    crate::APP_VERSION.to_string()
 }
 
 #[cfg(target_os = "linux")]
@@ -314,7 +315,7 @@ mod mac {
                         attempt.stop()
                     }
                 }))
-                .user_agent(concat!("Videorc/", env!("CARGO_PKG_VERSION")))
+                .user_agent(concat!("Videorc/", env!("VIDEORC_APP_VERSION")))
                 .build()
                 .ok()?;
             Some(Self {
