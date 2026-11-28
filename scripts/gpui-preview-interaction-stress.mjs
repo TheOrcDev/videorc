@@ -21,7 +21,21 @@
 // VIDEORC_PREVIEW_STRESS_MAX_STILL_MS (1000), left presenting (healing,
 // stalled, fallback), or presented nothing. Functional contract only; the fps
 // budgets stay in Electron's gate.
+//
+// Device mode (`smoke:preview-interaction-stress:devices`,
+// VIDEORC_PREVIEW_INTERACTION_DEVICE_SMOKE=1; OWNER RUN ONLY: it records the
+// real screen and camera): the real screen and camera instead of the test
+// pattern, and every phase runs inside a take
+// (VIDEORC_PREVIEW_INTERACTION_RECORDING_MS, 60 s; 640x360 at 30 fps, the
+// screen-camera layout, as Electron's) whose file must pass the recording
+// analyzer and last the take. A self-check without the owner's content:
+// VIDEORC_PREVIEW_INTERACTION_DEVICE_SCREEN=<sourceId> (a fixture window) and
+// VIDEORC_PREVIEW_INTERACTION_DEVICE_CAMERA=0 (camera off). Not ported, said
+// in the evidence: Electron's ScreenCaptureKit pixel oracle (the Swift oracle
+// inside smoke-preview-interaction-stress-app.mjs, matched to Electron's
+// windows); here the presented-frame and layer-geometry oracles judge.
 
+import { existsSync } from 'node:fs'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -34,6 +48,8 @@ import {
   waitUntil
 } from './lib/gpui-preview-probe.mjs'
 import { PREVIEW_INTERACTION_STRESS_PROFILE } from './lib/preview-interaction-stress.mjs'
+import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
+import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { geometryAligned } from './gpui-preview-window-probe.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -44,6 +60,50 @@ const sceneRounds = Math.max(1, Number(process.env.VIDEORC_PREVIEW_STRESS_SCENE_
 const STORM_STEPS = 60
 const STORM_EVERY_MS = 40
 const SAMPLE_EVERY_MS = 100
+const deviceMode = process.env.VIDEORC_PREVIEW_INTERACTION_DEVICE_SMOKE === '1'
+const deviceRecordingMs = Number(process.env.VIDEORC_PREVIEW_INTERACTION_RECORDING_MS ?? 60000)
+const DEVICE_VIDEO = { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 }
+const PIXEL_ORACLE_GAP =
+  "Electron's ScreenCaptureKit pixel oracle is not ported to the GPUI app (its Swift oracle matches Electron's windows); the presented-frame and layer-geometry oracles judge"
+
+/**
+ * Device mode's take: the capture sources the picks name, as
+ * `session.start` takes them. Pure.
+ */
+export function deviceCaptureSources(screen, camera) {
+  return {
+    ...(screen.kind === 'window' ? { windowId: screen.id } : { screenId: screen.id }),
+    cameraId: camera?.cameraId ?? null,
+    testPattern: false
+  }
+}
+
+/** Electron's device-mode layout (`deviceLayout`), by preset. Pure. */
+export function deviceLayout(layoutPreset) {
+  return {
+    layoutPreset,
+    cameraTransformMode: 'preset',
+    cameraTransform: null,
+    cameraCorner: 'bottom-right',
+    cameraSize: 'medium',
+    cameraShape: 'rectangle',
+    cameraCornerRadiusPct: 12,
+    cameraAspect: 'source',
+    cameraMargin: 32,
+    cameraFit: 'fill',
+    cameraMirror: false,
+    cameraZoom: 100,
+    cameraOffsetX: 0,
+    cameraOffsetY: 0,
+    sideBySideSplit: '70-30',
+    sideBySideCameraSide: 'right'
+  }
+}
+
+/** Device mode's take must last this long (Electron's floor). Pure. */
+export function minimumTakeSeconds(requestedMs) {
+  return Math.max(2, requestedMs / 1000 - 8)
+}
 
 /**
  * What a phase's samples say: the longest stretch the presented frame stood
@@ -159,8 +219,46 @@ export async function runGpuiPreviewInteractionStress() {
     })
   }
 
+  let take = null
+  let takeDone = false
   try {
-    await enableTestPattern(command)
+    if (deviceMode) {
+      const screen = await command('select-screen-device', {
+        settleMs: 1000,
+        ...(process.env.VIDEORC_PREVIEW_INTERACTION_DEVICE_SCREEN
+          ? { sourceId: process.env.VIDEORC_PREVIEW_INTERACTION_DEVICE_SCREEN }
+          : {})
+      })
+      const camera =
+        process.env.VIDEORC_PREVIEW_INTERACTION_DEVICE_CAMERA === '0'
+          ? await command('select-camera-device', { off: true, settleMs: 500 })
+          : await command('select-camera-device', { settleMs: 1000 })
+      const sources = deviceCaptureSources(screen, camera)
+      const directory = await command('authorize-smoke-resource', {
+        path: stateDir,
+        kind: 'output-directory'
+      })
+      const started = await rpc('session.start', {
+        sources,
+        layout: deviceLayout(sources.cameraId ? 'screen-camera' : 'screen-only'),
+        output: {
+          recordEnabled: true,
+          streamEnabled: false,
+          outputDirectoryCapability: directory.capabilityId,
+          video: DEVICE_VIDEO,
+          rtmp: { preset: 'custom', serverUrl: '', streamKey: '' }
+        }
+      })
+      if (started?.state !== 'recording') {
+        throw new Error(`the device take did not start: ${JSON.stringify(started)}`)
+      }
+      take = { started, startedAt: Date.now(), sources: { screen, camera } }
+      console.log(
+        `gpui-preview-stress: device mode, recording ${screen.kind} ${screen.id}${sources.cameraId ? ` + camera ${sources.cameraId}` : ', camera off'}`
+      )
+    } else {
+      await enableTestPattern(command)
+    }
     await waitUntil('the docked preview never presented', state, presenting, {
       budgetMs: presentBudgetMs,
       label: describePreview
@@ -292,13 +390,67 @@ export async function runGpuiPreviewInteractionStress() {
       await sleep(600)
       return { summary: `${STORM_STEPS} moves` }
     })
+
+    if (take) {
+      await phase('device take: the whole run recorded', async () => {
+        const remainingMs = Math.max(0, deviceRecordingMs - (Date.now() - take.startedAt))
+        if (remainingMs > 0) await sleep(remainingMs)
+        const stopRequestedAt = Date.now()
+        const stopped = await rpc('session.stop')
+        takeDone = true
+        const file = await resolveFinalRecordingPath({
+          started: take.started,
+          stopped,
+          stopRequestedAt,
+          timeoutMs
+        })
+        if (!file || !existsSync(file)) return { failures: [`the take's file is missing: ${file}`] }
+        const quality = await analyzeRecording(file, {
+          ffmpegPath: process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg',
+          ffprobePath: process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe',
+          intendedFps: DEVICE_VIDEO.fps,
+          expectAudio: false,
+          gates: {
+            requireMotion: false,
+            avSyncTargetMs: Number.POSITIVE_INFINITY,
+            avSyncHardFailMs: Number.POSITIVE_INFINITY
+          }
+        })
+        const reports = writeReports(quality)
+        const failures = []
+        if (!quality.verdict.pass) {
+          failures.push(
+            `the take failed analysis: ${quality.verdict.failures.join('; ')} (${reports.mdPath})`
+          )
+        }
+        const seconds = quality.metrics.durationSeconds ?? 0
+        if (seconds < minimumTakeSeconds(deviceRecordingMs)) {
+          failures.push(
+            `the take lasted ${seconds}s, under ${minimumTakeSeconds(deviceRecordingMs)}s`
+          )
+        }
+        return { failures, summary: `${seconds.toFixed(1)}s take, ${file}` }
+      })
+    }
   } finally {
+    if (take && !takeDone) await rpc('session.stop').catch(() => undefined)
     await sampler?.stop()
     ws.close()
     await app.stop()
     await writeFile(
       join(stateDir, 'gpui-preview-stress.json'),
-      JSON.stringify({ platform: process.platform, maxStillMs, sceneRounds, results }, null, 2)
+      JSON.stringify(
+        {
+          platform: process.platform,
+          maxStillMs,
+          sceneRounds,
+          deviceMode,
+          ...(deviceMode ? { pixelOracle: PIXEL_ORACLE_GAP, deviceSources: take?.sources } : {}),
+          results
+        },
+        null,
+        2
+      )
     )
     console.log(`gpui-preview-stress: evidence ${join(stateDir, 'gpui-preview-stress.json')}`)
   }
