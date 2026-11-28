@@ -137,6 +137,8 @@ describe('Rust source test listing', () => {
     assert.equal(cfg('(not(any(unix, target_os = "windows")))'), false)
     assert.equal(cfg('(feature = "live-background-gl-check")'), false)
     assert.throws(() => cfg('(target_arch = "x86_64")'), /Unknown cfg key: target_arch/)
+    assert.equal(cfg('(backend_room)'), false)
+    assert.equal(cfg('(any(target_os = "macos", backend_room))'), false)
     assert.throws(() => cfg('(sanitize)'), /Unknown cfg flag: sanitize/)
   })
 })
