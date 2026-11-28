@@ -563,6 +563,16 @@ impl Preview {
 
     /// The smoke driver's view of the preview (`inspect-native-preview-runtime`,
     /// `preview-window-state`): where it is, its phase, and what it says.
+    /// The smokes' `preview-window-os-close` on Wayland, where no client can
+    /// press its own close button: the Preview's own should-close handler
+    /// runs (the floating window's close path), which the caller follows with
+    /// the window's removal, exactly what GPUI does when that handler answers
+    /// true.
+    #[cfg(target_os = "linux")]
+    pub fn smoke_close_floating(&mut self, cx: &mut Context<Self>) {
+        self.floating_closed_linux(cx);
+    }
+
     pub fn smoke_state(&self) -> serde_json::Value {
         #[cfg(target_os = "macos")]
         let floating_open = self.floating.is_some();

@@ -185,11 +185,22 @@ impl ShellSmoke for ShellWindows {
             let handle = preview.read(cx).floating_window().ok_or_else(|| {
                 "preview-window-os-close: the Preview window is not open.".to_string()
             })?;
-            handle
+            let performed = handle
                 .update(cx, |_, window, _| {
                     crate::platform::current().perform_close(window)
                 })
-                .map_err(|_| "preview-window-os-close: the Preview window closed.".to_string())??;
+                .map_err(|_| "preview-window-os-close: the Preview window closed.".to_string())?;
+            match performed {
+                Ok(()) => {}
+                // Wayland: the compositor sends the close, so run the
+                // window's own should-close handler and let the window go.
+                #[cfg(target_os = "linux")]
+                Err(reason) if reason == crate::platform::linux::CLOSE_WAYLAND => {
+                    preview.update(cx, |preview, cx| preview.smoke_close_floating(cx));
+                    let _ = handle.update(cx, |_, window, _| window.remove_window());
+                }
+                Err(reason) => return Err(reason),
+            }
             // The close lands a moment later; the smoke polls
             // `preview-window-state` for `closed`.
             return Ok(preview.read(cx).smoke_state());
