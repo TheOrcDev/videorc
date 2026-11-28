@@ -646,7 +646,7 @@ impl QuickSettingsSection {
         .footer(
             Button::new("quick-settings-open-images")
                 .label(OPEN_IMAGES_LABEL)
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .on_click(cx.listener(|section, _, window, cx| {
                     section.choose_image.close(window, cx);
                     cx.emit(OpenPage::of(PageId::Assets));

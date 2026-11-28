@@ -106,7 +106,7 @@ impl ScenePage {
         let edit = div().when(editing, |slot| slot.invisible()).child(
             Button::new("scene-edit")
                 .label(EDIT_SCENE)
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .disabled(editing)
                 .on_click(cx.listener(|this, _, _, cx| this.edit_scene(cx))),
         );

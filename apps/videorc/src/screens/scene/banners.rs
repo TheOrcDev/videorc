@@ -443,7 +443,7 @@ impl ScenePage {
                 div().flex().justify_end().child(
                     Button::new("scene-banner-manage")
                         .label(inspector_copy::MANAGE_IN_IMAGES)
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .child(icon(IconName::ArrowRight, 16., hsla(t.foreground)))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.navigate(SceneNavigate::Page(PageId::Assets), cx)
