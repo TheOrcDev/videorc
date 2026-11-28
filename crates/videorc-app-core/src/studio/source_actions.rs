@@ -334,6 +334,18 @@ impl<B: StudioBackend> Studio<B> {
         saved
     }
 
+    /// Electron's `refreshPreview` at launch (`ensureNativePreviewCamera`,
+    /// then `ensureNativePreviewScreen`) where no preview element starts
+    /// the scene's captures (Windows until plan 260 S2.3b). Without them
+    /// the Clips ring refused to start (`replay-sources-not-ready`: no
+    /// camera frame) and a camera scene's Record waited on a camera nobody
+    /// opened. Each start is the one an idle pick sends, so a capture that
+    /// already runs is reused, and a session's transport is left alone.
+    pub async fn start_scene_captures(&self) {
+        self.sync_picked_camera_capture().await;
+        self.start_picked_screen_capture().await;
+    }
+
     /// Electron's `ensureNativePreviewCamera` after an idle Camera pick.
     /// Reloading the idle scene does not start capture. Off stops it;
     /// screen-only leaves retirement to the layout transaction's grace.

@@ -358,8 +358,8 @@ impl FirstRunScreen {
         screen
     }
 
-    // Used by macOS preview restoration and the Linux overlay cover probe.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    // Used by macOS preview restoration, the Linux overlay cover probe and
+    // the Windows scene follower (no captures while setup shows).
     pub fn is_open(&self) -> bool {
         self.open
     }
