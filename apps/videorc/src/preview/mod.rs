@@ -153,6 +153,19 @@ pub struct Preview {
     smoke_slots: [Option<gpui::Bounds<gpui::Pixels>>; 2],
 }
 
+/// Windows until plan 260 S2.3b: the Studio's scene is committed and its
+/// captures started with no preview element; `setup_open` holds the
+/// captures back while first-run setup shows.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn follow_scene_without_preview(
+    studio: &std::sync::Arc<videorc_app_core::Studio<videorc_app_core::BackendClient>>,
+    runtime: &tokio::runtime::Handle,
+    logger: Logger,
+    setup_open: watch::Receiver<bool>,
+) {
+    scene_follower::follow(studio, runtime, logger, setup_open);
+}
+
 impl Preview {
     /// Starts the element in `window` (the main window, where the docked slot
     /// lives). A missing Metal device or a refused native view leaves the
@@ -169,14 +182,16 @@ impl Preview {
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            let _ = (setup.backend, window);
+            let _ = (setup.runtime, setup.backend, window);
             setup.logger.log(
                 Level::Warn,
                 "[preview] no preview element on this platform yet (S2.3b on Windows)",
             );
-            // The feed would commit the Studio's scene; without it the
-            // engine held none (no Scene page sources, no Clips ring).
-            scene_follower::follow(&setup.studio, &setup.runtime, setup.logger.clone());
+            // The feed would commit the Studio's scene and start its
+            // captures; without it the engine held none (no Scene page
+            // sources, no Clips ring). The app starts the follower once it
+            // can say whether first-run setup is open
+            // ([`follow_scene_without_preview`]).
             cx.new(|_| Self {
                 phase: Phase::Fallback,
                 mode: WindowMode::Docked,

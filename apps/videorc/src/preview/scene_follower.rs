@@ -79,12 +79,15 @@ impl SceneFollower {
 }
 
 /// Commits the Studio's scene on every change the preview feed would
-/// commit, for as long as the Studio runs.
+/// commit, for as long as the Studio runs. Once a scene is committed and
+/// first-run setup is closed, the scene's captures start, as Electron's
+/// `refreshPreview` starts them at launch (never while setup is open).
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub(crate) fn follow(
     studio: &std::sync::Arc<videorc_app_core::Studio<videorc_app_core::BackendClient>>,
     runtime: &tokio::runtime::Handle,
     logger: videorc_app_core::Logger,
+    mut setup_open: tokio::sync::watch::Receiver<bool>,
 ) {
     use videorc_app_core::Level;
     use videorc_app_core::studio::preview_scene::preview_scene_request;
@@ -97,6 +100,8 @@ pub(crate) fn follow(
         let mut snapshots = studio.watch();
         let mut follower = SceneFollower::new(studio.layout_commit_revision());
         let mut superseded = 0u32;
+        let mut committed = false;
+        let mut captures_started = false;
         loop {
             let request = preview_scene_request(&snapshots.borrow_and_update(), false);
             if follower.next(request, studio.layout_commit_revision(), Instant::now()) {
@@ -107,7 +112,10 @@ pub(crate) fn follow(
                     continue;
                 }
                 match studio.reload_scene_from_capture_config().await {
-                    Ok(()) => superseded = 0,
+                    Ok(()) => {
+                        superseded = 0;
+                        committed = true;
+                    }
                     Err(error) if is_scene_reload_superseded(&error) => {
                         // A session took the scene first: nothing failed,
                         // and the scene still follows the settings after.
@@ -125,8 +133,22 @@ pub(crate) fn follow(
                     }
                 }
             }
-            if snapshots.changed().await.is_err() {
-                break;
+            if committed && !captures_started && !*setup_open.borrow_and_update() {
+                captures_started = true;
+                studio.start_scene_captures().await;
+            }
+            tokio::select! {
+                changed = snapshots.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+                changed = setup_open.changed(), if !captures_started => {
+                    if changed.is_err() {
+                        // The window is gone; the scene still follows.
+                        captures_started = true;
+                    }
+                }
             }
         }
     });

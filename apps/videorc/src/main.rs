@@ -770,6 +770,25 @@ fn main() -> Result<()> {
                         })
                     });
                 }
+                // Windows: no preview element commits the scene or starts
+                // its captures yet; the follower does, and holds the
+                // captures while first-run setup shows (Electron's
+                // `refreshPreview` skips them then).
+                #[cfg(target_os = "windows")]
+                {
+                    let (setup_tx, setup_rx) =
+                        tokio::sync::watch::channel(first_run.read(cx).is_open());
+                    cx.observe(&first_run, move |first_run, cx| {
+                        setup_tx.send_replace(first_run.read(cx).is_open());
+                    })
+                    .detach();
+                    preview::follow_scene_without_preview(
+                        &studio,
+                        &preview_runtime,
+                        preview_logger.clone(),
+                        setup_rx,
+                    );
+                }
                 *preview_slot.borrow_mut() = Some(preview.clone());
                 let session = cx.new(|cx| {
                     SessionSection::new(
