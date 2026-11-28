@@ -360,7 +360,7 @@ test('zero knobs disable each feature', async () => {
     }
   })
 })
-test('launch preparation orders prebuild, release, host lock, memory for every launch kind', async () => {
+test('launch preparation orders prebuild, release, app-run lock, host lock, memory for every launch kind', async () => {
   for (const dev of [true, false]) {
     const order = []
     await prepareSmokeLaunch({
@@ -372,13 +372,16 @@ test('launch preparation orders prebuild, release, host lock, memory for every l
         order.push('release')
       },
       prebuild: () => order.push('build'),
+      appRunLock: () => order.push('run-lock'),
       hostLock: () => order.push('lock'),
       memory: () => order.push('memory'),
       live: () => order.push('live')
     })
     assert.deepEqual(
       order,
-      dev ? ['live', 'slot', 'build', 'release', 'lock', 'memory'] : ['live', 'lock', 'memory']
+      dev
+        ? ['live', 'slot', 'build', 'release', 'run-lock', 'lock', 'memory']
+        : ['live', 'run-lock', 'lock', 'memory']
     )
   }
 })

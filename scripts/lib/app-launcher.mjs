@@ -24,9 +24,10 @@ import {
   statSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 
 import './smoke-env.mjs'
+import { requireAppRunLock } from './app-run-lock.mjs'
 import {
   acquireHostSmokeLock,
   waitForHostMemory,
@@ -455,6 +456,7 @@ export async function prepareSmokeLaunch({
     }
   },
   buildSlot = withBuildSlot,
+  appRunLock = requireAppRunLock,
   hostLock = acquireHostSmokeLock,
   memory = waitForHostMemory,
   live = waitWhileVideorcLive
@@ -462,6 +464,8 @@ export async function prepareSmokeLaunch({
   const options = { env, log: onLine }
   await live(options)
   if (dev && env.VIDEORC_SMOKE_SKIP_PREBUILD !== '1') await buildSlot(prebuild, options)
+  // Built before it is taken: never compile while holding the app-run lock.
+  await appRunLock({ env, lane: env.VIDEORC_LANE || basename(process.argv[1] ?? 'smoke') })
   await hostLock(options)
   await memory(options)
 }
