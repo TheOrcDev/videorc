@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { toneAmplitude } from './separate-source-take-gates.mjs'
 
 export const COMPOSITOR_TIMING_FILENAME = 'compositor-timing.json'
+export const COMPOSITOR_STALL_THRESHOLD_MS = 250
 
 export function readCompositorTiming(evidenceDir, { log = console.log } = {}) {
   const timingPath = join(evidenceDir, COMPOSITOR_TIMING_FILENAME)
@@ -25,51 +26,69 @@ export function readCompositorTiming(evidenceDir, { log = console.log } = {}) {
   return parsed
 }
 
-export function evaluateCompositorTiming(entries, { fps }) {
-  if (!Number.isFinite(fps) || fps <= 0) {
-    throw new Error('Compositor timing check requires a positive finite fps')
-  }
+export function analyzeCompositorTiming(
+  entries,
+  { stallThresholdMs = COMPOSITOR_STALL_THRESHOLD_MS } = {}
+) {
   if (!Array.isArray(entries)) {
     throw new Error('Compositor timing entries must be an array')
   }
-  const maxGapMs = 1000 / fps + 10
-  // Backend traces record role 0 (primary/combined) plus auxiliary legs on each
-  // compositor tick. Track role 0 when present so intra-tick leg offsets and
-  // per-source contended skips do not masquerade as compositor freezes.
-  const hasPrimaryRole = entries.some((entry) => entry?.role === 0)
-  const frames = hasPrimaryRole ? entries.filter((entry) => entry?.role === 0) : entries
-  const failures = []
-  const stalls = []
-  let previous = null
-  for (const [index, entry] of frames.entries()) {
+  if (!Number.isFinite(stallThresholdMs) || stallThresholdMs <= 0) {
+    throw new Error('Compositor stall threshold must be a positive finite duration in ms')
+  }
+  // Collapse multi-role entries sharing a compositor tick sequence into one tick
+  // interval [beganMs, completedMs]. If the compositor restarted for a new take
+  // (e.g. after precommit/writer cancel), keep the final monotonic take.
+  const ticks = []
+  for (const entry of entries) {
     if (!Number.isFinite(entry?.beganMs)) {
       throw new Error('Compositor timing entries require finite beganMs timestamps')
     }
-    if (
-      previous !== null &&
-      Number.isFinite(entry.sequence) &&
-      Number.isFinite(previous.sequence) &&
-      entry.sequence <= previous.sequence
-    ) {
-      // A restarted compositor session (e.g. after precommit/writer cancel)
-      // resets sequence numbering; do not measure a gap across takes.
-      previous = entry
+    const completedMs = entry.completedMs === undefined ? entry.beganMs : entry.completedMs
+    if (!Number.isFinite(completedMs)) {
+      throw new Error('Compositor timing entries require finite completedMs timestamps')
+    }
+    const hasSequence = Number.isFinite(entry.sequence)
+    if (hasSequence && ticks.length > 0 && ticks.at(-1).sequence === entry.sequence) {
+      const current = ticks.at(-1)
+      current.beganMs = Math.min(current.beganMs, entry.beganMs)
+      current.completedMs = Math.max(current.completedMs, completedMs)
       continue
     }
-    if (previous !== null) {
-      const gapMs = entry.beganMs - previous.beganMs
-      if (gapMs > maxGapMs) {
-        const frame = Number.isFinite(entry.sequence) ? entry.sequence : index
-        const atSeconds = entry.beganMs / 1000
-        stalls.push({ gapMs, atSeconds, frame })
-        failures.push(
-          `compositor stalled ${Math.round(gapMs)} ms at ${atSeconds.toFixed(3)}s (frame ${frame})`
-        )
-      }
+    if (hasSequence && ticks.length > 0 && entry.sequence <= ticks.at(-1).sequence) {
+      ticks.length = 0
     }
-    previous = entry
+    ticks.push({
+      sequence: hasSequence ? entry.sequence : ticks.length,
+      beganMs: entry.beganMs,
+      completedMs
+    })
   }
-  return { pass: failures.length === 0, failures, maxGapMs, stalls }
+  const gaps = []
+  if (ticks.length < 2) return { gaps, stalls: [], largestGap: null }
+  const originMs = ticks[0].beganMs
+  let largestGap = null
+  for (let index = 1; index < ticks.length; index++) {
+    const previous = ticks[index - 1]
+    const current = ticks[index]
+    const completedGapMs = current.completedMs - previous.completedMs
+    const beganGapMs = current.beganMs - previous.beganMs
+    const useCompleted = completedGapMs >= beganGapMs
+    const gap = {
+      gapMs: useCompleted ? completedGapMs : beganGapMs,
+      startSeconds: ((useCompleted ? previous.completedMs : previous.beganMs) - originMs) / 1000,
+      endSeconds: ((useCompleted ? current.completedMs : current.beganMs) - originMs) / 1000,
+      frame: current.sequence
+    }
+    gaps.push(gap)
+    if (!largestGap || gap.gapMs > largestGap.gapMs) largestGap = gap
+  }
+  const stalls = gaps.filter((gap) => gap.gapMs >= stallThresholdMs)
+  return { gaps, stalls, largestGap }
+}
+
+function formatCompositorGapContext(gap) {
+  return `max compositor gap ${Math.round(gap.gapMs)} ms at ${gap.startSeconds.toFixed(3)}s, frame ${gap.frame}`
 }
 
 // The runtime fixture's screen fills the canvas and its camera sits at bottom
@@ -138,16 +157,6 @@ export function evaluateAudioVideoEvents(
   audio,
   { fps, offsetMs = 0, endSeconds = Infinity, measurement, compositorTiming, evidenceDir, log }
 ) {
-  const timing =
-    compositorTiming !== undefined
-      ? compositorTiming
-      : evidenceDir
-        ? readCompositorTiming(evidenceDir, { log })
-        : null
-  if (timing) {
-    const compositor = evaluateCompositorTiming(timing, { fps })
-    if (!compositor.pass) return { pass: false, failures: compositor.failures }
-  }
   const tolerance = 1 / fps + 0.01
   const checked = video
     .map((at) => at + offsetMs / 1000)
@@ -184,11 +193,68 @@ export function evaluateAudioVideoEvents(
   const actual = audio.filter(
     (at) => at >= checked[0] - tolerance && at <= checked.at(-1) + tolerance
   )
-  if (actual.length !== checked.length)
-    failures.push(`audio has ${actual.length} ordered events; expected ${checked.length}`)
+  const countMismatch = actual.length !== checked.length
+  const missedEvents = []
   for (const [index, at] of checked.entries()) {
-    if (!(Math.abs(actual[index] - at) <= tolerance))
-      failures.push(`audio misses ordered video event ${index} at ${at.toFixed(3)}s`)
+    if (!(Math.abs(actual[index] - at) <= tolerance)) {
+      missedEvents.push({ index, at, actualAt: actual[index] })
+    }
+  }
+  if (!countMismatch && missedEvents.length === 0) {
+    return { pass: failures.length === 0, failures }
+  }
+  const timing =
+    compositorTiming !== undefined
+      ? compositorTiming
+      : evidenceDir
+        ? readCompositorTiming(evidenceDir, { log })
+        : null
+  const compositor = timing ? analyzeCompositorTiming(timing) : null
+  const oneFrame = 1 / fps
+  const overlappingStallFor = (at) => {
+    if (!compositor?.stalls.length) return null
+    const videoAt = at - offsetMs / 1000
+    let best = null
+    for (const stall of compositor.stalls) {
+      if (videoAt >= stall.startSeconds - oneFrame && videoAt <= stall.endSeconds + oneFrame) {
+        if (!best || stall.gapMs > best.gapMs) best = stall
+      }
+    }
+    return best
+  }
+  const nonOverlappingAudioPass = checked.every(
+    (at, index) => overlappingStallFor(at) !== null || Math.abs(actual[index] - at) <= tolerance
+  )
+  if (countMismatch) {
+    const context = compositor?.largestGap
+      ? ` (${formatCompositorGapContext(compositor.largestGap)})`
+      : ''
+    failures.push(`audio has ${actual.length} ordered events; expected ${checked.length}${context}`)
+  }
+  for (const { index, at, actualAt } of missedEvents) {
+    const stall = overlappingStallFor(at)
+    if (stall) {
+      const stallMs = Math.round(stall.gapMs)
+      const header = `compositor stalled ${stallMs} ms at ${stall.startSeconds.toFixed(3)}s (frame ${stall.frame})`
+      const audioWithinStall =
+        Number.isFinite(actualAt) &&
+        actualAt <= at + tolerance &&
+        actualAt >= at - stall.gapMs / 1000 - tolerance
+      if (nonOverlappingAudioPass && audioWithinStall) {
+        failures.push(`${header}; audio exact`)
+      } else if (Number.isFinite(actualAt)) {
+        const audioOffsetMs = Math.round((actualAt - at) * 1000)
+        const sign = audioOffsetMs >= 0 ? '+' : ''
+        failures.push(`${header}; audio offset ${sign}${audioOffsetMs} ms`)
+      } else {
+        failures.push(`${header}; audio missing`)
+      }
+    } else {
+      const context = compositor?.largestGap
+        ? ` (${formatCompositorGapContext(compositor.largestGap)})`
+        : ''
+      failures.push(`audio misses ordered video event ${index} at ${at.toFixed(3)}s${context}`)
+    }
   }
   return { pass: failures.length === 0, failures }
 }

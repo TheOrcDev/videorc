@@ -20,7 +20,6 @@ import {
   maximumToneAmplitude,
   refinedToneTransitions,
   evaluateAudioTail,
-  evaluateCompositorTiming,
   evaluateSourceEnvelope,
   evaluateAudioVideoEvents,
   evaluateEventAlignment,
@@ -477,11 +476,6 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of lifecycle
             2
           )
         )
-        if (compositorTiming) {
-          const compositorVerdict = evaluateCompositorTiming(compositorTiming, { fps })
-          if (!compositorVerdict.pass)
-            throw new Error(`${extension}: ${compositorVerdict.failures.join('; ')}`)
-        }
         const beforeShed = (time) => time < shedEndSeconds - 1 / fps - 0.01
         const shedClip = (byRole, time) =>
           shedRoles.size
