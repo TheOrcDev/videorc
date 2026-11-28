@@ -84,6 +84,7 @@ pub const STUDIO_COMMANDS: &[&str] = &[
     "studio-put-setting",
     "studio-record",
     "studio-replay-buffer",
+    "studio-room-fixture-devices",
     "studio-scene-apply",
     "studio-scene-background",
     "studio-scene-delete",

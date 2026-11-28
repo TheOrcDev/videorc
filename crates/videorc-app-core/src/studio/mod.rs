@@ -3038,6 +3038,14 @@ impl<B: StudioBackend> Studio<B> {
         inner.last_error = Some(error.message.clone());
     }
 
+    /// Smoke only (`roomFixtureDevices`): the room's fixture camera and
+    /// microphones join the device list now and every later one, so Sources
+    /// keeps them selected the way Electron's renderer seed does.
+    pub fn seed_room_fixture_devices(&self, fixtures: Vec<videorc_protocol::Device>) {
+        self.lock().sources.seed_fixture_devices(fixtures);
+        self.publish();
+    }
+
     fn publish(&self) {
         // The lock order: `in_flight` and `stop_in_flight` before `Inner`.
         let start_in_flight = self.start_in_flight();

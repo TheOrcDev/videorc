@@ -70,8 +70,10 @@ pub const STUDIO_SMOKE_COMMANDS: &[&str] = &[
     "studio-performance-check",
     "studio-record",
     "studio-replay-buffer",
+    "studio-room-fixture-devices",
     "studio-privacy-add-app",
     "studio-privacy-state",
+    "studio-put-setting",
     "studio-scene-apply",
     "studio-scene-background",
     "studio-scene-delete",
@@ -427,6 +429,70 @@ impl StudioSmoke {
             .await
             .map_err(|error| format!("The capture config was not saved: {error}"))?;
         Ok(json!({ "configured": true, "state": state_json(&self.studio.snapshot()) }))
+    }
+
+    /// `studio-put-setting {key, value}`: one field of the Studio's settings
+    /// (`videorc.settings`) through the Studio's own write, as the renderer's
+    /// `setSettings(current => ({...current, [key]: value}))`. A write from
+    /// outside the app (`ui.settings.set`) is overwritten by the next one the
+    /// Studio makes from what it holds.
+    async fn put_setting(&self, params: Map<String, Value>) -> Result<Value, String> {
+        self.settings_ready().await?;
+        let key = text_param(&params, "key")
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| "studio-put-setting needs a key.".to_string())?
+            .to_string();
+        let value = params
+            .get("value")
+            .cloned()
+            .ok_or_else(|| "studio-put-setting needs a value.".to_string())?;
+        self.studio
+            .update_studio_settings(|settings| settings.set(&key, value.clone()))
+            .await
+            .map_err(|error| format!("The setting was not saved: {}", error.message))?;
+        Ok(json!({ "key": key, "value": value }))
+    }
+
+    /// `__videorcSmokeScenePresets.roomFixtureDevices()` with
+    /// `roomNativeMicrophone(nativeMicrophone)`: the DEV fixture camera and
+    /// microphone (the backend's synthetic `u32::MAX` one, and its alternate,
+    /// when `nativeMicrophone`), seeded into every device list.
+    fn room_fixture_devices(&self, params: &Map<String, Value>) -> Value {
+        let native = params.get("nativeMicrophone").and_then(Value::as_bool) != Some(false);
+        let device = |id: &str, name: &str, kind: DeviceKind| Device {
+            app: None,
+            window_title: None,
+            display_uuid: None,
+            id: id.to_string(),
+            name: name.to_string(),
+            kind,
+            status: DeviceStatus::Available,
+            detail: None,
+            width: None,
+            height: None,
+        };
+        let mut fixtures = vec![
+            device("parity-camera", "Parity camera", DeviceKind::Camera),
+            device(
+                if native {
+                    "microphone:coreaudio:4294967295"
+                } else {
+                    "parity-microphone"
+                },
+                "Parity microphone",
+                DeviceKind::Microphone,
+            ),
+        ];
+        if native {
+            fixtures.push(device(
+                "microphone:coreaudio:4294967294",
+                "Alternate parity microphone",
+                DeviceKind::Microphone,
+            ));
+        }
+        let ids: Vec<String> = fixtures.iter().map(|device| device.id.clone()).collect();
+        self.studio.seed_room_fixture_devices(fixtures);
+        json!({ "seeded": ids })
     }
 
     /// Plan 260 C4: synthetic talk-show room for the screen gallery.
@@ -996,6 +1062,8 @@ impl SmokeCommandHandler for StudioSmoke {
                 "studio-stop" => self.stop(params).await,
                 "studio-capture-configure" => self.capture_configure(params).await,
                 "studio-replay-buffer" => self.replay_buffer(params),
+                "studio-room-fixture-devices" => Ok(self.room_fixture_devices(&params)),
+                "studio-put-setting" => self.put_setting(params).await,
                 "studio-performance-check" => self.performance_check(params),
                 "select-screen-device" => self.select_screen(params).await,
                 "select-camera-device" => self.select_camera(params).await,

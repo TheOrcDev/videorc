@@ -1609,14 +1609,23 @@ async function launchApp(env, attempt) {
  */
 async function seedHostDevices(smoke) {
   if (gpuiApp) {
-    const snapshot = await request(backend, 15_000, 'ui.settings.get', {
-      keys: ['videorc.settings']
-    })
-    const rawSettings = snapshot.entries?.['videorc.settings']
-    const settings = typeof rawSettings === 'string' ? JSON.parse(rawSettings) : rawSettings
-    await request(backend, 15_000, 'ui.settings.set', {
-      put: { 'videorc.settings': JSON.stringify({ ...settings, keepMicrophoneWarm: false }) }
-    })
+    // Through the Studio: a `ui.settings.set` from here is overwritten by the
+    // Studio's next settings write, made from what it holds.
+    await requestSmokeCommand(
+      smoke,
+      'studio-put-setting',
+      { key: 'keepMicrophoneWarm', value: false },
+      { timeoutMs: 15_000 }
+    )
+    // `roomFixtureDevices` with the native microphone, as the renderer seeds
+    // them: without them in the device list, Sources clears the synthetic
+    // microphone as unavailable before the room reads it.
+    await requestSmokeCommand(
+      smoke,
+      'studio-room-fixture-devices',
+      { nativeMicrophone: true },
+      { timeoutMs: 15_000 }
+    )
     // The room's picture is the backend's fixture (VIDEORC_ROOM_CAMERA_FIXTURE),
     // but the Studio still needs a camera it can list to turn the room camera
     // on: a name the device list lacks is dropped from its view, so on Linux
@@ -1655,11 +1664,13 @@ async function seedHostDevices(smoke) {
       },
       { timeoutMs: 15_000 }
     )
+    let lastSaved = null
     await waitFor(
       async () => {
         const snapshot = await request(backend, 15_000, 'ui.settings.get', {
           keys: ['videorc.captureConfig', 'videorc.settings']
         })
+        lastSaved = snapshot.entries
         const rawSavedSettings = snapshot.entries?.['videorc.settings']
         const savedSettings =
           typeof rawSavedSettings === 'string' ? JSON.parse(rawSavedSettings) : rawSavedSettings
@@ -1693,7 +1704,10 @@ async function seedHostDevices(smoke) {
       15_000,
       'the Studio to save the room fixture sources and audio',
       100
-    )
+    ).catch((error) => {
+      log(`DIAG saved settings: ${JSON.stringify(lastSaved).slice(0, 4000)}`)
+      throw error
+    })
     // What the Studio holds after its own reconcile against the device list:
     // the room's camera.set follows it, so a missing camera names itself here.
     const studioState = await requestSmokeCommand(smoke, 'studio-state', {}, { timeoutMs: 15_000 })
@@ -1766,6 +1780,13 @@ async function checkSeatHolder(moment) {
 }
 
 async function prebuildBackendOrThrow(env, onLine = log) {
+  // A prebuilt GPUI app (VIDEORC_GPUI_APP_BINARY, its backend beside it) needs
+  // no cargo build, as launchDevApp already treats it: compiling here would
+  // rebuild both crates in the checkout while the app-run lock is held.
+  if (gpuiApp && { ...process.env, ...env }.VIDEORC_GPUI_APP_BINARY) {
+    onLine('[smoke:prebuild] skipped: prebuilt GPUI app (VIDEORC_GPUI_APP_BINARY)')
+    return
+  }
   const failure = await prebuildDevBackend({ env, onLine })
   if (failure) throw new Error(failure)
 }
