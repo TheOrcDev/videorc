@@ -1,10 +1,11 @@
+import { pageKeys } from '../../../shared/sidebar-pages'
 // The main window's global chords (plan 174 S3.21, A-2, A-12), decided here
 // so a test can press every key against an open dialog. The shell runs the
 // action; main forwards ⌘1–⌘9, ⇧⌘L and ⌘, separately (Chromium swallows the
 // digits; one route for every page key) and
 // `navigationShortcutTab` gates those the same way.
 
-import { WORKSPACE_SHORTCUTS, type WorkspaceTab } from '@/components/workspace-nav'
+import { type WorkspaceTab } from '@/components/workspace-nav'
 import { isCommandKey } from '@/lib/platform'
 
 export type ShellShortcutAction =
@@ -67,7 +68,11 @@ export function shellShortcutAction(
  * The page a key main forwarded on `shortcut:navigate` opens ('1'–'9', 'L'
  * or ','), or null: an unknown key, or a dialog that owns the keyboard.
  */
-export function navigationShortcutTab(key: string, modalOpen: boolean): WorkspaceTab | null {
+export function navigationShortcutTab(
+  key: string,
+  modalOpen: boolean,
+  guestsShown = true
+): WorkspaceTab | null {
   if (modalOpen) return null
-  return WORKSPACE_SHORTCUTS.find((entry) => entry.key === key)?.tab ?? null
+  return pageKeys(guestsShown).find((entry) => entry.key === key)?.page ?? null
 }

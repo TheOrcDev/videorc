@@ -1,3 +1,4 @@
+import { guestsVisible } from '@/lib/livestream-tabs'
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
 const CommandPalette = lazy(async () => ({
@@ -22,7 +23,7 @@ import {
   type StudioPanel,
   type WorkspaceTab
 } from '@/components/workspace-nav'
-import { useStudioRecordingState, useStudioShell } from '@/hooks/use-studio'
+import { useStudioCloud, useStudioRecordingState, useStudioShell } from '@/hooks/use-studio'
 import { StudioMicVisualProvider } from '@/hooks/use-studio-mic-visual'
 import { useWhatsNew } from '@/hooks/use-whats-new'
 import {
@@ -272,6 +273,7 @@ function AppShellContent(): ReactElement {
     setFirstRunSetupOpen
   } = useStudioShell()
   const { recording } = useStudioRecordingState()
+  const guestsShown = guestsVisible(useStudioCloud().cloudStatus)
   const [active, setActiveTab] = useState<WorkspaceTab>('studio')
   // The page's first open suspends; render it once its chunk is in, before
   // the shell's steady updates can starve React's retry (retest 152, 0004).
@@ -540,11 +542,15 @@ function AppShellContent(): ReactElement {
   // key (plan 174 A-2).
   useEffect(() => {
     const off = window.videorc?.onShortcutNavigate?.((key) => {
-      const tab = navigationShortcutTab(key, setupOpenRef.current || isModalOpen(document))
+      const tab = navigationShortcutTab(
+        key,
+        setupOpenRef.current || isModalOpen(document),
+        guestsShown
+      )
       if (tab) setActive(tab)
     })
     return off
-  }, [setActive])
+  }, [setActive, guestsShown])
 
   // The window is named after its page, and after keyboard navigation the
   // page title takes the focus, so the new page is announced and the next

@@ -1,3 +1,4 @@
+import { guestsVisible } from '@/lib/livestream-tabs'
 import { withGlobalShortcut } from '../../../../shared/global-shortcut-bindings'
 import {
   globalShortcutEntries,
@@ -13,7 +14,7 @@ import { Alert, AlertTitle } from '@/components/ui/alert'
 import { FieldGroup, FieldLegend, FieldSet } from '@/components/ui/field'
 import { KbdGroup } from '@/components/ui/kbd'
 import { ShortcutKeys } from '@/components/ui/shortcut-keys'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioCloud, useStudioCore } from '@/hooks/use-studio'
 import { globalShortcutLabel, globalShortcutRegistration } from '@/lib/global-shortcuts'
 import { globalShortcutTakenReason } from '@/lib/global-shortcut-owner'
 import { sceneShortcutRows } from '@/lib/scene-shortcuts'
@@ -65,6 +66,7 @@ export function globalShortcutRows(input: {
  * so the in-app list does not repeat them.
  */
 export function ShortcutsSettings(): ReactElement {
+  const guestsShown = guestsVisible(useStudioCloud().cloudStatus)
   const { settings, setSettings, runtimeInfo, deviceList, savedScenes } = useStudioCore()
   // Linux on Wayland: main registers nothing and says why.
   const unavailable = runtimeInfo?.globalShortcutsUnavailable
@@ -161,7 +163,7 @@ export function ShortcutsSettings(): ReactElement {
       <PanelSection description="Keys that work while Videorc is in front." title="App shortcuts">
         {/* One grouped list per group, labelled like the Scenes group above
             (plan 174 S3.17, I-33): the rows used to be loose text. */}
-        {[...shortcutsByGroup().entries()].map(([group, entries]) => (
+        {[...shortcutsByGroup(guestsShown).entries()].map(([group, entries]) => (
           <GroupedList key={group} label={group}>
             {entries.map((entry) => (
               <ListRow key={entry.id} compact title={entry.label}>
