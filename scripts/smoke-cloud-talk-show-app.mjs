@@ -194,6 +194,8 @@ const eventTexts = []
 const receivers = []
 const taps = []
 const browsers = []
+/** Every guest page, for the evidence `saveGuestEvidence` writes. */
+const guestPages = []
 const report = {
   startedAt: new Date(startedAtMs).toISOString(),
   outputDirectory,
@@ -1978,6 +1980,33 @@ function latestRoom(watch) {
 
 // --- The guests: headless Chrome through playwright-core -----------------------------
 
+/**
+ * Each guest's browser console, page events and camera-encoder stats, into the
+ * output directory (a layout that fails because a guest's picture stopped
+ * needs to know whether the guest stopped sending). Evidence, never a gate.
+ */
+async function saveGuestEvidence() {
+  for (const { label, page, consoleLog, startedAt } of guestPages) {
+    try {
+      writeFileSync(
+        join(outputDirectory, `guest-${label}-console.log`),
+        `${consoleLog.join('\n')}\n`
+      )
+      const inPage = await page.evaluate(() => ({
+        events: window.__guest?.events ?? [],
+        stats: window.__guestStats ?? [],
+        userAgent: navigator.userAgent
+      }))
+      writeFileSync(
+        join(outputDirectory, `guest-${label}-page.json`),
+        JSON.stringify({ startedAtMs: startedAt, ...inPage }, null, 1)
+      )
+    } catch (error) {
+      log(`guest ${label}'s evidence was not saved: ${error?.message ?? error}`)
+    }
+  }
+}
+
 async function openGuest(chrome, files, { url, label }) {
   const { chromium } = await import('playwright-core')
   const browser = await chromium.launch({
@@ -1990,15 +2019,23 @@ async function openGuest(chrome, files, { url, label }) {
       `--use-file-for-fake-audio-capture=${files.wav}`,
       '--autoplay-policy=no-user-gesture-required',
       '--disable-background-timer-throttling',
-      '--disable-renderer-backgrounding'
+      '--disable-renderer-backgrounding',
+      // For experiments: more Chrome flags for the guests, space separated.
+      ...(process.env.VIDEORC_SMOKE_GUEST_CHROME_ARGS?.split(/\s+/).filter(Boolean) ?? [])
     ]
   })
   browsers.push({ label, browser })
   const context = await browser.newContext({ permissions: ['camera', 'microphone'] })
   const page = await context.newPage()
   const consoleLog = []
-  page.on('console', (message) => consoleLog.push(`${message.type()}: ${message.text()}`))
-  page.on('pageerror', (error) => consoleLog.push(`pageerror: ${error.message}`))
+  const startedAt = Date.now()
+  page.on('console', (message) =>
+    consoleLog.push(`+${Date.now() - startedAt} ms ${message.type()}: ${message.text()}`)
+  )
+  page.on('pageerror', (error) =>
+    consoleLog.push(`+${Date.now() - startedAt} ms pageerror: ${error.message}`)
+  )
+  guestPages.push({ label, page, consoleLog, startedAt })
   await page.goto(url, { waitUntil: 'load', timeout: 30_000 })
   return { browser, page, consoleLog }
 }
@@ -2417,6 +2454,7 @@ function waitForExit(child, ms) {
 }
 
 async function cleanup() {
+  await saveGuestEvidence()
   for (const { browser } of browsers) {
     await browser.close().catch(() => {})
   }
