@@ -58,6 +58,7 @@ import {
   formatProcessMemorySummary,
   summarizeProcessMemory
 } from './lib/process-memory-gate.mjs'
+import { describeWireRateByEvent } from './lib/wire-rate-breakdown.mjs'
 import {
   collectPerformanceSamplesOnSchedule,
   performanceSamplingEvidenceFailures,
@@ -196,6 +197,7 @@ let diagnosticStatusAfter = null
 let wireTap = null
 let measuredWireBytes = 0
 let measuredWireEventBytes = {}
+let measuredWireEventCounts = {}
 let budgetFailures = []
 let activeBudget = null
 let activeBudgetEvaluation = null
@@ -340,9 +342,11 @@ try {
   const measurementEndedAt = scheduledSamples.measurementEndedAtMs
   let detachedMeasurementWireBytes = null
   let detachedMeasurementWireEventBytes = null
+  let detachedMeasurementWireEventCounts = null
   if (previewMode === 'detached') {
     detachedMeasurementWireBytes = wireTap.bytes()
     detachedMeasurementWireEventBytes = wireTap.eventBytes()
+    detachedMeasurementWireEventCounts = wireTap.eventCounts()
     const measurementEnd = await captureDetachedPreviewGeometryPhase(smoke, {
       phaseName: 'measurementEnd',
       requiredSamples: DETACHED_PREVIEW_CALIBRATION_PHASE_SAMPLE_COUNTS.measurementEnd,
@@ -372,6 +376,8 @@ try {
   measuredWireBytes = previewMode === 'detached' ? detachedMeasurementWireBytes : wireTap.bytes()
   measuredWireEventBytes =
     previewMode === 'detached' ? detachedMeasurementWireEventBytes : wireTap.eventBytes()
+  measuredWireEventCounts =
+    previewMode === 'detached' ? detachedMeasurementWireEventCounts : wireTap.eventCounts()
   diagnosticStatusAfter = await wireTap.request('diagnostics.stats')
   wireTap.close()
   const lastStableResourceCheckpoint = await collectStableProcessResourceCheckpoint({
@@ -414,7 +420,7 @@ try {
     statusHttpFetches: fetchDelta,
     statusHttpFetchesPerSecond: fetchDelta / measuredSeconds,
     wireKibPerSecond: measuredWireBytes / measuredSeconds / 1024,
-    wireEventCounts: wireTap.eventCounts(),
+    wireEventCounts: measuredWireEventCounts,
     wireEventBytes: measuredWireEventBytes,
     presentFps: statusAfter?.presentFps,
     intervalP95Ms: statusAfter?.intervalP95Ms,
@@ -453,7 +459,14 @@ try {
     )
     if (pipeline.wireKibPerSecond > maxWireKibPerSecond) {
       budgetFailures.push(
-        `unfiltered WebSocket wire rate ${pipeline.wireKibPerSecond.toFixed(2)}KiB/s exceeded ${maxWireKibPerSecond}KiB/s`
+        `unfiltered WebSocket wire rate ${pipeline.wireKibPerSecond.toFixed(2)}KiB/s exceeded ${maxWireKibPerSecond}KiB/s` +
+          (describeWireRateByEvent(
+            pipeline.wireEventBytes,
+            pipeline.wireEventCounts,
+            measuredSeconds
+          )
+            ? ` (by event: ${describeWireRateByEvent(pipeline.wireEventBytes, pipeline.wireEventCounts, measuredSeconds)})`
+            : '')
       )
     }
   }
