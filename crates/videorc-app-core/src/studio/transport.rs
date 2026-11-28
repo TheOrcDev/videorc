@@ -664,6 +664,34 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_limit_disables_go_live_and_offers_the_jump() {
+        // What the GPUI app builds for its transport: the cap from the plan
+        // the Studio holds (`SessionControls::of`).
+        let mut snapshot = ready_snapshot();
+        // A known plan (an account's), as the backend answers it.
+        let mut plan = crate::account::entitlements::default_basic_entitlements();
+        plan.source = videorc_protocol::EntitlementSource::SignedCache;
+        snapshot.entitlements = Some(plan);
+        let six = (0..6)
+            .map(|n| destination(&format!("custom-{n}"), "Custom RTMP", true))
+            .collect();
+        set_destinations(&mut snapshot, six);
+        let view =
+            TransportView::from_snapshot(&snapshot, &StartGates::of_snapshot(&snapshot), false);
+        let reason = "You can stream to up to 5 destinations at once.";
+        assert!(view.record_enabled && !view.go_live_enabled);
+        assert_eq!(view.go_live_blocked.as_deref(), Some(reason));
+        assert_eq!(view.blocked_reason.as_deref(), Some(reason));
+        assert_eq!(
+            view.blocked_jump,
+            Some(BlockedJump {
+                label: "Open Destinations",
+                page: crate::nav::PageId::Live,
+            })
+        );
+    }
+
+    #[test]
     fn a_destination_on_but_not_ready_disables_go_live_and_offers_the_jump() {
         // What the GPUI app builds for its transport: the gate from the
         // saved settings (`SessionControls::of`).

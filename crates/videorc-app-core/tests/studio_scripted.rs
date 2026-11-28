@@ -896,6 +896,59 @@ async fn the_bootstrap_reads_everything_in_one_go() {
 }
 
 #[tokio::test]
+async fn the_plan_arrives_by_event_and_an_unreadable_one_leaves_none_held() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    // The scripted backend has no `entitlements.get`: none read.
+    assert!(studio.snapshot().entitlements.is_none());
+    let mut plan =
+        serde_json::to_value(videorc_app_core::account::entitlements::default_basic_entitlements())
+            .expect("a plan");
+    plan["source"] = json!("signed-cache");
+    plan["limits"]["streaming"]["maxDestinations"] = json!(3);
+    studio
+        .handle_event(BackendEvent::Untyped {
+            event: "entitlements.updated".to_string(),
+            payload: plan,
+        })
+        .await;
+    let held = studio.snapshot().entitlements.expect("the plan");
+    assert_eq!(held.limits.streaming.max_destinations, 3);
+    // Something that isn't a plan: unknown, so none is held and the gates are
+    // off (they fail open).
+    studio
+        .handle_event(BackendEvent::Untyped {
+            event: "entitlements.updated".to_string(),
+            payload: json!({"nonsense": true}),
+        })
+        .await;
+    assert_eq!(studio.snapshot().entitlements, None);
+}
+
+#[tokio::test]
+async fn a_reconnect_that_cannot_read_the_plan_drops_the_old_one() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    let mut plan =
+        serde_json::to_value(videorc_app_core::account::entitlements::default_basic_entitlements())
+            .expect("a plan");
+    plan["source"] = json!("signed-cache");
+    studio
+        .handle_event(BackendEvent::Untyped {
+            event: "entitlements.updated".to_string(),
+            payload: plan,
+        })
+        .await;
+    assert!(studio.snapshot().entitlements.is_some());
+    // The backend came back and `entitlements.get` fails: the plan the last
+    // connection held is not carried over.
+    studio.handle_event(ready()).await;
+    assert_eq!(studio.snapshot().entitlements, None);
+}
+
+#[tokio::test]
 async fn record_then_stop_walks_idle_starting_recording_stopping_idle() {
     let backend = Scripted::new();
     // The start waits at this gate, so the optimistic `starting` is visible.

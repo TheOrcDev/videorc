@@ -70,7 +70,7 @@ export function assessPortalScreenStatus(status, { expect = 'granted', minFrames
  * Electron CPU/BMP proof surface. Synthetic stripes with compositorState
  * stopped is the failure ogre hit after PR #435.
  */
-export function assessPortalPreviewProof({ compositor, surface } = {}) {
+export function assessPortalPreviewProof({ compositor, surface, app = 'electron' } = {}) {
   const failures = []
   const compositorState = compositor?.state
   if (compositorState !== 'live') {
@@ -92,16 +92,36 @@ export function assessPortalPreviewProof({ compositor, surface } = {}) {
       `sourcePixelsPresent=${String(surface?.sourcePixelsPresent)} (portal pixels required)`
     )
   }
+  // What the Preview is allowed to call itself. Electron's Linux Preview is
+  // the BMP proof surface (a browser window), never native. The GPUI app has
+  // no browser window: its Linux Preview is a CPU frame in shared memory on a
+  // Wayland wl_shm subsurface, which the app reports as such and which is no
+  // native GPU surface either, so a GPUI run must report exactly that and
+  // nothing that claims a native host.
+  const identity =
+    app === 'gpui'
+      ? {
+          transport: 'cpu-shared-memory',
+          backing: 'wl-shm-subsurface',
+          hostKind: null,
+          label: 'the GPUI CPU shared-memory preview'
+        }
+      : {
+          transport: 'electron-proof-surface',
+          backing: 'electron-browser-window',
+          hostKind: 'proof-surface',
+          label: 'electron-proof-surface'
+        }
   const transport = surface?.transport
-  if (transport && transport !== 'electron-proof-surface') {
-    failures.push(`transport=${transport} (Linux proof must stay electron-proof-surface)`)
+  if (transport && transport !== identity.transport) {
+    failures.push(`transport=${transport} (Linux proof must stay ${identity.transport})`)
   }
   const backing = surface?.backing
-  if (backing && backing !== 'electron-browser-window') {
+  if (backing && backing !== identity.backing) {
     failures.push(`backing=${backing} claims a native surface`)
   }
   const hostKind = surface?.nativePreviewHostKind
-  if (hostKind && hostKind !== 'proof-surface') {
+  if (hostKind && hostKind !== identity.hostKind) {
     failures.push(`nativePreviewHostKind=${hostKind} claims a native host`)
   }
   const sceneSources = compositor?.sceneSources ?? compositor?.scene_sources ?? []

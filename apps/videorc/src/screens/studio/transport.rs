@@ -55,9 +55,9 @@ pub struct SessionControls {
 impl SessionControls {
     pub fn of(snapshot: &StudioSnapshot) -> Self {
         Self {
-            // The destination gate comes from the saved settings; the
-            // entitlement and topology gates are inputs the app doesn't hold
-            // yet (S1.6c, #1814), and neither is on.
+            // The destination and entitlement gates come from the saved
+            // settings and the plan the Studio holds (they fail open on a plan
+            // it doesn't know); the topology verdict is Go Live's to settle.
             transport: TransportView::from_snapshot(
                 snapshot,
                 &StartGates::of_snapshot(snapshot),

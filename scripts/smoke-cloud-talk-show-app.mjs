@@ -194,6 +194,8 @@ const eventTexts = []
 const receivers = []
 const taps = []
 const browsers = []
+/** Every guest page, for the evidence `saveGuestEvidence` writes. */
+const guestPages = []
 const report = {
   startedAt: new Date(startedAtMs).toISOString(),
   outputDirectory,
@@ -1609,14 +1611,23 @@ async function launchApp(env, attempt) {
  */
 async function seedHostDevices(smoke) {
   if (gpuiApp) {
-    const snapshot = await request(backend, 15_000, 'ui.settings.get', {
-      keys: ['videorc.settings']
-    })
-    const rawSettings = snapshot.entries?.['videorc.settings']
-    const settings = typeof rawSettings === 'string' ? JSON.parse(rawSettings) : rawSettings
-    await request(backend, 15_000, 'ui.settings.set', {
-      put: { 'videorc.settings': JSON.stringify({ ...settings, keepMicrophoneWarm: false }) }
-    })
+    // Through the Studio: a `ui.settings.set` from here is overwritten by the
+    // Studio's next settings write, made from what it holds.
+    await requestSmokeCommand(
+      smoke,
+      'studio-put-setting',
+      { key: 'keepMicrophoneWarm', value: false },
+      { timeoutMs: 15_000 }
+    )
+    // `roomFixtureDevices` with the native microphone, as the renderer seeds
+    // them: without them in the device list, Sources clears the synthetic
+    // microphone as unavailable before the room reads it.
+    await requestSmokeCommand(
+      smoke,
+      'studio-room-fixture-devices',
+      { nativeMicrophone: true },
+      { timeoutMs: 15_000 }
+    )
     // The room's picture is the backend's fixture (VIDEORC_ROOM_CAMERA_FIXTURE),
     // but the Studio still needs a camera it can list to turn the room camera
     // on: a name the device list lacks is dropped from its view, so on Linux
@@ -1655,11 +1666,13 @@ async function seedHostDevices(smoke) {
       },
       { timeoutMs: 15_000 }
     )
+    let lastSaved = null
     await waitFor(
       async () => {
         const snapshot = await request(backend, 15_000, 'ui.settings.get', {
           keys: ['videorc.captureConfig', 'videorc.settings']
         })
+        lastSaved = snapshot.entries
         const rawSavedSettings = snapshot.entries?.['videorc.settings']
         const savedSettings =
           typeof rawSavedSettings === 'string' ? JSON.parse(rawSavedSettings) : rawSavedSettings
@@ -1693,7 +1706,10 @@ async function seedHostDevices(smoke) {
       15_000,
       'the Studio to save the room fixture sources and audio',
       100
-    )
+    ).catch((error) => {
+      log(`DIAG saved settings: ${JSON.stringify(lastSaved).slice(0, 4000)}`)
+      throw error
+    })
     // What the Studio holds after its own reconcile against the device list:
     // the room's camera.set follows it, so a missing camera names itself here.
     const studioState = await requestSmokeCommand(smoke, 'studio-state', {}, { timeoutMs: 15_000 })
@@ -1766,6 +1782,13 @@ async function checkSeatHolder(moment) {
 }
 
 async function prebuildBackendOrThrow(env, onLine = log) {
+  // A prebuilt GPUI app (VIDEORC_GPUI_APP_BINARY, its backend beside it) needs
+  // no cargo build, as launchDevApp already treats it: compiling here would
+  // rebuild both crates in the checkout while the app-run lock is held.
+  if (gpuiApp && { ...process.env, ...env }.VIDEORC_GPUI_APP_BINARY) {
+    onLine('[smoke:prebuild] skipped: prebuilt GPUI app (VIDEORC_GPUI_APP_BINARY)')
+    return
+  }
   const failure = await prebuildDevBackend({ env, onLine })
   if (failure) throw new Error(failure)
 }
@@ -1957,6 +1980,33 @@ function latestRoom(watch) {
 
 // --- The guests: headless Chrome through playwright-core -----------------------------
 
+/**
+ * Each guest's browser console, page events and camera-encoder stats, into the
+ * output directory (a layout that fails because a guest's picture stopped
+ * needs to know whether the guest stopped sending). Evidence, never a gate.
+ */
+async function saveGuestEvidence() {
+  for (const { label, page, consoleLog, startedAt } of guestPages) {
+    try {
+      writeFileSync(
+        join(outputDirectory, `guest-${label}-console.log`),
+        `${consoleLog.join('\n')}\n`
+      )
+      const inPage = await page.evaluate(() => ({
+        events: window.__guest?.events ?? [],
+        stats: window.__guestStats ?? [],
+        userAgent: navigator.userAgent
+      }))
+      writeFileSync(
+        join(outputDirectory, `guest-${label}-page.json`),
+        JSON.stringify({ startedAtMs: startedAt, ...inPage }, null, 1)
+      )
+    } catch (error) {
+      log(`guest ${label}'s evidence was not saved: ${error?.message ?? error}`)
+    }
+  }
+}
+
 async function openGuest(chrome, files, { url, label }) {
   const { chromium } = await import('playwright-core')
   const browser = await chromium.launch({
@@ -1969,15 +2019,23 @@ async function openGuest(chrome, files, { url, label }) {
       `--use-file-for-fake-audio-capture=${files.wav}`,
       '--autoplay-policy=no-user-gesture-required',
       '--disable-background-timer-throttling',
-      '--disable-renderer-backgrounding'
+      '--disable-renderer-backgrounding',
+      // For experiments: more Chrome flags for the guests, space separated.
+      ...(process.env.VIDEORC_SMOKE_GUEST_CHROME_ARGS?.split(/\s+/).filter(Boolean) ?? [])
     ]
   })
   browsers.push({ label, browser })
   const context = await browser.newContext({ permissions: ['camera', 'microphone'] })
   const page = await context.newPage()
   const consoleLog = []
-  page.on('console', (message) => consoleLog.push(`${message.type()}: ${message.text()}`))
-  page.on('pageerror', (error) => consoleLog.push(`pageerror: ${error.message}`))
+  const startedAt = Date.now()
+  page.on('console', (message) =>
+    consoleLog.push(`+${Date.now() - startedAt} ms ${message.type()}: ${message.text()}`)
+  )
+  page.on('pageerror', (error) =>
+    consoleLog.push(`+${Date.now() - startedAt} ms pageerror: ${error.message}`)
+  )
+  guestPages.push({ label, page, consoleLog, startedAt })
   await page.goto(url, { waitUntil: 'load', timeout: 30_000 })
   return { browser, page, consoleLog }
 }
@@ -2396,6 +2454,7 @@ function waitForExit(child, ms) {
 }
 
 async function cleanup() {
+  await saveGuestEvidence()
   for (const { browser } of browsers) {
     await browser.close().catch(() => {})
   }

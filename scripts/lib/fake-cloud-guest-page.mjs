@@ -78,6 +78,7 @@ const state = {
   disconnected: null,
   removed: false,
   errors: [],
+  cameraRestarts: 0,
   events: []
 }
 window.__guest = state
@@ -200,12 +201,7 @@ async function connect(url, token) {
   })
   for (const track of tracks) {
     if (track.kind === Track.Kind.Video) {
-      await room.localParticipant.publishTrack(track, {
-        source: Track.Source.Camera,
-        videoCodec: 'vp8',
-        simulcast: true,
-        videoEncoding: VideoPresets.h360.encoding
-      })
+      await publishCamera(track)
       state.published.camera = true
     } else {
       await room.localParticipant.publishTrack(track, { source: Track.Source.Microphone })
@@ -214,6 +210,121 @@ async function connect(url, token) {
   }
   state.phase = 'published'
   note('published camera and microphone')
+  startSendStats(room)
+}
+
+function publishCamera(track) {
+  return room.localParticipant.publishTrack(track, {
+    source: Track.Source.Camera,
+    videoCodec: 'vp8',
+    simulcast: true,
+    videoEncoding: VideoPresets.h360.encoding
+  })
+}
+
+// Headless Chrome's fake camera sometimes stops after about 15 frames and
+// never recovers (seen on a loaded Mac: the capture source stays at 15 frames,
+// the encoder at 2, and the runner draws "Back in a moment" for the guest).
+// A real camera does not do this; the stand-in guest takes the picture again
+// the way a person would, by turning the camera off and on.
+async function republishCamera() {
+  state.cameraRestarts += 1
+  note('the camera stopped delivering frames; publishing it again (' + state.cameraRestarts + ')')
+  const old = room.localParticipant.getTrackPublication(Track.Source.Camera)
+  if (old && old.track) await room.localParticipant.unpublishTrack(old.track, true)
+  const [video] = await createLocalTracks({ video: { resolution: VideoPresets.h360.resolution } })
+  await publishCamera(video)
+}
+
+// What this page's own camera encoder did, once a second (kept for the
+// smoke's evidence: when a guest's picture stops arriving, was it sent?). Per
+// simulcast layer: frames encoded and sent, bytes, the size, and why the
+// browser limited it (cpu, bandwidth, none).
+window.__guestStats = []
+function startSendStats(activeRoom) {
+  let lastFrames = -1
+  let stalledSeconds = 0
+  let restarting = false
+  const sampler = setInterval(async () => {
+    try {
+      const publication = activeRoom.localParticipant.getTrackPublication(Track.Source.Camera)
+      const sender = publication && publication.track && publication.track.sender
+      if (!sender) return
+      const layers = []
+      const candidates = new Map()
+      let pair = null
+      const report = await sender.getStats()
+      report.forEach((entry) => {
+        if (entry.type === 'local-candidate') candidates.set(entry.id, entry)
+        if (entry.type === 'candidate-pair' && entry.nominated && entry.state === 'succeeded') {
+          pair = entry
+        }
+      })
+      let source = null
+      report.forEach((entry) => {
+        // What the camera (the capture side) handed the encoder.
+        if (entry.type === 'media-source' && entry.kind === 'video') {
+          source = { frames: entry.frames ?? 0, fps: entry.framesPerSecond ?? 0 }
+        }
+        if (entry.type !== 'outbound-rtp' || entry.kind !== 'video') return
+        layers.push({
+          rid: entry.rid ?? null,
+          framesEncoded: entry.framesEncoded ?? 0,
+          framesSent: entry.framesSent ?? 0,
+          keyFramesEncoded: entry.keyFramesEncoded ?? 0,
+          bytesSent: entry.bytesSent ?? 0,
+          width: entry.frameWidth ?? 0,
+          height: entry.frameHeight ?? 0,
+          limit: entry.qualityLimitationReason ?? null,
+          active: entry.active ?? null,
+          targetKbps: Math.round((entry.targetBitrate ?? 0) / 1000),
+          nack: entry.nackCount ?? 0,
+          pli: entry.pliCount ?? 0,
+          fir: entry.firCount ?? 0,
+          encodeMs: Math.round((entry.totalEncodeTime ?? 0) * 1000)
+        })
+      })
+      if (source && !restarting) {
+        if (source.frames === lastFrames) stalledSeconds += 1
+        else {
+          stalledSeconds = 0
+          lastFrames = source.frames
+        }
+        if (stalledSeconds >= 3) {
+          restarting = true
+          republishCamera()
+            .catch(fail)
+            .finally(() => {
+              restarting = false
+              stalledSeconds = 0
+              lastFrames = -1
+            })
+        }
+      }
+      const local = pair ? candidates.get(pair.localCandidateId) : null
+      window.__guestStats.push({
+        at: Date.now(),
+        layers,
+        source,
+        encodings: sender
+          .getParameters()
+          .encodings.map((e) => ({ rid: e.rid ?? null, active: e.active, maxKbps: Math.round((e.maxBitrate ?? 0) / 1000) })),
+        visibility: document.visibilityState,
+        path: pair
+          ? {
+              protocol: local ? local.protocol : null,
+              candidateType: local ? local.candidateType : null,
+              availableOutgoingKbps: Math.round((pair.availableOutgoingBitrate ?? 0) / 1000),
+              rttMs: Math.round((pair.currentRoundTripTime ?? 0) * 1000)
+            }
+          : null
+      })
+      if (window.__guestStats.length > 900) window.__guestStats.shift()
+    } catch (error) {
+      window.__guestStats.push({ at: Date.now(), error: String((error && error.message) || error) })
+    }
+  }, 1000)
+  activeRoom.once(RoomEvent.Disconnected, () => clearInterval(sampler))
 }
 
 window.__guestLeave = async () => {
