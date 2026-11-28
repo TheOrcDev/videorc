@@ -41,6 +41,7 @@ import {
 } from './lib/fake-cloud-web.mjs'
 import { evaluateTapAfterLegsEnd, startRtmpTap } from './lib/rtmp-tap.mjs'
 import { roomFixtureDevicesSource } from './lib/room-fixture-devices.mjs'
+import { centreMeanLuma, fetchRoomRemoteFrame } from './lib/room-remote-frame.mjs'
 import {
   linuxRoomMicrophoneId,
   linuxRoomToneArgs,
@@ -903,6 +904,103 @@ try {
           )
         }
       }
+    }
+  )
+
+  // --- 5. The backend's room hands the pictures back ----------------------------
+  // Plan 260 S1.8d: with the backend in the room it subscribes to every guest
+  // and, behind the Program monitor, to the runner's return, and serves the
+  // latest frame of each at /room/remote/latest.bmp. The guests are solid
+  // colours, so their returned pictures say who arrived; the monitor's picture
+  // is the program the runner composed, judged by its tile plan like a receiver.
+  await scenario(
+    5,
+    "The Program monitor: the guests' pictures and the runner's return come back to the backend",
+    async () => {
+      if (!backendHosts) {
+        report.monitor = { skipped: true, reason: 'the renderer hosts this run' }
+        log('[monitor] skipped: the renderer holds the room, so no frames come back to the backend')
+        return
+      }
+      const connection = launched?.connections?.['backend-ready']
+      if (!connection) throw new Error('the backend connection is unavailable for the monitor step')
+      const tolerance = 18
+      const guestPictures = {}
+      for (const key of ['ada', 'bo']) {
+        const picture = await waitFor(
+          async () => {
+            const got = await fetchRoomRemoteFrame(connection, {
+              identity: identityOf[key],
+              source: 'camera'
+            })
+            if (got.status !== 200) return null
+            const luma = centreMeanLuma(got.plane)
+            return Math.abs(luma - media[key].luma) <= tolerance
+              ? {
+                  luma: Math.round(luma * 10) / 10,
+                  width: got.plane.width,
+                  height: got.plane.height
+                }
+              : null
+          },
+          20_000,
+          `the returned picture of ${PEOPLE[key].name} (luma ${media[key].luma})`,
+          500
+        )
+        guestPictures[key] = { expected: media[key].luma, ...picture }
+      }
+      // Before the monitor is on, the runner's return is not subscribed.
+      const before = await fetchRoomRemoteFrame(connection, { source: 'monitor' })
+      const asked = await request(backend, timeoutMs, 'cloud.room.monitor.set', {
+        enabled: true,
+        listen: false
+      })
+      const onStage = Object.fromEntries(
+        [hostIdentity, identityOf.ada].map((identity) => [
+          identity,
+          identity === hostIdentity ? media.host.luma : media.ada.luma
+        ])
+      )
+      const program = await waitFor(
+        async () => {
+          const got = await fetchRoomRemoteFrame(connection, { source: 'monitor' })
+          if (got.status !== 200) return null
+          const latest = latestStageTiles(readText(runnerLogPath))
+          if (!latest) return null
+          const verdict = evaluateTilePlan({
+            frame: got.plane,
+            canvas: latest.canvas,
+            tiles: latest.tiles,
+            expected: onStage
+          })
+          return verdict.ok ? { verdict, width: got.plane.width, height: got.plane.height } : null
+        },
+        30_000,
+        'the Program monitor to show the host and Ada',
+        500
+      )
+      await request(backend, timeoutMs, 'cloud.room.monitor.set', { enabled: false })
+      report.monitor = {
+        skipped: false,
+        guests: guestPictures,
+        monitorBeforeOn: before.status,
+        askedOk: asked !== undefined,
+        program: {
+          ok: program.verdict.ok,
+          width: program.width,
+          height: program.height,
+          probes: program.verdict.probes
+        }
+      }
+      log(
+        `[monitor] guests back: ${Object.entries(guestPictures)
+          .map(([key, picture]) => `${key} ${picture.luma}/${picture.expected}`)
+          .join(', ')}; program ${program.width}x${program.height}: ${program.verdict.probes
+          .map(
+            (probe) => `${probe.identity.slice(0, 10)}=${probe.measured}/${probe.expected ?? '-'}`
+          )
+          .join(' ')}`
+      )
     }
   )
 
