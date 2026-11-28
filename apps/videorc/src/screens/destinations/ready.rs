@@ -97,7 +97,7 @@ impl DestinationsPanel {
                 ListRow::new(format!("ready-nav-{target_id}"), line.clone()).child(
                     Button::new(format!("ready-open-{target_id}"))
                         .label("Open")
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .on_click(move |_, _, cx| {
                             entity.update(cx, |this, cx| this.open_destination(id.clone(), cx))
                         }),

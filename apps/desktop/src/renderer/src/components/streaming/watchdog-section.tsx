@@ -258,7 +258,7 @@ export function WatchdogSection(): ReactElement | null {
               >
                 {showCode ? 'Hide code' : 'Show QR code'}
               </Button>
-              <Button size="xs" type="button" variant="ghost" onClick={() => void copy(LIVE_URL)}>
+              <Button size="xs" type="button" variant="outline" onClick={() => void copy(LIVE_URL)}>
                 {copied ? 'Copied' : 'Copy link'}
               </Button>
             </div>
