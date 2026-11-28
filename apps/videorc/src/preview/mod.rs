@@ -13,8 +13,8 @@
 //!
 //! Linux has its element since S2.3c (`linux.rs`, S0.3's route: the
 //! presenter's child above GPUI's drawing, docked or in its own window). Windows
-//! gets its own in S2.3b (D12's route); until then its slot says the preview
-//! failed to start, which is the truth.
+//! gets its own in S2.3b (D12's route); until then its slot says there is no
+//! preview on Windows yet, and Health does not count that as a problem.
 
 #[cfg(target_os = "macos")]
 mod floating;
@@ -54,6 +54,21 @@ use {
     videorc_preview::feed::{FeedConfig, FrameSource},
     videorc_protocol::PreviewSurfaceSource,
 };
+
+/// Shown in the Studio Preview slot on Windows until S2.3b lands a Windows
+/// preview presenter (decision D12).
+const WINDOWS_UNAVAILABLE: PreviewWords = PreviewWords {
+    title: "No preview on Windows yet",
+    detail: "Your scenes and recordings still run normally.",
+};
+
+fn unavailable_docked_words(windows_preview_pending: bool) -> PreviewWords {
+    if windows_preview_pending {
+        WINDOWS_UNAVAILABLE
+    } else {
+        words::FAILED
+    }
+}
 
 /// The Studio slot's corner radius in points (`preview-stage.tsx`'s
 /// rounded stage). The floating window is square.
@@ -505,7 +520,7 @@ impl Preview {
             return Some(words::LIVES_IN_ITS_OWN_WINDOW);
         }
         if !self.native_ready() {
-            return Some(words::FAILED);
+            return Some(unavailable_docked_words(cfg!(target_os = "windows")));
         }
         #[cfg(target_os = "linux")]
         if self.mode == WindowMode::Docked
@@ -1505,4 +1520,17 @@ fn rect_json(rect: videorc_preview::LayerRect) -> serde_json::Value {
         "width": rect.width,
         "height": rect.height,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_without_preview_yet_shows_placeholder_while_other_platforms_show_failed() {
+        let windows = unavailable_docked_words(true);
+        assert_eq!(windows, WINDOWS_UNAVAILABLE);
+        assert_ne!(windows.title, words::FAILED.title);
+        assert_eq!(unavailable_docked_words(false), words::FAILED);
+    }
 }
