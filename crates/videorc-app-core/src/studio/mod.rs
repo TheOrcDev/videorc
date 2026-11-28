@@ -564,6 +564,11 @@ pub struct StudioSnapshot {
     /// (`shouldReloadSceneFromCaptureConfig`), so an idle screen or camera
     /// pick made while it is open loads the scene itself.
     pub scene_edit_mode: bool,
+    /// How many times `banners.changed` arrived on any connection: a page
+    /// that reads `banners.list` reads it again when this moves (a banner
+    /// added in the Stream Manager or by a remote while the Scene page is
+    /// open shows on its stage).
+    pub banners_revision: u64,
     /// The Output page's performance check: its state, the rung it is on,
     /// and the hold a check this app started puts on the ring and preview.
     pub performance: performance_check::PerformanceView,
@@ -770,6 +775,8 @@ struct Inner {
     /// S1.6b part 5e: the Scene page's canvas editor is open
     /// (`sceneEditMode`).
     scene_edit_mode: bool,
+    /// [`StudioSnapshot::banners_revision`].
+    banners_revision: u64,
     /// The Output page's performance check.
     performance: performance_check::PerformanceView,
     /// S1.6b part 4c-2: the vertical stream's live sends.
@@ -1101,6 +1108,7 @@ impl<B: StudioBackend> Studio<B> {
             recordings_folder_facts: None,
             clips: clips_actions::ClipsCore::default(),
             scene_edit_mode: false,
+            banners_revision: 0,
             performance: Default::default(),
             vertical_leg: vertical_leg::VerticalLeg::default(),
         };
@@ -3276,6 +3284,7 @@ impl<B: StudioBackend> Studio<B> {
             recordings_folder,
             clips,
             scene_edit_mode: inner.scene_edit_mode,
+            banners_revision: inner.banners_revision,
             performance: inner.performance.clone(),
         }
     }

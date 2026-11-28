@@ -551,6 +551,26 @@ impl ScenePage {
     /// A toolbar chip (`onSelectSource` / `overlays.onSelect`): a source
     /// opens the scene editor (`sceneEditMode`), an overlay item or a banner
     /// takes the selection alone.
+    /// `scene-stage-select`: what a click on `stage_id`'s chip does (the
+    /// scene-item-drag smoke selects as Electron's clicks the chip). An id
+    /// with no chip is refused by name.
+    pub(crate) fn smoke_select_stage(
+        &mut self,
+        stage_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, String> {
+        if !self
+            .editor
+            .chips
+            .iter()
+            .any(|chip| chip.stage_id == stage_id)
+        {
+            return Err(format!("scene-stage-select: no chip is {stage_id:?}."));
+        }
+        self.select_stage(&SharedString::from(stage_id.to_string()), cx);
+        Ok(self.smoke_stage_state(cx))
+    }
+
     fn select_stage(&mut self, stage_id: &SharedString, cx: &mut Context<Self>) {
         self.cancel_stage_gesture(cx);
         let selection = if let Some(id) = banner_id_from_stage_id(stage_id) {

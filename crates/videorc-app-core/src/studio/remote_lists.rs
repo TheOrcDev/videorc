@@ -167,6 +167,9 @@ impl<B: StudioBackend> Studio<B> {
                         remote.extras.banners = banners;
                     });
                 }
+                // The pages that read `banners.list` read it again.
+                self.lock().banners_revision += 1;
+                self.publish();
             }
             SOUNDS_CHANGED_EVENT => {
                 if let Some(board) = board_of(payload) {
