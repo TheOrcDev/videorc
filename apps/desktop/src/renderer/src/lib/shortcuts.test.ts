@@ -1,3 +1,4 @@
+import { shortcutsFor } from './shortcuts'
 import { describe, expect, it } from 'vitest'
 
 import { WORKSPACE_SHORTCUTS, pageShortcutFor, workspaceTabLabel } from '@/components/workspace-nav'
@@ -121,4 +122,17 @@ describe('SHORTCUTS registry', () => {
       'Backspace'
     ])
   })
+})
+
+it('keeps Settings and palette hints on the current visible navigation map', () => {
+  for (const shown of [false, true, false]) {
+    const rows = shortcutsFor(shown).filter(({ id }) => id.startsWith('nav-'))
+    expect(rows.some(({ id }) => id === 'nav-guests')).toBe(shown)
+    for (const row of rows) {
+      const tab = row.id.slice(4) as Parameters<typeof pageShortcutFor>[0]
+      expect(row.accelerators[0]).toBe(pageShortcutFor(tab, shown))
+    }
+    expect(navShortcutAccelerator('avatar', shown)).toBe(`CmdOrCtrl+${shown ? 8 : 7}`)
+    expect(navShortcutAccelerator('ai', shown)).toBe(`CmdOrCtrl+${shown ? 9 : 8}`)
+  }
 })

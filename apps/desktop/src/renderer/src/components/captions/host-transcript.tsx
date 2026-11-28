@@ -25,7 +25,7 @@ export function HostTranscript(): ReactElement | null {
         cloud recording is unmeasured.
       </p>
       <Button
-        variant="ghost"
+        variant="outline"
         disabled={!client}
         onClick={async () => {
           try {

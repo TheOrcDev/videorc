@@ -333,3 +333,17 @@ reorder and delete use the session lock; explain that scope beside them.
   check reads only what a person reads (JSX text and string literals): code
   names stay `buddy`. The backend's words have the same check,
   `the_backend_copy_says_sidekick_not_buddy` in `buddy_act.rs`.
+
+## Page shortcut numbering
+
+Page numbers follow the visible sidebar rows in both apps (owner Q187).
+Studio through Destinations keep ⌘1–⌘6. When Guests is hidden, Avatar is ⌘7
+and Sidekick is ⌘8. When Guests is visible, Guests is ⌘7, Avatar is ⌘8 and
+Sidekick is ⌘9. Update chips, tooltips, Search, Settings → Shortcuts, menus
+and bindings together as talk-show availability changes, including an open
+room keeping Guests visible. On Windows and Linux, use Ctrl in place of ⌘.
+Images ⇧⌘G, Sounds ⇧⌘S, Library ⌘0 and Settings ⌘, remain fixed.
+Remote and Stream Deck actions address stable IDs, not sidebar positions.
+
+The temporarily unused ninth page key stays reserved for page navigation,
+so a saved global binding cannot take it when Guests becomes visible.

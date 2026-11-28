@@ -31,6 +31,12 @@ import { applyLiveChatMessages, emptyLiveChatSnapshot } from './live-chat-view'
 
 const T0 = Date.parse('2026-09-24T10:00:00Z')
 const at = (seconds: number): string => new Date(T0 + seconds * 1000).toISOString()
+const localUsd = (amount: number, whole = Number.isInteger(amount)): string =>
+  new Intl.NumberFormat(undefined, {
+    style: 'currency',
+    currency: 'USD',
+    ...(whole ? { minimumFractionDigits: 0, maximumFractionDigits: 0 } : {})
+  }).format(amount)
 
 function provider(platform: StreamPlatform): LiveChatProviderState {
   return {
@@ -297,14 +303,15 @@ describe('stats bar items (plan 057)', () => {
       }),
       'followers'
     )
+    const formattedFollowers = (61_942).toLocaleString()
     expect(followers).toMatchObject({
-      value: '61,942',
+      value: formattedFollowers,
       unit: 'followers',
       delta: '+12',
-      description: '61,942 followers, +12 this stream'
+      description: `${formattedFollowers} followers, +12 this stream`
     })
     expect(followers?.details.map((row) => [row.label, row.value, row.note])).toEqual([
-      ['Twitch followers', '61,942', '+12 this stream'],
+      ['Twitch followers', formattedFollowers, '+12 this stream'],
       ['X followers', '–', 'Reconnect X to show followers.'],
       ['YouTube subscribers', '–', 'Off']
     ])
@@ -456,7 +463,7 @@ describe('stats bar items (plan 057)', () => {
       nowMs: T0 + 60_000
     })
     expect(find(items, 'supporters')).toMatchObject({ value: '1', unit: 'supporter' })
-    expect(find(items, 'tips')?.value).toMatch(/^\$20 · 600 bits$/)
+    expect(find(items, 'tips')?.value).toBe(`${localUsd(20)} · 600 bits`)
     expect(find(items, 'chat')).toMatchObject({ value: '4', unit: 'msg/min' })
     expect(find(items, 'chat')?.details).toContainEqual({ label: 'Chatters', value: '4' })
   })
@@ -465,8 +472,9 @@ describe('stats bar items (plan 057)', () => {
     expect(supportersUnit(new Set(['twitch']), 8)).toBe('subs')
     expect(supportersUnit(new Set(['youtube']), 1)).toBe('member')
     expect(supportersUnit(new Set(['twitch', 'youtube']), 3)).toBe('supporters')
-    expect(formatMoneyShort(4_990_000, 'USD')).toMatch(/4\.99/)
-    expect(formatMoneyShort(20_000_000, 'USD')).not.toMatch(/\.00/)
+    expect(formatMoneyShort(4_990_000, 'USD')).toBe(localUsd(4.99, false))
+    expect(formatMoneyShort(20_000_000, 'USD')).toBe(localUsd(20))
+    expect(formatMoneyShort(20_000_000, 'USD')).not.toMatch(/[.,]00/)
   })
 
   it('keeps whole-session support and chatters after paid rows leave the bounded view', () => {
@@ -521,8 +529,11 @@ describe('stats bar items (plan 057)', () => {
       nowMs: T0 + 3_000_000
     })
     expect(find(items, 'supporters')).toMatchObject({ value: '1' })
-    expect(find(items, 'tips')?.value).toBe('$20')
-    expect(find(items, 'chat')?.details).toContainEqual({ label: 'Chatters', value: '2,002' })
+    expect(find(items, 'tips')?.value).toBe(localUsd(20))
+    expect(find(items, 'chat')?.details).toContainEqual({
+      label: 'Chatters',
+      value: (2_002).toLocaleString()
+    })
   })
 
   it('uses the same durable accounting in History even when only X rows remain', () => {
@@ -549,9 +560,15 @@ describe('stats bar items (plan 057)', () => {
       }
     })
     expect(find(items, 'supporters')).toMatchObject({ value: '1' })
-    expect(find(items, 'tips')?.value).toBe('$20')
-    expect(find(items, 'chat')).toMatchObject({ value: '6,003', unit: 'messages' })
-    expect(find(items, 'chat')?.details).toContainEqual({ label: 'Chatters', value: '6,002' })
+    expect(find(items, 'tips')?.value).toBe(localUsd(20))
+    expect(find(items, 'chat')).toMatchObject({
+      value: (6_003).toLocaleString(),
+      unit: 'messages'
+    })
+    expect(find(items, 'chat')?.details).toContainEqual({
+      label: 'Chatters',
+      value: (6_002).toLocaleString()
+    })
   })
 
   it('does not present retained rows or a stale dashboard as complete session totals', () => {

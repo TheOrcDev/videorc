@@ -199,6 +199,7 @@ impl Hub {
         if id == n::ids::END_LIVESTREAM_ARMED
             || id == n::ids::CLIP_MARKED
             || refused_layout_answer(id)
+            || account_connect_answer(id)
         {
             cx.emit(Delivery::Press(notice));
             return;
@@ -284,6 +285,14 @@ fn refused_layout_answer(id: &str) -> bool {
     id == copy::SOURCE_UNAVAILABLE_ID || id == copy::NO_SCREEN_ID
 }
 
+/// A provider connect's result (`platforms.rs`'s `handle_oauth_callback`:
+/// Connected, X Live is on, or why it couldn't finish). The person pressed
+/// Connect and approved in the browser, so the result is that press's answer:
+/// Electron toasts it (`showOAuthCallbackResult`), and so does this app.
+fn account_connect_answer(id: &str) -> bool {
+    id.starts_with("oauth-callback:")
+}
+
 /// These old producers are replaced above (or by the microphone snapshot).
 /// Filtering is by their stable ids, never timing or a last-click guess.
 fn typed_legacy(notice: &Notice) -> bool {
@@ -328,7 +337,7 @@ fn typed_legacy(notice: &Notice) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::refused_layout_answer;
+    use super::{account_connect_answer, refused_layout_answer};
 
     #[test]
     fn a_refused_layout_is_the_press_answer_electron_toasts() {
@@ -336,5 +345,13 @@ mod tests {
         assert!(refused_layout_answer("scene-layout-no-screen"));
         assert!(!refused_layout_answer("scene-delete-refused"));
         assert!(!refused_layout_answer(""));
+    }
+
+    #[test]
+    fn a_provider_connect_result_is_the_press_answer_electron_toasts() {
+        assert!(account_connect_answer("oauth-callback:youtube"));
+        assert!(account_connect_answer("oauth-callback:provider"));
+        assert!(!account_connect_answer("oauth-authorization-link"));
+        assert!(!account_connect_answer(""));
     }
 }

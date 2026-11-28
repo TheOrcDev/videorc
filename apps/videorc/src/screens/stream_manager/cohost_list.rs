@@ -111,7 +111,7 @@ fn card_row(id: impl Into<gpui::ElementId>) -> Stateful<Div> {
 fn ghost(id: impl Into<gpui::ElementId>, label: impl Into<SharedString>) -> Button {
     Button::new(id)
         .label(label)
-        .variant(ButtonVariant::Ghost)
+        .variant(ButtonVariant::Outline)
         .size(ButtonSize::Xs)
 }
 

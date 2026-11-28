@@ -17,6 +17,8 @@ import {
 
 const localTime = (date: Date): string =>
   date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+const localMonthDay = (date: Date): string =>
+  date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 
 describe('youtube quota copy (plan 094)', () => {
   it('reads the breaker end and ignores an absent or unreadable pause', () => {
@@ -35,7 +37,9 @@ describe('youtube quota copy (plan 094)', () => {
     const tomorrowMorning = new Date(2026, 9, 3, 9, 0, 0)
     expect(formatResumeTime(tomorrowMorning, now)).toBe(`tomorrow ${localTime(tomorrowMorning)}`)
     const nextWeek = new Date(2026, 9, 9, 9, 0, 0)
-    expect(formatResumeTime(nextWeek, now)).toMatch(/^Oct 9 /)
+    expect(formatResumeTime(nextWeek, now)).toBe(
+      `${localMonthDay(nextWeek)} ${localTime(nextWeek)}`
+    )
     expect(formatResumeTime('garbage', now)).toBe('the reset')
   })
 

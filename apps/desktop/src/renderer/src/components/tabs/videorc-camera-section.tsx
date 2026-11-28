@@ -147,7 +147,7 @@ function CommandLine({ command }: { command: string }): ReactElement {
       <Button
         size="xs"
         type="button"
-        variant="ghost"
+        variant="outline"
         onClick={() => void copy(command, "Couldn't copy the command.")}
       >
         <CopyIcon data-icon="inline-start" />

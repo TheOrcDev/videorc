@@ -1197,7 +1197,7 @@ async function shootBuddy({ ctx, only, sizes, failed }) {
       await ctx.shoot('account-menu', 'signed-in')
       await ctx.dismiss()
     })
-    // Plan 239 moved avatar creation to the Avatar page (⌘8): onboarding is
+    // Plan 239 moved avatar creation to the Avatar page (⌘7, or ⌘8 with Guests): onboarding is
     // "New avatar…" on Profile, and the Alive creator replaces Profile.
     await tryStep('buddy-pet-creator', 'default', async () => {
       await ctx.open('avatar')

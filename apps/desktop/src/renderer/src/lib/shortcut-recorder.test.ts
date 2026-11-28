@@ -198,3 +198,35 @@ describe('shortcutRecorderName (plan 174 I-17)', () => {
     ).toBe('Mark a clip: press the new shortcut')
   })
 })
+
+it('names the current page when refusing a reserved navigation key', () => {
+  for (const shown of [false, true, false]) {
+    expect(appShortcutOwner('CmdOrCtrl+7', 'darwin', shown)?.label).toBe(
+      shown ? 'Guests' : 'Avatar'
+    )
+    expect(appShortcutOwner('CmdOrCtrl+8', 'darwin', shown)?.label).toBe(
+      shown ? 'Avatar' : 'Sidekick'
+    )
+  }
+})
+
+it('keeps the unused ninth page key reserved across availability changes', () => {
+  for (const platform of ['darwin', 'win32']) {
+    const input = {
+      type: 'keyDown' as const,
+      code: 'Digit9',
+      meta: platform === 'darwin',
+      control: platform !== 'darwin',
+      shift: false,
+      alt: false
+    }
+    expect(shortcutRecorderStep(input, platform, () => null, false)).toMatchObject({
+      type: 'reject',
+      message: expect.stringContaining('reserved for page navigation')
+    })
+    expect(shortcutRecorderStep(input, platform, () => null, true)).toMatchObject({
+      type: 'reject',
+      message: expect.stringContaining('Sidekick')
+    })
+  }
+})

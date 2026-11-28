@@ -848,7 +848,7 @@ impl CaptionsPanel {
             .child(
                 Button::new("host-transcript-refresh")
                     .label(c::TRANSCRIPT_REFRESH)
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .disabled(!self.studio.is_connected())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.refresh_transcript(show_id.clone(), cx)

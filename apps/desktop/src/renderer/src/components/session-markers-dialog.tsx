@@ -406,7 +406,7 @@ export function SessionMarkersDialog({
             <Button
               className="self-start"
               disabled={loading}
-              variant="ghost"
+              variant="outline"
               onClick={() => void load(client, cursor)}
             >
               {loading ? 'Loading…' : 'Load more markers'}

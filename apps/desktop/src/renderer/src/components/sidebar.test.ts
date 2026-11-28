@@ -140,7 +140,7 @@ describe('sidebar zones (plan 174 D8, plan 235 D6, plan 239)', () => {
   })
 
   // Owner 2026-11-20: ⌘1–⌘9 run down the nine rows above Assets with no gap,
-  // Guests included (hidden here, so its ⌘7 shows no chip); Images ⇧⌘G,
+  // Hidden Guests takes no digit; Images ⇧⌘G,
   // Sounds ⇧⌘S, Library ⌘0, Settings ⌘,.
   it('puts ⌘1–⌘9 on the top rows, ⇧⌘G and ⇧⌘S on Images and Sounds, ⌘0 on Library and ⌘, on Settings', () => {
     const markup = renderSidebar({ platform: 'darwin' })
@@ -153,14 +153,14 @@ describe('sidebar zones (plan 174 D8, plan 235 D6, plan 239)', () => {
       'Meta+4',
       'Meta+5',
       'Meta+6',
+      'Meta+7',
       'Meta+8',
-      'Meta+9',
       'Shift+Meta+G',
       'Shift+Meta+S',
       'Meta+0',
       'Meta+,'
     ])
-    expect(rowOf(markup, 'ai')).toContain('aria-keyshortcuts="Meta+9"')
+    expect(rowOf(markup, 'ai')).toContain('aria-keyshortcuts="Meta+8"')
     expect(rowOf(markup, 'library')).toContain('aria-keyshortcuts="Meta+0"')
     // The chips print the same keys.
     expect(rowOf(markup, 'assets')).toContain('data-accelerator="CmdOrCtrl+Shift+G"')
@@ -262,8 +262,16 @@ describe('sidebar update chip (plan 174 A-25)', () => {
 
 // 0.31.1: Guests is its own page under Livestream, between Destinations and
 // Avatar, shown only with talk shows (the rule ⌘K follows too). It keeps ⌘7
-// whether or not it shows, so every row keeps its key (owner 2026-11-20).
+// only while visible; the following rows close the gap (Q187).
 describe('the Guests row', () => {
+  it('updates Avatar and Sidekick chips as Guests appears and disappears', () => {
+    for (const shown of [false, true, false]) {
+      cloud.cloudStatus = { allowance: { enabled: true, talkShows: shown } }
+      const markup = renderSidebar({ platform: 'darwin' })
+      expect(rowOf(markup, 'avatar')).toContain(`aria-keyshortcuts="Meta+${shown ? 8 : 7}"`)
+      expect(rowOf(markup, 'ai')).toContain(`data-accelerator="CmdOrCtrl+${shown ? 9 : 8}"`)
+    }
+  })
   const triggers = (html: string): string[] =>
     [...html.matchAll(/data-videorc-tab-trigger="([a-z]+)"/g)].map((match) => match[1])
 

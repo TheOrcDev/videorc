@@ -302,7 +302,7 @@ impl SessionSection {
                 Button::new("session-agents-stop")
                     .label(STOP_LABEL)
                     .accessibility_label(STOP_AGENTS_COMMAND)
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .disabled(self.agents_stopping)
                     .on_click(stop),

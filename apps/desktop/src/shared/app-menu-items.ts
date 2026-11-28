@@ -14,16 +14,20 @@ export interface AppMenuPage {
 /**
  * The View menu's pages in sidebar order, one group per sidebar block, built
  * from shared/sidebar-pages: every page with a key except Settings, which is
- * the app menu's Settings… item. A page without a key (Sidekick today) is
+ * the app menu's Settings… item. A hidden page or a page without a key is
  * left out.
  */
-export const APP_MENU_PAGE_GROUPS: readonly (readonly AppMenuPage[])[] = SIDEBAR_LAYOUT.map(
-  (zone) =>
+export function appMenuPageGroups(guestsShown: boolean): readonly (readonly AppMenuPage[])[] {
+  return SIDEBAR_LAYOUT.map((zone) =>
     zone.pages.flatMap((page): AppMenuPage[] => {
-      const key = pageKeyFor(page)
+      const key = pageKeyFor(page, guestsShown)
       return key && key !== ',' ? [{ key, label: SIDEBAR_PAGE_LABELS[page] }] : []
     })
-).filter((group) => group.length > 0)
+  ).filter((group) => group.length > 0)
+}
+
+/** Full inventory for parity tests. Runtime menus use appMenuPageGroups. */
+export const APP_MENU_PAGE_GROUPS = appMenuPageGroups(true)
 
 export type AppMenuWindowId = 'preview' | 'notes' | 'stream-manager' | 'captions'
 

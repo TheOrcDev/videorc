@@ -33,7 +33,7 @@ export function PermissionsSettings(): ReactElement {
       description={`What ${settingsName} lets Videorc capture right now.`}
       title="System access"
       action={
-        <Button variant="ghost" onClick={() => void refreshBackend()}>
+        <Button variant="outline" onClick={() => void refreshBackend()}>
           <RefreshIcon data-icon="inline-start" />
           Refresh
         </Button>

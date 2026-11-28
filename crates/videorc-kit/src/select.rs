@@ -12,7 +12,7 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Bounds, ElementId, Entity, FocusHandle, FontWeight, IntoElement, Pixels,
+    AnyElement, App, Bounds, ElementId, Entity, FocusHandle, FontWeight, IntoElement, Pixels, Role,
     SharedString, Subscription, Window, deferred, div, prelude::*, px,
 };
 use gpui_base::{
@@ -712,6 +712,7 @@ fn popup_list(p: PopupList<'_>) -> AnyElement {
         }
         let option_disabled = p.options[index].disabled;
         let label = p.options[index].label.clone();
+        let name = label.clone();
         let body = p.options[index]
             .child
             .take()
@@ -722,6 +723,11 @@ fn popup_list(p: PopupList<'_>) -> AnyElement {
         rows.push(
             div()
                 .id(index)
+                // An option is a named node: GPUI names no node from its
+                // child text, so without the role and the name a screen
+                // reader (and the UI driver) found an open list empty.
+                .role(Role::ListBoxOption)
+                .aria_label(name)
                 .relative()
                 .flex()
                 .items_center()
@@ -818,6 +824,7 @@ fn popup_list(p: PopupList<'_>) -> AnyElement {
                     div().flex().flex_col().children(rows),
                 )
                 .id("select-content")
+                .role(Role::ListBox)
                 .occlude()
                 .track_focus(&p.content_focus)
                 .map(|list| {

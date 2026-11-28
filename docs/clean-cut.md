@@ -32,7 +32,7 @@ caption.
 
 ## Where you use it
 
-- **The Clean cut card** in the Sidekick tab (⌘9). "Make a clean cut of every
+- **The Clean cut card** in the Sidekick tab (⌘8, or ⌘9 with Guests). "Make a clean cut of every
   recording" is the opt-in switch for running it after every Stop; it asks
   for sign-in, Premium and Cloud AI consent the same way Sidekick Live does. The
   card shows the latest recording's status (waiting, transcribing, cutting,

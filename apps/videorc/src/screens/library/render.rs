@@ -511,7 +511,7 @@ impl Render for LibraryScreen {
                     )
                     .child(
                         Button::new("library-clear-selected")
-                            .variant(ButtonVariant::Ghost)
+                            .variant(ButtonVariant::Outline)
                             .label(copy::CLEAR_SELECTION)
                             .on_click(cx.listener(|this, _, _, cx| this.select_all(false, cx))),
                     )
@@ -684,7 +684,7 @@ impl Render for LibraryScreen {
                     .child(div().children(view.footer.clone()))
                     .children(view.load_more.map(|label| {
                         Button::new("library-load-more")
-                            .variant(ButtonVariant::Ghost)
+                            .variant(ButtonVariant::Outline)
                             .size(ButtonSize::Xs)
                             .label(label)
                             .disabled(!view.load_more_enabled)
@@ -916,7 +916,7 @@ impl LibraryScreen {
             };
             let label = noise.direct_label.clone().unwrap_or_default();
             let mut button = Button::new(SharedString::from(format!("noise-{id}")))
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .disabled(direct.is_none())
                 .accessibility_label(if direct == Some(NoiseCleanupAction::OpenOutput) {
                     format!("Open cleaned copy for {}", row.title)

@@ -62,6 +62,10 @@ pub struct SceneDialogs {
     deleting: Option<Deleting>,
     picker: DialogHandle,
     picker_search: Entity<InputState>,
+    /// The picker body's own focus: the dialog is built after `open`, so its
+    /// focus-in on open never ran; this puts focus inside it (Escape then
+    /// closes it wherever the pointer or search field is).
+    picker_focus: gpui::FocusHandle,
     picking: Option<picker::Picking>,
     guests: DialogHandle,
     guesting: Option<guests::Guesting>,
@@ -115,6 +119,7 @@ impl SceneDialogs {
             deleting: None,
             picker: DialogHandle::new(false),
             picker_search,
+            picker_focus: cx.focus_handle(),
             picking: None,
             guests: DialogHandle::new(false),
             guesting: None,
