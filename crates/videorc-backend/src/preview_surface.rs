@@ -2086,10 +2086,8 @@ async fn emit_preview_surface_present_diagnostics(state: &AppState, status: &Pre
     let due = {
         let mut metrics = state.preview_metrics.lock().await;
         let now = Instant::now();
-        let due = present_diagnostics_broadcast_due(
-            metrics.last_present_diagnostics_broadcast_at,
-            now,
-        );
+        let due =
+            present_diagnostics_broadcast_due(metrics.last_present_diagnostics_broadcast_at, now);
         if due {
             metrics.last_present_diagnostics_broadcast_at = Some(now);
         }
@@ -2586,7 +2584,10 @@ mod tests {
                 broadcasts += 1;
             }
         }
-        assert_eq!(broadcasts, 20, "40 reports at 4 Hz broadcast 20 times, not 40");
+        assert_eq!(
+            broadcasts, 20,
+            "40 reports at 4 Hz broadcast 20 times, not 40"
+        );
     }
 
     /// The probe measured `diagnostics.stats` at 60 of the 86 KiB/s on the
