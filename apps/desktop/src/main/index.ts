@@ -169,7 +169,10 @@ import {
   type SecurePersistenceCodec
 } from './secure-persistence-codec'
 import { createNativePreviewHelperProcessDriver } from './native-preview-helper-process-driver'
-import { runNativePreviewDriverReset } from './native-preview-driver-reset'
+import {
+  runNativePreviewDriverReset,
+  runNativePreviewExplicitProofFallback
+} from './native-preview-driver-reset'
 import {
   nativePreviewClosedWindowUnsuppressStatus,
   nativePreviewDriverFailureFallbackStatus,
@@ -13484,7 +13487,16 @@ async function runSmokePreviewMotionCommand(
     if (!previewWindowIsOpenForSurface()) {
       throw new Error('Preview window must be open before exercising proof fallback.')
     }
-    await disableNativePreviewRealSurfaceDriver('Smoke requested explicit proof fallback.')
+    // Inside the surface mutation queue, like `reset-real-surface-driver`: a
+    // compositor update in flight on the old driver must not write its native
+    // status back over the fallback's after this answers.
+    const fallbackStatus = await runNativePreviewExplicitProofFallback({
+      serialize: (operation) =>
+        nativePreviewSurfaceMutationQueue.run(operation, 'explicit-proof-fallback'),
+      retire: () =>
+        disableNativePreviewRealSurfaceDriver('Smoke requested explicit proof fallback.'),
+      status: () => nativePreviewSurfaceStatus
+    })
     // Plan 216 C: a probe that drives a real mouse over the fallback needs it
     // to outlast the retry cooldown, or the next host command brings the
     // native presenter back mid-drag. `restore-native-preview-driver` ends
@@ -13499,11 +13511,9 @@ async function runSmokePreviewMotionCommand(
       exists: Boolean(window && !window.isDestroyed()),
       visible: Boolean(window && !window.isDestroyed() && window.isVisible()),
       animationSuspended: nativePreviewProofAnimationSuspended === true,
-      bounds: nativePreviewSurfaceStatus.bounds,
-      placement: nativePreviewSurfaceStatus.bounds
-        ? surfaceWindowPlacement(nativePreviewSurfaceStatus.bounds)
-        : null,
-      status: nativePreviewSurfaceStatus
+      bounds: fallbackStatus.bounds,
+      placement: fallbackStatus.bounds ? surfaceWindowPlacement(fallbackStatus.bounds) : null,
+      status: fallbackStatus
     }
   }
 
