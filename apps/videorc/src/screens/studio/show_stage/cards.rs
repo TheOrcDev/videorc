@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, ElementId, Image, ObjectFit, SharedString, Window, div, img, prelude::*, px,
-    relative,
+    AnyElement, App, ElementId, ObjectFit, RenderImage, SharedString, Window, div, img, prelude::*,
+    px, relative,
 };
 use videorc_app_core::guests::wire::DrawnStageLayout;
 use videorc_kit::badge::Badge;
@@ -259,7 +259,7 @@ pub fn stage_layout_thumb(layout: DrawnStageLayout, t: &Theme) -> AnyElement {
 
 /// `ScreenThumb`: a shared screen, live, in a 16:9 frame on the video
 /// ground; the Display glyph until a picture arrives.
-pub fn screen_thumb(frame: Option<Arc<Image>>, t: &Theme) -> AnyElement {
+pub fn screen_thumb(frame: Option<Arc<RenderImage>>, t: &Theme) -> AnyElement {
     div()
         .relative()
         .w_full()
