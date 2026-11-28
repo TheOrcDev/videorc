@@ -17,7 +17,8 @@ import { basename, join } from 'node:path'
 import { createServer } from 'node:net'
 import { createServer as createHttpServer } from 'node:http'
 import { setTimeout as sleep } from 'node:timers/promises'
-import { launchDevApp, stopProcess } from './app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui, stopProcess } from './app-launcher.mjs'
+import { gpuiElementText } from './ui-driver.mjs'
 import { startRtmpTap } from './rtmp-tap.mjs'
 import {
   holdCardStats,
@@ -136,11 +137,15 @@ export async function managedHarness(
     localEgress = false
   } = {}
 ) {
+  const gpui = smokeAppIsGpui()
   const root = mkdtempSync(
     join(process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? tmpdir(), `videorc-managed-${kind}-${pass}-`)
   )
-  let appData = join(root, 'profile'),
-    userData = join(root, 'electron')
+  // GPUI puts sqlite, secrets and recordings under VIDEORC_USER_DATA_DIR
+  // (`AppPaths::profile` → `IsolatedBackendPaths::under`), so keep appData and
+  // userData on the same directory when running the GPUI app.
+  let userData = join(root, gpui ? 'profile' : 'electron'),
+    appData = gpui ? userData : join(root, 'profile')
   const mediaDir = join(root, 'media')
   const profiles = [],
     privateValues = new Set(),
@@ -290,14 +295,14 @@ export async function managedHarness(
     VIDEORC_SMOKE_STATE_DIR: root,
     VIDEORC_APP_DATA_DIR: appData,
     VIDEORC_USER_DATA_DIR: userData,
-    VIDEORC_RECORDINGS_DIR: join(root, 'downloads'),
+    VIDEORC_RECORDINGS_DIR: gpui ? join(userData, 'recordings') : join(root, 'downloads'),
     TMPDIR: join(root, 'download-temp'),
     VIDEORC_ENABLE_SMOKE_RPC: '1',
     VIDEORC_CLOUD_DEVICE_ID: randomBytes(11).toString('hex'),
     VIDEORC_CLOUD_DEVICE_NAME: 'Smoke computer A'
   }
-  mkdirSync(env.TMPDIR)
-  mkdirSync(env.VIDEORC_RECORDINGS_DIR)
+  mkdirSync(env.TMPDIR, { recursive: true })
+  mkdirSync(env.VIDEORC_RECORDINGS_DIR, { recursive: true })
   // Runtime-only synthetic sign-in. Never read or import the owner's credentials.
   // A signed-in desktop keeps its account snapshot beside the token; without
   // it the backend starts signed out (the Library then asks to sign in).
@@ -321,6 +326,7 @@ export async function managedHarness(
   }
   seedProfile()
   const h = {
+    isGpui: gpui,
     root,
     get speech() {
       return speech
@@ -435,6 +441,45 @@ export async function managedHarness(
     async command(command, params = {}) {
       return requestSmokeCommand(smoke, command, params, { timeoutMs: 15000 })
     },
+    async uiFind(selector, { timeoutMs = 500 } = {}) {
+      try {
+        const found = await requestSmokeCommand(
+          smoke,
+          'ui-find',
+          { ...selector, timeoutMs },
+          { timeoutMs: timeoutMs + 10000 }
+        )
+        return found?.element ?? null
+      } catch {
+        return null
+      }
+    },
+    async uiClick(selector, { timeoutMs = 8000 } = {}) {
+      return requestSmokeCommand(
+        smoke,
+        'ui-click',
+        { ...selector, timeoutMs },
+        { timeoutMs: timeoutMs + 10000 }
+      )
+    },
+    async uiTree(params = {}) {
+      return requestSmokeCommand(smoke, 'ui-tree', params, { timeoutMs: 15000 })
+    },
+    async recordEnabled() {
+      if (!gpui) {
+        return h.eval(
+          'return window.__videorcSmokeScenePresets.streamingState().captureConfig.recordEnabled'
+        )
+      }
+      const snapshot = await h.rpc('ui.settings.get', { keys: ['videorc.captureConfig'] })
+      const raw = snapshot?.entries?.['videorc.captureConfig']
+      const config = typeof raw === 'string' ? JSON.parse(raw) : raw
+      return Boolean(config?.recordEnabled)
+    },
+    async elementText(selector, { timeoutMs = 500 } = {}) {
+      const el = await h.uiFind(selector, { timeoutMs })
+      return el ? gpuiElementText(el) : null
+    },
     async captureUi(name, selector, toastText) {
       const directory = process.env.VIDEORC_SMOKE_SHOTS_DIR
       if (!directory || screenshots.has(name)) return
@@ -509,6 +554,10 @@ export async function managedHarness(
      * not a toast. True once an entry with this title is in the list.
      */
     async hasNotification(title) {
+      if (gpui) {
+        const read = await h.command('notifications-state')
+        return Boolean(read?.entries?.some((entry) => entry.title === title))
+      }
       return h.eval(
         `const read = window.__videorcSmokeNotifications?.(); return Boolean(read?.entries.some((entry) => entry.title === ${JSON.stringify(title)}))`
       )
@@ -536,6 +585,9 @@ export async function managedHarness(
     // a session captures, so a sign-in is followed, as in the app, by the
     // entitlement refresh, whose capability read re-runs the cloud launch check.
     async refreshAccount() {
+      if (gpui) {
+        return h.rpc('account.get')
+      }
       return h.eval('return await window.videorc.refreshAccount()')
     },
     async refreshSignIn() {
@@ -572,19 +624,37 @@ export async function managedHarness(
       await h.status((s) => s.entitled && s.settings?.enabled, 'managed entitlement')
       // The dev app takes key focus at launch, and the Studio's Space key
       // stops a session that is not live (a cloud show on hold): a key typed
-      // on this Mac stopped one pass. Nothing here needs focus.
-      await h.command('main-window-blur')
+      // on this Mac stopped one pass. Nothing here needs focus on Electron.
+      // On GPUI, macOS AccessKit needs the window focused once at launch to
+      // activate its accessibility tree for later `ui-*` commands; never
+      // refocus mid-run.
+      if (gpui) {
+        await h.command('main-window-focus').catch(() => {})
+        await h.command('ui-tree', { depth: 1 }).catch(() => {})
+      } else {
+        await h.command('main-window-blur')
+      }
       // The Clips ring (plan 181) starts a buffer-only session whenever the
       // app is idle. This smoke starts sessions over its own socket, beside
       // the renderer, so a ring start races them (the renderer never races its
       // own ring); off, as smoke:record-latency's bare baseline turns it off.
       // On a loaded Mac the renderer is still mounting when main answers.
-      await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer')
-      assert.equal(
-        await h.eval('return window.__videorcSmokeSetReplayBuffer?.(false) ?? null'),
-        true,
-        'the renderer has no clip buffer smoke hook'
-      )
+      if (gpui) {
+        // Turn off the Clips ring both for this run and in captureConfig so
+        // later capture-config updates (enable-synthetic-source / configureStudio)
+        // never re-arm a replay-only session mid-smoke.
+        await h.command('studio-capture-configure', {
+          config: { replayBuffer: { enabled: false, explicit: true } }
+        })
+        await h.command('studio-replay-buffer', { armed: false })
+      } else {
+        await waitForRendererHook(smoke, '__videorcSmokeSetReplayBuffer')
+        assert.equal(
+          await h.eval('return window.__videorcSmokeSetReplayBuffer?.(false) ?? null'),
+          true,
+          'the renderer has no clip buffer smoke hook'
+        )
+      }
       await waitFor(
         async () =>
           (await h.rpc('replay.status'))?.state === 'off' &&
@@ -605,6 +675,10 @@ export async function managedHarness(
       }
     },
     async clickTestId(id) {
+      if (gpui) {
+        await h.uiClick({ id }, { timeoutMs: 30000 })
+        return true
+      }
       return waitFor(
         () =>
           h.eval(
@@ -616,9 +690,20 @@ export async function managedHarness(
     async configureStudio({ recordEnabled = false } = {}) {
       await h.command('enable-synthetic-source', { settleMs: 500 })
       await h.command('open-tab', { tab: 'studio' })
-      await h.eval(
-        `window.__videorcSmokeScenePresets.configure(${JSON.stringify({ recordEnabled, streamEnabled: true, streaming: h.streaming(), video: { preset: 'tutorial-720p30', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 } })}); window.__videorcSmokeScenePresets.layout({layoutPreset:'screen-only'}); return true`
-      )
+      const config = {
+        recordEnabled,
+        streamEnabled: true,
+        streaming: h.streaming(),
+        video: { preset: 'tutorial-720p30', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 }
+      }
+      if (gpui) {
+        await h.command('studio-capture-configure', { config })
+        await h.command('select-layout-preset', { preset: 'screen-only' })
+      } else {
+        await h.eval(
+          `window.__videorcSmokeScenePresets.configure(${JSON.stringify(config)}); window.__videorcSmokeScenePresets.layout({layoutPreset:'screen-only'}); return true`
+        )
+      }
       // A case with no destination has nothing to go live to (the handoff's
       // second computer only resumes the room): the Studio rightly says
       // "Turn on a destination", so there is no start to wait for.
@@ -626,6 +711,32 @@ export async function managedHarness(
       // On a timeout, say what the Studio gave as its reason.
       let blocked = null
       await waitFor(async () => {
+        if (gpui) {
+          let findError = null
+          let button = null
+          try {
+            const found = await requestSmokeCommand(
+              smoke,
+              'ui-find',
+              { id: 'go-live-button', timeoutMs: 1000 },
+              { timeoutMs: 11000 }
+            )
+            button = found?.element ?? null
+          } catch (error) {
+            findError = error?.message ?? String(error)
+          }
+          const reason = await h.elementText({ id: 'session-blocked-reason' }, { timeoutMs: 150 })
+          const state = await h.command('studio-state')
+          blocked = {
+            canStart: Boolean(button?.enabled),
+            label: button?.label ?? null,
+            findError,
+            reason,
+            phase: state?.phase ?? null,
+            lastError: state?.lastError ?? null
+          }
+          return Boolean(button?.enabled)
+        }
         const state = await h.eval(
           'const s = window.__videorcSmokeScenePresets.streamingState(); return { canStart: s.canStart, reason: s.startBlockedReason ?? null, lastError: s.lastError ?? null }'
         )
@@ -637,12 +748,21 @@ export async function managedHarness(
     },
     async startUiLive({ recordEnabled = true } = {}) {
       await h.configureStudio({ recordEnabled })
-      await h.eval('await window.__videorcSmokeScenePresets.start(); return true')
-      await waitFor(
-        () => h.eval('return window.__videorcSmokeScenePresets.streamingState().confirmationOpen'),
-        'Go Live confirmation'
-      )
-      await h.eval('await window.__videorcSmokeScenePresets.confirmGoLive(); return true')
+      if (gpui) {
+        await h.command('studio-go-live', { action: 'open' })
+        await waitFor(
+          async () => (await h.command('studio-go-live', { action: 'state' }))?.open === true,
+          'Go Live confirmation'
+        )
+        await h.command('studio-go-live', { action: 'confirm' })
+      } else {
+        await h.eval('await window.__videorcSmokeScenePresets.start(); return true')
+        await waitFor(
+          () => h.eval('return window.__videorcSmokeScenePresets.streamingState().confirmationOpen'),
+          'Go Live confirmation'
+        )
+        await h.eval('await window.__videorcSmokeScenePresets.confirmGoLive(); return true')
+      }
       return h.status(
         (s) => s.show?.id && s.sessionId && s.phase === 'live',
         'renderer Go Live',
@@ -651,21 +771,44 @@ export async function managedHarness(
     },
     async handOffUi() {
       await h.command('open-tab', { tab: 'studio' })
-      await h.eval(
-        `const buttons=[...document.querySelectorAll('[data-slot=session-transport] button')]; const b=buttons.find(b=>!b.disabled && /Stop|End livestream/.test(b.textContent)); if(!b) throw new Error('No live Stop control'); b.click(); return true`
-      )
+      if (gpui) {
+        let seen = null
+        const stopId = await waitFor(async () => {
+          const snapshot = {}
+          for (const id of ['session-record', 'go-live-button']) {
+            const b = await h.uiFind({ id }, { timeoutMs: 500 })
+            snapshot[id] = b ? { enabled: b.enabled, label: b.label ?? null } : null
+            if (b?.enabled && /Stop|End livestream/.test(b.label ?? '')) return id
+          }
+          seen = snapshot
+          return null
+        }, 'live Stop control').catch(async (error) => {
+          const state = await h.command('studio-state').catch(() => null)
+          throw new Error(
+            `${error.message} (seen=${JSON.stringify(seen)}, phase=${state?.phase ?? null})`,
+            { cause: error }
+          )
+        })
+        await h.uiClick({ id: stopId })
+      } else {
+        await h.eval(
+          `const buttons=[...document.querySelectorAll('[data-slot=session-transport] button')]; const b=buttons.find(b=>!b.disabled && /Stop|End livestream/.test(b.textContent)); if(!b) throw new Error('No live Stop control'); b.click(); return true`
+        )
+      }
       await h.captureUi('end-livestream', '[data-testid=end-livestream-hand-off]')
       await h.clickTestId('end-livestream-hand-off')
     },
     async continueUi() {
       await h.command('open-tab', { tab: 'studio' })
-      await waitFor(
-        () =>
-          h.eval(
-            `return document.querySelector('[data-testid=cloud-resume]')?.textContent === 'Continue here'`
-          ),
-        'Continue here notice'
-      )
+      await waitFor(async () => {
+        if (gpui) {
+          const b = await h.uiFind({ id: 'cloud-resume' }, { timeoutMs: 250 })
+          return b?.label === 'Continue here'
+        }
+        return h.eval(
+          `return document.querySelector('[data-testid=cloud-resume]')?.textContent === 'Continue here'`
+        )
+      }, 'Continue here notice')
       await h.clickTestId('cloud-resume')
     },
     async webRequest(route, body, id = activeShow) {
@@ -732,12 +875,16 @@ export async function managedHarness(
     async freshComputer() {
       await h.kill()
       const originals = h.targets
-      appData = join(root, 'profile-b')
-      userData = join(root, 'electron-b')
-      mkdirSync(appData)
-      mkdirSync(userData)
+      userData = join(root, gpui ? 'profile-b' : 'electron-b')
+      appData = gpui ? userData : join(root, 'profile-b')
+      mkdirSync(appData, { recursive: true })
+      mkdirSync(userData, { recursive: true })
       env.VIDEORC_APP_DATA_DIR = appData
       env.VIDEORC_USER_DATA_DIR = userData
+      if (gpui) {
+        env.VIDEORC_RECORDINGS_DIR = join(userData, 'recordings')
+        mkdirSync(env.VIDEORC_RECORDINGS_DIR, { recursive: true })
+      }
       env.VIDEORC_CLOUD_DEVICE_ID = randomBytes(11).toString('hex')
       env.VIDEORC_CLOUD_DEVICE_NAME = 'Smoke computer B'
       seedProfile()
@@ -761,9 +908,13 @@ export async function managedHarness(
       const target = h.targets.find((t) => t.id === targetId)
       target.streamKeySecretRef = saved.streamKeySecretRef
       target.streamKeyPresent = true
-      await h.eval(
-        `window.__videorcSmokeScenePresets.configure({streaming:${JSON.stringify(h.streaming())}}); return true`
-      )
+      if (gpui) {
+        await h.command('studio-capture-configure', { config: { streaming: h.streaming() } })
+      } else {
+        await h.eval(
+          `window.__videorcSmokeScenePresets.configure({streaming:${JSON.stringify(h.streaming())}}); return true`
+        )
+      }
     },
     async addYouTube() {
       const seeded = await h.rpc('test.youtubeQuota.seedAccount', {
@@ -862,7 +1013,7 @@ export async function managedHarness(
       const peers = (r.stdout ?? '').split('\n').filter((l) => l.includes('->'))
       assert.ok(
         peers.every((l) => /->(127\.0\.0\.1|\[::1\]|localhost):/.test(l)),
-        'managed backend opened a remote socket'
+        `managed backend opened a remote socket: ${peers.join('; ')}`
       )
       assert.equal(h.calls('create').at(-1)?.status, 201)
       assert.deepEqual(web.upgrades, [], 'managed control must never upgrade to a socket')
@@ -1098,7 +1249,7 @@ export async function managedHarness(
         '--bind',
         '127.0.0.1',
         '--config-body',
-        `port: ${ports.livekit}\nkeys:\n  ${livekit.apiKey}: ${livekit.apiSecret}\nrtc:\n  tcp_port: ${ports.rtc}\n  use_external_ip: false\nroom:\n  auto_create: true\n  empty_timeout: 600${localEgress ? `\nredis:\n  address: 127.0.0.1:${ports.redis}` : ''}`
+        `port: ${ports.livekit}\nkeys:\n  ${livekit.apiKey}: ${livekit.apiSecret}\nrtc:\n  node_ip: 127.0.0.1\n  tcp_port: ${ports.rtc}\n  use_external_ip: false\nroom:\n  auto_create: true\n  empty_timeout: 600${localEgress ? `\nredis:\n  address: 127.0.0.1:${ports.redis}` : ''}`
       ])
       await waitFor(async () => {
         try {
@@ -1264,13 +1415,19 @@ export async function managedHarness(
         itemId: 'host-cue'
       })
     }
+    const gpuiBuildVersion = () => {
+      const cargoToml = readFileSync(new URL('../../apps/videorc/Cargo.toml', import.meta.url), 'utf8')
+      return /^version\s*=\s*"([^"]+)"/m.exec(cargoToml)?.[1]
+    }
     web = await startFakeCloudWebManaged({
       captionServiceOrigin: speech?.httpOrigin,
       sessionToken,
-      // Main reports app.getVersion() to the backend, whatever the shell says.
-      buildVersion: JSON.parse(
-        readFileSync(new URL('../../apps/desktop/package.json', import.meta.url), 'utf8')
-      ).version,
+      // Main reports app.getVersion() (Electron) or CARGO_PKG_VERSION (GPUI) to the backend.
+      buildVersion: gpui
+        ? gpuiBuildVersion()
+        : JSON.parse(
+            readFileSync(new URL('../../apps/desktop/package.json', import.meta.url), 'utf8')
+          ).version,
       ingest: [feed],
       rotateIngest: async ({ ingest: next }) => {
         privateValues.add(next.streamKey)

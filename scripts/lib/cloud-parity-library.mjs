@@ -124,12 +124,21 @@ export async function runLibrary() {
     assert.equal(expiry.state, 'failed')
     assert.match(expiry.error, /expired/)
     // The cloud recordings are the Library's Cloud tab (#1544).
-    await h.command('open-tab', { tab: 'library', waitFor: '[data-library-view="cloud"]' })
-    await h.eval(`document.querySelector('[data-library-view="cloud"]').click(); return true`)
-    await waitFor(
-      () => h.eval("return document.body.textContent.includes('Open in Library')"),
-      'Library local-file navigation'
-    )
+    if (h.isGpui) {
+      await h.command('open-tab', { tab: 'library' })
+      await h.uiClick({ within: { id: 'library-tabs/tabs' }, role: 'tab', index: 1 })
+      await waitFor(
+        async () => Boolean(await h.uiFind({ label: 'Open in Library' }, { timeoutMs: 250 })),
+        'Library local-file navigation'
+      )
+    } else {
+      await h.command('open-tab', { tab: 'library', waitFor: '[data-library-view="cloud"]' })
+      await h.eval(`document.querySelector('[data-library-view="cloud"]').click(); return true`)
+      await waitFor(
+        () => h.eval("return document.body.textContent.includes('Open in Library')"),
+        'Library local-file navigation'
+      )
+    }
     report.status = 'passed-local-fixture'
   } catch (error) {
     report.status = 'failed'

@@ -33,6 +33,14 @@ import {
   nodeTalkSentinel
 } from './lib/cloud-managed-room.mjs'
 import { managedWire as w } from './lib/fake-cloud-web-managed.mjs'
+import { gpuiElementText } from './lib/ui-driver.mjs'
+
+function walkUiNodes(root, match, out = []) {
+  if (!root || typeof root !== 'object') return out
+  if (match(root)) out.push(root)
+  for (const child of root.children ?? []) walkUiNodes(child, match, out)
+  return out
+}
 
 // The backend's private download folder (cloud_control_web.rs), made in the
 // app's TMPDIR. No such folder, playlist or segment outlives its job.
@@ -93,9 +101,14 @@ try {
     await listener.joinPeer(guests[1], true, { tone: 1100, color: '#f0f060' })
     const s = await h.status((s) => s.room?.participants?.length === 3, 'host and two guests')
     assert.ok(s.room.participants.every((p) => !p.identity.startsWith('EG_')))
-    const strip = await h.eval(
-      'return [...document.querySelectorAll("[data-testid=show-stage-strip-row]")].map(e => e.dataset.stageIdentity)'
-    )
+    const strip = h.isGpui
+      ? walkUiNodes(
+          await h.uiTree({ within: { id: 'show-stage-strip' } }),
+          (node) => typeof node.id === 'string' && node.id.startsWith('show-stage-strip-row-')
+        ).map((node) => node.id.slice('show-stage-strip-row-'.length))
+      : await h.eval(
+          'return [...document.querySelectorAll("[data-testid=show-stage-strip-row]")].map(e => e.dataset.stageIdentity)'
+        )
     assert.equal(
       strip.some((id) => id.startsWith('EG_')),
       false
@@ -245,10 +258,14 @@ try {
           (r) => r.topic === w.overlay.topics.set && r.attributes.slot === slot
         ).length
       // The renderer's own account of each send, for a failure to name: its
-      // warnings and every overlay image fetch with its answer.
-      await h.eval(
-        'window.__managedOverlayLog=[]; const warn=console.warn.bind(console); console.warn=(...a)=>{window.__managedOverlayLog.push("warn: "+a.map(String).join(" ").slice(0,300)); warn(...a)}; const f=window.fetch.bind(window); window.fetch=async (url,...rest)=>{ if(!String(url).includes("/cloud/overlays/")) return f(url,...rest); try { const r=await f(url,...rest); window.__managedOverlayLog.push("fetch "+r.status); return r } catch(e) { window.__managedOverlayLog.push("fetch failed: "+String(e&&e.message||e).slice(0,200)); throw e } }; return true'
-      )
+      // warnings and every overlay image fetch with its answer. GPUI streams
+      // overlays directly from the backend's room host (room_overlays.rs), so
+      // there is no renderer fetch to instrument.
+      if (!h.isGpui) {
+        await h.eval(
+          'window.__managedOverlayLog=[]; const warn=console.warn.bind(console); console.warn=(...a)=>{window.__managedOverlayLog.push("warn: "+a.map(String).join(" ").slice(0,300)); warn(...a)}; const f=window.fetch.bind(window); window.fetch=async (url,...rest)=>{ if(!String(url).includes("/cloud/overlays/")) return f(url,...rest); try { const r=await f(url,...rest); window.__managedOverlayLog.push("fetch "+r.status); return r } catch(e) { window.__managedOverlayLog.push("fetch failed: "+String(e&&e.message||e).slice(0,200)); throw e } }; return true'
+        )
+      }
       await overlay('card', png, 2)
       await overlay('takeover')
       try {
@@ -257,7 +274,7 @@ try {
           'initial overlays'
         )
       } catch (error) {
-        const seen = await h.eval('return window.__managedOverlayLog')
+        const seen = h.isGpui ? 'backend room host' : await h.eval('return window.__managedOverlayLog')
         throw new Error(
           `${error.message}; the listener holds ${(await listener.records()).length} streams; the renderer saw: ${JSON.stringify(seen)}`
         )
@@ -316,15 +333,12 @@ try {
       )
       assert.ok(jpeg.length <= w.overlay.maxBytes)
       assert.deepEqual(jpeg.head, [255, 216, 255])
-      await h.eval(
-        'window.__managedOriginalFetch=window.fetch; window.__managedPending=[]; window.fetch=(url,...args)=>String(url).includes("/cloud/overlays/") ? new Promise((resolve,reject)=>window.__managedPending.push(()=>window.__managedOriginalFetch(url,...args).then(resolve,reject))) : window.__managedOriginalFetch(url,...args); return true'
-      )
-      try {
-        await overlay('takeover')
-        await waitFor(
-          () => h.eval('return window.__managedPending.length > 0'),
-          'stalled overlay fetch'
-        )
+      if (h.isGpui) {
+        // Electron stalls the renderer's HTTP fetch of `/cloud/overlays/*` to
+        // prove `clear` bypasses a hung fetch. On GPUI the backend holds the
+        // room and reads overlay bytes directly from AppState (no renderer HTTP
+        // fetch exists); still prove `cloud.overlay.clear` publishes the exact
+        // clear payload from the host seat within 5 s.
         const at = Date.now()
         await h.rpc('cloud.overlay.clear', { slot: 'takeover', orientation: 'h' })
         const clear = await waitFor(
@@ -332,7 +346,7 @@ try {
             (await listener.records()).find(
               (r) => r.atMs >= at && r.topic === w.overlay.topics.clear
             ),
-          'clear bypasses stalled set',
+          'clear published from backend room host',
           5000
         )
         assert.deepEqual(JSON.parse(clear.body), {
@@ -341,10 +355,37 @@ try {
           o: 'h'
         })
         assert.equal(clear.sender, host)
-      } finally {
+      } else {
         await h.eval(
-          'window.fetch=window.__managedOriginalFetch; for(const release of window.__managedPending) release(); return true'
+          'window.__managedOriginalFetch=window.fetch; window.__managedPending=[]; window.fetch=(url,...args)=>String(url).includes("/cloud/overlays/") ? new Promise((resolve,reject)=>window.__managedPending.push(()=>window.__managedOriginalFetch(url,...args).then(resolve,reject))) : window.__managedOriginalFetch(url,...args); return true'
         )
+        try {
+          await overlay('takeover')
+          await waitFor(
+            () => h.eval('return window.__managedPending.length > 0'),
+            'stalled overlay fetch'
+          )
+          const at = Date.now()
+          await h.rpc('cloud.overlay.clear', { slot: 'takeover', orientation: 'h' })
+          const clear = await waitFor(
+            async () =>
+              (await listener.records()).find(
+                (r) => r.atMs >= at && r.topic === w.overlay.topics.clear
+              ),
+            'clear bypasses stalled set',
+            5000
+          )
+          assert.deepEqual(JSON.parse(clear.body), {
+            v: w.overlay.clearVersion,
+            slot: 'takeover',
+            o: 'h'
+          })
+          assert.equal(clear.sender, host)
+        } finally {
+          await h.eval(
+            'window.fetch=window.__managedOriginalFetch; for(const release of window.__managedPending) release(); return true'
+          )
+        }
       }
     }
   )
@@ -358,9 +399,38 @@ try {
       let lastView = null
       try {
         await waitFor(async () => {
-          const view = await h.eval(
-            'const p=document.querySelector("[data-testid=show-stage-program]"); return {tab:document.querySelector("[data-videorc-active-tab]")?.dataset.videorcActiveTab ?? null,source:p?.dataset.programSource,tiles:[...(p?.querySelectorAll("[data-stage-identity]")??[])].map(e=>e.dataset.stageIdentity),speaker:[...document.querySelectorAll("button")].some(b=>b.getAttribute("aria-label")==="Listen to the program")}'
-          )
+          const view = h.isGpui
+            ? await (async () => {
+                let program
+                try {
+                  program = await h.uiTree({ within: { id: 'show-stage-program' } })
+                } catch {
+                  return { tab: 'studio', source: null, tiles: [], speaker: false, text: '' }
+                }
+                const root = program?.tree ?? program
+                const text = gpuiElementText(root) ?? ''
+                const labels = walkUiNodes(root, (n) => Boolean(n.label)).map((n) => n.label)
+                const source = labels.includes('Program preview')
+                  ? 'stage'
+                  : labels.includes('Program')
+                    ? 'return'
+                    : null
+                const tiles = walkUiNodes(
+                  root,
+                  (n) => typeof n.id === 'string' && n.id.startsWith('show-stage-program-tile-')
+                )
+                  .map((n) => n.label)
+                  .filter(Boolean)
+                const speaker =
+                  walkUiNodes(
+                    root,
+                    (n) => n.id === 'program-listen' || n.label === 'Listen to the program'
+                  ).length > 0
+                return { tab: 'studio', source, tiles, speaker, text }
+              })()
+            : await h.eval(
+                'const p=document.querySelector("[data-testid=show-stage-program]"); return {tab:document.querySelector("[data-videorc-active-tab]")?.dataset.videorcActiveTab ?? null,source:p?.dataset.programSource,tiles:[...(p?.querySelectorAll("[data-stage-identity]")??[])].map(e=>e.dataset.stageIdentity),speaker:[...document.querySelectorAll("button")].some(b=>b.getAttribute("aria-label")==="Listen to the program")}'
+              )
           lastView = view
           return (
             view.source === 'stage' &&
@@ -419,11 +489,22 @@ try {
       h.assertNoPlatformEnd(at)
       const joinedAt = Date.now()
       await listener.joinHost(go.body.room)
-      await h.status(
-        (s) => s.stoppedBy === 'taken-over' && s.show?.resumable && !s.room,
-        'confirmed duplicate host releases desktop seat',
-        10000
-      )
+      await h
+        .status(
+          (s) => s.stoppedBy === 'taken-over' && s.show?.resumable && !s.room,
+          'confirmed duplicate host releases desktop seat',
+          10000
+        )
+        .catch(async (error) => {
+          const current = await h.rpc('cloud.status').catch(() => null)
+          const recentLogs = h.logs
+            .filter((line) => /room|disconnect|duplicate|taken|host|on-air|onAir/i.test(line))
+            .slice(-20)
+          throw new Error(
+            `${error.message} (status=${JSON.stringify({ stoppedBy: current?.stoppedBy, onAir: current?.onAir, room: current?.room ? { phase: current.room.phase, client: current.room.client, message: current.room.message } : null })}, logs=${JSON.stringify(recentLogs)})`,
+            { cause: error }
+          )
+        })
       assert.ok(
         h.events.some(
           (e) =>
@@ -681,22 +762,62 @@ try {
       // on `data-cloud-status`, its one direct action on `data-cloud-action`.
       const section = '[data-testid=library-cloud-recordings]'
       const rowSelector = (id) => `[data-testid=library-cloud-recording][data-recording-id="${id}"]`
+      const gpuiActionFromLabel = (label) => {
+        switch (label) {
+          case 'Download':
+            return 'download'
+          case 'Cancel':
+          case 'Cancel download':
+            return 'cancel'
+          case 'Open in Library':
+            return 'open-local'
+          case 'Try again':
+            return 'retry'
+          case 'Open on videorc.com':
+            return 'open-web'
+          default:
+            return label ?? null
+        }
+      }
+      const gpuiStatusFromRowText = (text) => {
+        if (!text) return null
+        if (text.includes('Downloading')) return 'downloading'
+        if (text.includes('Downloaded')) return 'downloaded'
+        if (text.includes('Download failed')) return 'failed'
+        if (text.includes('On videorc.com') || text.includes('Open on videorc.com')) return 'on-web'
+        return 'in-cloud'
+      }
       const rowText = (id) =>
-        h.eval(
-          `return document.querySelector(${JSON.stringify(rowSelector(id))})?.textContent ?? null`
-        )
-      const rowStatus = (id) =>
-        h.eval(
-          `return document.querySelector(${JSON.stringify(rowSelector(id))})?.getAttribute('data-cloud-status') ?? null`
-        )
-      const rowAction = (id) =>
-        h.eval(
-          `return document.querySelector(${JSON.stringify(rowSelector(id))})?.querySelector('[data-cloud-action]')?.getAttribute('data-cloud-action') ?? null`
-        )
-      const act = (id, action) =>
-        h.eval(
+        h.isGpui
+          ? h.elementText({ id: `cloud-row-${id}` }, { timeoutMs: 250 })
+          : h.eval(
+              `return document.querySelector(${JSON.stringify(rowSelector(id))})?.textContent ?? null`
+            )
+      const rowStatus = async (id) =>
+        h.isGpui
+          ? gpuiStatusFromRowText(await rowText(id))
+          : h.eval(
+              `return document.querySelector(${JSON.stringify(rowSelector(id))})?.getAttribute('data-cloud-status') ?? null`
+            )
+      const rowAction = async (id) =>
+        h.isGpui
+          ? gpuiActionFromLabel(
+              (await h.uiFind({ id: `cloud-action-${id}` }, { timeoutMs: 250 }))?.label
+            )
+          : h.eval(
+              `return document.querySelector(${JSON.stringify(rowSelector(id))})?.querySelector('[data-cloud-action]')?.getAttribute('data-cloud-action') ?? null`
+            )
+      const act = async (id, action) => {
+        if (h.isGpui) {
+          const button = await h.uiFind({ id: `cloud-action-${id}` }, { timeoutMs: 500 })
+          if (!button?.enabled || gpuiActionFromLabel(button.label) !== action) return false
+          await h.uiClick({ id: `cloud-action-${id}` })
+          return true
+        }
+        return h.eval(
           `const b = document.querySelector(${JSON.stringify(rowSelector(id))})?.querySelector(${JSON.stringify(`[data-cloud-action="${action}"]`)}); if (!b || b.disabled) return false; b.click(); return true`
         )
+      }
       const rowIs = (id, status, label, ms = 30000) =>
         waitFor(async () => (await rowStatus(id)) === status, label, ms)
       const doneEvent = (recordingId, state) =>
@@ -709,26 +830,42 @@ try {
       const listed = async (id) => {
         // Refresh reads "Refreshing…" (disabled) while the section's own poll runs.
         await waitFor(
-          () =>
-            h.eval(
+          async () => {
+            if (h.isGpui) {
+              const b = await h.uiFind({ id: 'cloud-refresh' }, { timeoutMs: 250 })
+              if (!b?.enabled || b.label !== 'Refresh') return false
+              await h.uiClick({ id: 'cloud-refresh' })
+              return true
+            }
+            return h.eval(
               `const b = [...(document.querySelector(${JSON.stringify(section)})?.querySelectorAll('button') ?? [])].find((b) => b.textContent.trim() === 'Refresh' && !b.disabled); if (!b) return false; b.click(); return true`
-            ),
+            )
+          },
           'the section has Refresh'
         )
         await waitFor(async () => (await rowText(id)) !== null, 'row listed after Refresh')
       }
       // The Library opens on Local; the Cloud tab is a lazy chunk.
-      await h.command('open-tab', { tab: 'library', waitFor: '[data-library-view="cloud"]' })
-      assert.ok(
-        await h.eval(
-          `const t = document.querySelector('[data-library-view="cloud"]'); if (!t) return false; t.click(); return true`
-        ),
-        'the Library has a Cloud tab'
-      )
-      await waitFor(
-        () => h.eval(`return document.querySelector(${JSON.stringify(section)}) !== null`),
-        'the Cloud tab shows the cloud recordings'
-      )
+      if (h.isGpui) {
+        await h.command('open-tab', { tab: 'library' })
+        await h.uiClick({ within: { id: 'library-tabs/tabs' }, role: 'tab', index: 1 })
+        await waitFor(
+          async () => Boolean(await h.uiFind({ id: 'cloud-refresh' }, { timeoutMs: 250 })),
+          'the Cloud tab shows the cloud recordings'
+        )
+      } else {
+        await h.command('open-tab', { tab: 'library', waitFor: '[data-library-view="cloud"]' })
+        assert.ok(
+          await h.eval(
+            `const t = document.querySelector('[data-library-view="cloud"]'); if (!t) return false; t.click(); return true`
+          ),
+          'the Library has a Cloud tab'
+        )
+        await waitFor(
+          () => h.eval(`return document.querySelector(${JSON.stringify(section)}) !== null`),
+          'the Cloud tab shows the cloud recordings'
+        )
+      }
 
       // The take's row: listed by the section's own poll after Stop, here 12 s
       // after Stop (the web still finishing the playlist), inside 2 minutes.
