@@ -527,6 +527,8 @@ impl Render for CloudResumeSlot {
                 body.child(
                     div()
                         .id("cloud-continue-pointer")
+                        .role(gpui::Role::Status)
+                        .aria_label(pointer)
                         .child(SelectableText::new("cloud-continue-pointer-text", pointer)),
                 )
             })
