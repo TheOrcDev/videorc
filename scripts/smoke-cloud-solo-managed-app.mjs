@@ -310,9 +310,7 @@ async function run(pass) {
     const continuationAt = Date.now()
     let continuedRecording
     const followsProfile = async () => {
-      const enabled = await h.eval(
-        'return window.__videorcSmokeScenePresets.streamingState().captureConfig.recordEnabled'
-      )
+      const enabled = await h.recordEnabled()
       const recording = await waitFor(
         async () => {
           const status = await h.rpc('recording.status')
@@ -394,12 +392,23 @@ async function run(pass) {
           90000
         )
         playable(h, saved.mp4Path)
-        assert.ok(
-          await h.eval(
-            `return Boolean(document.querySelector('[data-testid=cloud-continue-pointer]')?.textContent?.includes('videorc.com/live/continue'))`
-          ),
-          'phone pointer missing'
-        )
+        if (h.isGpui) {
+          const pointerText =
+            (await h.elementText({ id: 'cloud-continue-pointer-text' }, { timeoutMs: 2000 })) ??
+            (await h.elementText({ id: 'cloud-continue-pointer' }, { timeoutMs: 500 })) ??
+            (await h.elementText({ id: 'cloud-resume-notice' }, { timeoutMs: 500 }))
+          assert.ok(
+            Boolean(pointerText?.includes('videorc.com/live/continue')),
+            `phone pointer missing (saw ${JSON.stringify(pointerText)})`
+          )
+        } else {
+          assert.ok(
+            await h.eval(
+              `return Boolean(document.querySelector('[data-testid=cloud-continue-pointer]')?.textContent?.includes('videorc.com/live/continue'))`
+            ),
+            'phone pointer missing'
+          )
+        }
         await h.captureUi('waiting', '[data-testid=cloud-resume-notice]')
         h.scanLeaks()
       }
@@ -462,10 +471,16 @@ async function run(pass) {
           3000
         )
         await waitFor(
-          () =>
-            h.eval(
-              `return document.querySelector('[data-testid=cloud-resume-notice]')?.textContent.includes('Your show is live from Smoke phone.')`
-            ),
+          async () =>
+            h.isGpui
+              ? Boolean(
+                  (
+                    await h.elementText({ id: 'cloud-resume-notice' }, { timeoutMs: 500 })
+                  )?.includes('Your show is live from Smoke phone.')
+                )
+              : h.eval(
+                  `return document.querySelector('[data-testid=cloud-resume-notice]')?.textContent.includes('Your show is live from Smoke phone.')`
+                ),
           'notice names the phone'
         )
         await h.captureNotifications('taken-over')

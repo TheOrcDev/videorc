@@ -164,6 +164,8 @@ export async function startFakeCloudWebManaged({
     answers = new Map()
   const versionAllowed = (version) =>
     managedVersionAllowed(version) || (Boolean(buildVersion) && version === buildVersion)
+  const handoffAllowed = (version) =>
+    managedHandoffAllowed(version) || (Boolean(buildVersion) && version === buildVersion)
   let controlKind = wire.control.kinds[0],
     closed = false,
     httpsOrigin,
@@ -636,7 +638,7 @@ export async function startFakeCloudWebManaged({
         if (
           s.state.onAir?.deviceId &&
           agent.startsWith('Videorc-Desktop/') &&
-          !managedHandoffAllowed(agent.slice('Videorc-Desktop/'.length))
+          !handoffAllowed(agent.slice('Videorc-Desktop/'.length))
         )
           delete current.ingest
         return send(200, current)
