@@ -41,6 +41,8 @@ use videorc_app_core::{BackendEvent, StudioSnapshot};
 
 /// `agents.status`: the answer and the event (`useAgents`).
 const AGENTS_STATUS: &str = "agents.status";
+/// The backend events the session section reads, for the app's event filter.
+pub const EVENTS: [&str; 1] = [AGENTS_STATUS];
 /// The agents line's button and its name (`agents-session-row.tsx:50`,
 /// `STOP_AGENTS_COMMAND` in `lib/agents-view.ts:43`).
 const STOP_LABEL: &str = "Stop";

@@ -322,25 +322,7 @@ fn main() -> Result<()> {
     let (client, events) = BackendClient::start(
         supervisor.state(),
         ClientConfig {
-            filter: EventFilter::include(
-                STUDIO_EVENTS
-                    .into_iter()
-                    .chain([camera::VIRTUAL_CAMERA_CHANGED, app::exit::CLOUD_STATE])
-                    .chain(screens::settings::EVENTS)
-                    .chain(screens::captions::EVENTS)
-                    .chain(screens::avatar::EVENTS)
-                    .chain(screens::sidekick::EVENTS)
-                    .chain(screens::studio::chat::EVENTS)
-                    .chain(screens::studio::soundboard::EVENTS)
-                    .chain(videorc_app_core::library::LIBRARY_EVENTS)
-                    .chain([videorc_app_core::library::cloud_markers::CREATED_EVENT])
-                    .chain(["session.log"])
-                    // The hide state: Follow the app in front, and Studio's
-                    // Scenes section (Hide screen).
-                    .chain(["screen.privacy.changed"])
-                    // The Videorc account and its plan (S1.6f).
-                    .chain(videorc_app_core::accounts::EVENTS),
-            ),
+            filter: EventFilter::include(backend_events()),
             logger: logger.clone(),
             ..ClientConfig::default()
         },
@@ -1316,5 +1298,54 @@ fn stop_backend(supervisor: &Rc<RefCell<Option<Supervisor>>>, runtime: &tokio::r
             );
         }
         Err(_) => eprintln!("[videorc-app] the backend did not confirm its stop in time"),
+    }
+}
+
+/// Every backend event this app reads (the socket's include filter): an
+/// event missing here never arrives, so whatever waits on it stays blank.
+fn backend_events() -> Vec<&'static str> {
+    STUDIO_EVENTS
+        .into_iter()
+        .chain([camera::VIRTUAL_CAMERA_CHANGED, app::exit::CLOUD_STATE])
+        .chain(screens::settings::EVENTS)
+        .chain(screens::captions::EVENTS)
+        .chain(screens::avatar::EVENTS)
+        .chain(screens::sidekick::EVENTS)
+        .chain(screens::studio::chat::EVENTS)
+        .chain(screens::studio::soundboard::EVENTS)
+        // The talk show room's media for the Show stage, the guest tiles and
+        // the Program monitor, and the agents in the Studio's session.
+        .chain(screens::studio::talk_show_host::EVENTS)
+        .chain(screens::studio::session::EVENTS)
+        .chain(videorc_app_core::library::LIBRARY_EVENTS)
+        .chain([videorc_app_core::library::cloud_markers::CREATED_EVENT])
+        .chain(["session.log"])
+        // The hide state: Follow the app in front, and Studio's
+        // Scenes section (Hide screen).
+        .chain(["screen.privacy.changed"])
+        // The Videorc account and its plan (S1.6f).
+        .chain(videorc_app_core::accounts::EVENTS)
+        .collect()
+}
+
+#[cfg(test)]
+mod backend_event_filter_tests {
+    /// The talk show's Show stage stayed empty while the room was live: the
+    /// filter left `cloud.room.presentation` out, so the backend never sent
+    /// it to this app (2026-11-28). The same for `agents.status`.
+    #[test]
+    fn the_filter_takes_the_room_presentation_and_agents_status() {
+        let events = super::backend_events();
+        for wanted in [
+            "cloud.room.presentation",
+            "agents.status",
+            "cloud.state",
+            "session.log",
+        ] {
+            assert!(
+                events.contains(&wanted),
+                "{wanted} is not in the event filter"
+            );
+        }
     }
 }

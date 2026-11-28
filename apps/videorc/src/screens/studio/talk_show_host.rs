@@ -117,6 +117,11 @@ fn host_poll(poll: FramePoll) -> HostPoll {
     }
 }
 
+/// The backend events the room host reads; the app's event filter takes
+/// them (without `cloud.room.presentation` the Show stage, the guest tiles
+/// and the Program monitor never learn what the room publishes).
+pub const EVENTS: [&str; 1] = [PRESENTATION_EVENT];
+
 /// The monitor's key: the route ignores its identity.
 const MONITOR_KEY: &str = "monitor";
 
