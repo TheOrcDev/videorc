@@ -97,6 +97,7 @@ pub fn status_bar(
     screen_hidden: bool,
     screen_blocked: Option<String>,
     width: f32,
+    clip_available: bool,
     on_pin: impl Fn(bool, &ClickEvent, &mut Window, &mut App) + 'static,
     on_hide: impl Fn(bool, &ClickEvent, &mut Window, &mut App) + 'static,
     on_clear: impl Fn(&mut Window, &mut App) + 'static,
@@ -231,28 +232,34 @@ pub fn status_bar(
                             menu
                         }
                     }),
-            )
-            .child(
-                StatusBarAction::new("clip-30", "Save a 30-second clip")
-                    .when(labels, |action| {
-                        action.icon(action_icon(t, IconName::Scissors, false))
-                    })
-                    .text(clip_short)
-                    .hint("Save the last 30 seconds as a clip")
-                    .on_click({
-                        let clip = on_clip.clone();
-                        move |_, window, app| clip(30, window, app)
-                    }),
-            )
-            .child(
-                StatusBarAction::new("clip-60", "Save a 1-minute clip")
-                    .text(clip_long.clone())
-                    .hint("Save the last minute as a clip")
-                    .on_click({
-                        let clip = on_clip.clone();
-                        move |_, window, app| clip(60, window, app)
-                    }),
-            )
+            );
+        // Electron draws Clip only while a clip can be saved (`onMarkClip`
+        // is `clipAvailable`'s): on air, or the ring holds frames.
+        if clip_available {
+            bar = bar
+                .child(
+                    StatusBarAction::new("clip-30", "Save a 30-second clip")
+                        .when(labels, |action| {
+                            action.icon(action_icon(t, IconName::Scissors, false))
+                        })
+                        .text(clip_short)
+                        .hint("Save the last 30 seconds as a clip")
+                        .on_click({
+                            let clip = on_clip.clone();
+                            move |_, window, app| clip(30, window, app)
+                        }),
+                )
+                .child(
+                    StatusBarAction::new("clip-60", "Save a 1-minute clip")
+                        .text(clip_long.clone())
+                        .hint("Save the last minute as a clip")
+                        .on_click({
+                            let clip = on_clip.clone();
+                            move |_, window, app| clip(60, window, app)
+                        }),
+                );
+        }
+        bar = bar
             .child(
                 DropdownMenu::new("banners")
                     .trigger(
@@ -360,7 +367,7 @@ pub fn status_bar(
                             let clip30 = clip.clone();
                             let clip60 = clip.clone();
                             let screen = screen.clone();
-                            Menu::new()
+                            let mut menu = Menu::new()
                                 .item(
                                     MenuItem::new(screen_item.clone())
                                         .disabled(screen_off)
@@ -368,38 +375,33 @@ pub fn status_bar(
                                             screen(!screen_hidden, window, app)
                                         }),
                                 )
-                                .item(MenuItem::new(HIGHLIGHT_POSITION).on_select(|_, _| {}))
-                                .item(
-                                    MenuItem::new(clip_short_menu.clone())
-                                        .on_select(move |window, app| clip30(30, window, app)),
-                                )
-                                .item(
-                                    MenuItem::new(clip_long_menu.clone())
-                                        .on_select(move |window, app| clip60(60, window, app)),
-                                )
-                                .submenu(
-                                    BANNERS,
-                                    banners_menu(
-                                        banners.as_ref(),
-                                        on_banner.clone(),
-                                        hide_all.clone(),
-                                    ),
-                                )
-                                .submenu(
-                                    format!("{SOUNDS}…"),
-                                    sounds_menu(
-                                        sounds.as_ref(),
-                                        on_sound.clone(),
-                                        stop_all.clone(),
-                                    ),
-                                )
-                                .item(MenuItem::new("Chat commands…").on_select(|_, _| {}))
-                                .item(MenuItem::new(preview_menu.clone()).on_select(|_, _| {}))
-                                .separator()
-                                .item(
-                                    MenuItem::new(CLEAR_VIEW)
-                                        .on_select(move |window, app| clear(window, app)),
-                                )
+                                .item(MenuItem::new(HIGHLIGHT_POSITION).on_select(|_, _| {}));
+                            if clip_available {
+                                menu = menu
+                                    .item(
+                                        MenuItem::new(clip_short_menu.clone())
+                                            .on_select(move |window, app| clip30(30, window, app)),
+                                    )
+                                    .item(
+                                        MenuItem::new(clip_long_menu.clone())
+                                            .on_select(move |window, app| clip60(60, window, app)),
+                                    );
+                            }
+                            menu.submenu(
+                                BANNERS,
+                                banners_menu(banners.as_ref(), on_banner.clone(), hide_all.clone()),
+                            )
+                            .submenu(
+                                format!("{SOUNDS}…"),
+                                sounds_menu(sounds.as_ref(), on_sound.clone(), stop_all.clone()),
+                            )
+                            .item(MenuItem::new("Chat commands…").on_select(|_, _| {}))
+                            .item(MenuItem::new(preview_menu.clone()).on_select(|_, _| {}))
+                            .separator()
+                            .item(
+                                MenuItem::new(CLEAR_VIEW)
+                                    .on_select(move |window, app| clear(window, app)),
+                            )
                         }
                     }),
             );

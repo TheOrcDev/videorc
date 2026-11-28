@@ -1206,6 +1206,8 @@ impl Render for StreamManager {
                     screen_hidden,
                     screen_blocked,
                     width,
+                    // `clipAvailable` (`stream-manager.tsx`): never in history.
+                    !self.facts.in_history && self.studio.clip_available_now(),
                     move |next, _, window, app| {
                         let _ = pin.update(app, |this, cx| this.set_pinned(next, window, cx));
                     },
