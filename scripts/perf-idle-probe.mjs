@@ -195,6 +195,7 @@ let compositorStatusAfter = null
 let diagnosticStatusAfter = null
 let wireTap = null
 let measuredWireBytes = 0
+let measuredWireEventBytes = {}
 let budgetFailures = []
 let activeBudget = null
 let activeBudgetEvaluation = null
@@ -338,8 +339,10 @@ try {
   const measurementStartedAt = scheduledSamples.measurementStartedAtMs
   const measurementEndedAt = scheduledSamples.measurementEndedAtMs
   let detachedMeasurementWireBytes = null
+  let detachedMeasurementWireEventBytes = null
   if (previewMode === 'detached') {
     detachedMeasurementWireBytes = wireTap.bytes()
+    detachedMeasurementWireEventBytes = wireTap.eventBytes()
     const measurementEnd = await captureDetachedPreviewGeometryPhase(smoke, {
       phaseName: 'measurementEnd',
       requiredSamples: DETACHED_PREVIEW_CALIBRATION_PHASE_SAMPLE_COUNTS.measurementEnd,
@@ -367,6 +370,8 @@ try {
   }
   mainPumpDiagnostics = await smokeCommand(smoke, 'main-present-pump-diagnostics')
   measuredWireBytes = previewMode === 'detached' ? detachedMeasurementWireBytes : wireTap.bytes()
+  measuredWireEventBytes =
+    previewMode === 'detached' ? detachedMeasurementWireEventBytes : wireTap.eventBytes()
   diagnosticStatusAfter = await wireTap.request('diagnostics.stats')
   wireTap.close()
   const lastStableResourceCheckpoint = await collectStableProcessResourceCheckpoint({
@@ -410,6 +415,7 @@ try {
     statusHttpFetchesPerSecond: fetchDelta / measuredSeconds,
     wireKibPerSecond: measuredWireBytes / measuredSeconds / 1024,
     wireEventCounts: wireTap.eventCounts(),
+    wireEventBytes: measuredWireEventBytes,
     presentFps: statusAfter?.presentFps,
     intervalP95Ms: statusAfter?.intervalP95Ms,
     intervalP99Ms: statusAfter?.intervalP99Ms,
@@ -831,11 +837,15 @@ async function openBackendWireTap(backend) {
   )
   let byteCount = 0
   const counts = new Map()
+  // The bytes each event name put on the wire, so a wire-rate regression names
+  // the event that grew instead of only the total (counts alone cannot).
+  const bytesByEvent = new Map()
   const pending = new Map()
   let requestCounter = 0
   socket.addEventListener('message', (event) => {
     if (typeof event.data !== 'string') return
-    byteCount += Buffer.byteLength(event.data)
+    const messageBytes = Buffer.byteLength(event.data)
+    byteCount += messageBytes
     try {
       const parsed = JSON.parse(event.data)
       if (parsed.id && pending.has(parsed.id)) {
@@ -846,7 +856,10 @@ async function openBackendWireTap(backend) {
         else entry.reject(new Error(parsed.error?.message ?? 'wire tap request failed'))
         return
       }
-      if (parsed.event) counts.set(parsed.event, (counts.get(parsed.event) ?? 0) + 1)
+      if (parsed.event) {
+        counts.set(parsed.event, (counts.get(parsed.event) ?? 0) + 1)
+        bytesByEvent.set(parsed.event, (bytesByEvent.get(parsed.event) ?? 0) + messageBytes)
+      }
     } catch {
       // Command responses are not part of the event-rate summary.
     }
@@ -891,7 +904,9 @@ async function openBackendWireTap(backend) {
         socket.send(JSON.stringify({ id, method, params }))
       }),
     eventCounts: () =>
-      Object.fromEntries([...counts.entries()].sort(([a], [b]) => a.localeCompare(b)))
+      Object.fromEntries([...counts.entries()].sort(([a], [b]) => a.localeCompare(b))),
+    eventBytes: () =>
+      Object.fromEntries([...bytesByEvent.entries()].sort(([a], [b]) => a.localeCompare(b)))
   }
 }
 
