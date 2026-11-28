@@ -1,15 +1,21 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
+  COMPOSITOR_TIMING_FILENAME,
   audioEnergyTransitions,
   audioToneWindows,
   createRuntimeCaseCollector,
   combinedSourceMarkerFilter,
   evaluateAudioVideoEvents,
   evaluateAudioTail,
+  evaluateCompositorTiming,
   evaluateSourceEnvelope,
   evaluateEventAlignment,
   evaluateFrameMarkers,
+  readCompositorTiming,
   refinedToneTransitions,
   videoTransitionTimes
 } from './separate-source-runtime-gates.mjs'
@@ -514,4 +520,179 @@ test('runtime remains fail-fast by default and interruptions never collect', asy
     (error) => error === interrupted
   )
   assert.deepEqual(collector.failures, [])
+})
+
+function smoothCompositorTrace({
+  fps = 30,
+  frames = 90,
+  startMs = 100,
+  roles = [0, 3, 1, 2]
+} = {}) {
+  const intervalMs = 1000 / fps
+  const entries = []
+  for (let sequence = 1; sequence <= frames; sequence++) {
+    const baseMs = startMs + (sequence - 1) * intervalMs
+    for (const [roleOffset, role] of roles.entries()) {
+      entries.push({
+        role,
+        sequence,
+        beganMs: baseMs + roleOffset * 2,
+        completedMs: baseMs + roleOffset * 2 + 1.5,
+        outcome: 'native',
+        targetRefs: 4,
+        sourceTextureMs: 0.9,
+        commandWaitMs: 0.6
+      })
+    }
+  }
+  return entries
+}
+
+test('compositor stall fixture fails with compositor stalled message before A/V event comparison', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'videorc-compositor-stall-'))
+  try {
+    const trace = smoothCompositorTrace({ fps: 30, frames: 60, startMs: 100 })
+    // Inject a 434 ms compositor freeze before frame 50 (like the dual-stream run).
+    for (const entry of trace) {
+      if (entry.sequence >= 50) {
+        entry.beganMs += 400.6667
+        entry.completedMs += 400.6667
+      }
+    }
+    writeFileSync(join(dir, COMPOSITOR_TIMING_FILENAME), JSON.stringify(trace))
+    const exactAudio = [0.5, 1.0, 1.5, 2.0, 2.5]
+    // Video events after the freeze shifted late, which previously looked like an audio miss.
+    const stalledVideo = [0.5, 1.0, 1.5, 2.434, 2.5]
+    const verdict = evaluateAudioVideoEvents(stalledVideo, exactAudio, {
+      fps: 30,
+      endSeconds: 3,
+      evidenceDir: dir
+    })
+    assert.equal(verdict.pass, false)
+    assert.equal(verdict.failures.length, 1)
+    assert.match(verdict.failures[0], /^compositor stalled 434 ms at \d+\.\d{3}s \(frame 50\)$/)
+    assert.ok(verdict.failures.every((failure) => !failure.includes('audio misses')))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('exact audio with smooth compositor passes at 30 and 60fps, including sequence resets and auxiliary skips', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'videorc-compositor-smooth-'))
+  try {
+    for (const fps of [30, 60]) {
+      const cancelledTake = smoothCompositorTrace({ fps, frames: 5, startMs: 100 })
+      // Real cancel/precommit runs restart the compositor with sequence = 1 after a pause.
+      const realTake = smoothCompositorTrace({ fps, frames: 90, startMs: 500 }).filter(
+        // A single contended auxiliary role skip must not trigger a primary compositor stall.
+        (entry) => !(entry.role === 2 && entry.sequence === 40)
+      )
+      writeFileSync(
+        join(dir, COMPOSITOR_TIMING_FILENAME),
+        JSON.stringify([...cancelledTake, ...realTake])
+      )
+      const events = [0.5, 1.0, 1.5, 2.0, 2.5]
+      const verdict = evaluateAudioVideoEvents(events, events, {
+        fps,
+        endSeconds: 3,
+        evidenceDir: dir
+      })
+      assert.equal(verdict.pass, true, JSON.stringify(verdict))
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('real audio miss with smooth compositor keeps the existing audio misses video event message', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'videorc-compositor-audio-miss-'))
+  try {
+    writeFileSync(
+      join(dir, COMPOSITOR_TIMING_FILENAME),
+      JSON.stringify(smoothCompositorTrace({ fps: 30, frames: 90, startMs: 100 }))
+    )
+    const video = [0.5, 1.0, 1.5, 2.0, 2.5]
+    const delayedAudio = [0.5, 1.0, 1.62, 2.0, 2.5]
+    const verdict = evaluateAudioVideoEvents(video, delayedAudio, {
+      fps: 30,
+      endSeconds: 3,
+      evidenceDir: dir
+    })
+    assert.equal(verdict.pass, false)
+    assert.ok(
+      verdict.failures.some((failure) =>
+        failure.includes('audio misses ordered video event 2 at 1.500s')
+      )
+    )
+    assert.ok(verdict.failures.every((failure) => !failure.includes('compositor stalled')))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('missing compositor-timing.json logs one line and keeps existing A/V gate behaviour', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'videorc-compositor-missing-'))
+  try {
+    const video = [0.5, 1.0, 1.5, 2.0, 2.5]
+    const passLogs = []
+    const passVerdict = evaluateAudioVideoEvents(video, video, {
+      fps: 30,
+      endSeconds: 3,
+      evidenceDir: dir,
+      log: (line) => passLogs.push(line)
+    })
+    assert.equal(passVerdict.pass, true)
+    assert.equal(passLogs.length, 1)
+    assert.match(passLogs[0], /compositor-timing\.json.*missing/i)
+
+    const failLogs = []
+    const failVerdict = evaluateAudioVideoEvents(video, [0.5, 1.0, 1.62, 2.0, 2.5], {
+      fps: 30,
+      endSeconds: 3,
+      evidenceDir: dir,
+      log: (line) => failLogs.push(line)
+    })
+    assert.equal(failVerdict.pass, false)
+    assert.equal(failLogs.length, 1)
+    assert.match(failLogs[0], /compositor-timing\.json.*missing/i)
+    assert.ok(
+      failVerdict.failures.some((failure) => failure.includes('audio misses ordered video event 2'))
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('compositor timing gate enforces one frame interval plus 10ms boundary and validates input', () => {
+  for (const fps of [30, 60]) {
+    const budget = 1000 / fps + 10
+    const withinBudget = [
+      { sequence: 1, beganMs: 100 },
+      { sequence: 2, beganMs: 100 + budget - 0.5 }
+    ]
+    assert.equal(evaluateCompositorTiming(withinBudget, { fps }).pass, true)
+    const overBudget = [
+      { sequence: 1, beganMs: 100 },
+      { sequence: 2, beganMs: 100 + budget + 1 }
+    ]
+    const verdict = evaluateCompositorTiming(overBudget, { fps })
+    assert.equal(verdict.pass, false)
+    assert.match(
+      verdict.failures[0],
+      new RegExp(
+        `^compositor stalled ${Math.round(budget + 1)} ms at \\d+\\.\\d{3}s \\(frame 2\\)$`
+      )
+    )
+  }
+  assert.throws(
+    () => evaluateCompositorTiming([{ sequence: 1, beganMs: NaN }], { fps: 30 }),
+    /finite beganMs/
+  )
+  const badDir = mkdtempSync(join(tmpdir(), 'videorc-compositor-bad-'))
+  try {
+    writeFileSync(join(badDir, COMPOSITOR_TIMING_FILENAME), JSON.stringify({ not: 'an array' }))
+    assert.throws(() => readCompositorTiming(badDir), /JSON array/)
+  } finally {
+    rmSync(badDir, { recursive: true, force: true })
+  }
 })

@@ -20,10 +20,12 @@ import {
   maximumToneAmplitude,
   refinedToneTransitions,
   evaluateAudioTail,
+  evaluateCompositorTiming,
   evaluateSourceEnvelope,
   evaluateAudioVideoEvents,
   evaluateEventAlignment,
   evaluateFrameMarkers,
+  readCompositorTiming,
   videoTransitionTimes
 } from './lib/separate-source-runtime-gates.mjs'
 
@@ -270,6 +272,7 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of lifecycle
         console.log(
           `separate-source-runtime: ${[...shedRoles].join(', ')} shed at ${shedEndSeconds.toFixed(3)}s; judged on their own end`
         )
+      const compositorTiming = readCompositorTiming(evidence)
       for (const extension of ['mkv', 'mp4']) {
         const combined = manifest.combinedPath.replace(/\.mkv$/, `.${extension}`)
         await run(process.execPath, [
@@ -474,6 +477,11 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of lifecycle
             2
           )
         )
+        if (compositorTiming) {
+          const compositorVerdict = evaluateCompositorTiming(compositorTiming, { fps })
+          if (!compositorVerdict.pass)
+            throw new Error(`${extension}: ${compositorVerdict.failures.join('; ')}`)
+        }
         const beforeShed = (time) => time < shedEndSeconds - 1 / fps - 0.01
         const shedClip = (byRole, time) =>
           shedRoles.size
@@ -536,7 +544,8 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of lifecycle
             fps,
             offsetMs,
             endSeconds: roleEndSeconds + Math.min(0, offsetMs / 1000),
-            measurement: audioEdgeDiagnostics[role][source]
+            measurement: audioEdgeDiagnostics[role][source],
+            compositorTiming
           })
           if (!av.pass) throw new Error(`${extension} ${role}/${source}: ${av.failures.join('; ')}`)
           const envelope = evaluateSourceEnvelope(markers[role], tones[role][source], {

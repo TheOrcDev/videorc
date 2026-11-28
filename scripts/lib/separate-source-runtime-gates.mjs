@@ -1,4 +1,76 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { toneAmplitude } from './separate-source-take-gates.mjs'
+
+export const COMPOSITOR_TIMING_FILENAME = 'compositor-timing.json'
+
+export function readCompositorTiming(evidenceDir, { log = console.log } = {}) {
+  const timingPath = join(evidenceDir, COMPOSITOR_TIMING_FILENAME)
+  let raw
+  try {
+    raw = readFileSync(timingPath, 'utf8')
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      log(
+        `${COMPOSITOR_TIMING_FILENAME} missing in ${evidenceDir}; skipping compositor stall check`
+      )
+      return null
+    }
+    throw error
+  }
+  const parsed = JSON.parse(raw)
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Expected ${COMPOSITOR_TIMING_FILENAME} to contain a JSON array`)
+  }
+  return parsed
+}
+
+export function evaluateCompositorTiming(entries, { fps }) {
+  if (!Number.isFinite(fps) || fps <= 0) {
+    throw new Error('Compositor timing check requires a positive finite fps')
+  }
+  if (!Array.isArray(entries)) {
+    throw new Error('Compositor timing entries must be an array')
+  }
+  const maxGapMs = 1000 / fps + 10
+  // Backend traces record role 0 (primary/combined) plus auxiliary legs on each
+  // compositor tick. Track role 0 when present so intra-tick leg offsets and
+  // per-source contended skips do not masquerade as compositor freezes.
+  const hasPrimaryRole = entries.some((entry) => entry?.role === 0)
+  const frames = hasPrimaryRole ? entries.filter((entry) => entry?.role === 0) : entries
+  const failures = []
+  const stalls = []
+  let previous = null
+  for (const [index, entry] of frames.entries()) {
+    if (!Number.isFinite(entry?.beganMs)) {
+      throw new Error('Compositor timing entries require finite beganMs timestamps')
+    }
+    if (
+      previous !== null &&
+      Number.isFinite(entry.sequence) &&
+      Number.isFinite(previous.sequence) &&
+      entry.sequence <= previous.sequence
+    ) {
+      // A restarted compositor session (e.g. after precommit/writer cancel)
+      // resets sequence numbering; do not measure a gap across takes.
+      previous = entry
+      continue
+    }
+    if (previous !== null) {
+      const gapMs = entry.beganMs - previous.beganMs
+      if (gapMs > maxGapMs) {
+        const frame = Number.isFinite(entry.sequence) ? entry.sequence : index
+        const atSeconds = entry.beganMs / 1000
+        stalls.push({ gapMs, atSeconds, frame })
+        failures.push(
+          `compositor stalled ${Math.round(gapMs)} ms at ${atSeconds.toFixed(3)}s (frame ${frame})`
+        )
+      }
+    }
+    previous = entry
+  }
+  return { pass: failures.length === 0, failures, maxGapMs, stalls }
+}
 
 // The runtime fixture's screen fills the canvas and its camera sits at bottom
 // right. Circular markers must be sampled from one source, never averaged
@@ -64,8 +136,18 @@ export function audioEnergyTransitions(pcm, { sampleRate = 48000, startTime = 0 
 export function evaluateAudioVideoEvents(
   video,
   audio,
-  { fps, offsetMs = 0, endSeconds = Infinity, measurement }
+  { fps, offsetMs = 0, endSeconds = Infinity, measurement, compositorTiming, evidenceDir, log }
 ) {
+  const timing =
+    compositorTiming !== undefined
+      ? compositorTiming
+      : evidenceDir
+        ? readCompositorTiming(evidenceDir, { log })
+        : null
+  if (timing) {
+    const compositor = evaluateCompositorTiming(timing, { fps })
+    if (!compositor.pass) return { pass: false, failures: compositor.failures }
+  }
   const tolerance = 1 / fps + 0.01
   const checked = video
     .map((at) => at + offsetMs / 1000)
