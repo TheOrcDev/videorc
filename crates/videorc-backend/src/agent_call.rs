@@ -1486,6 +1486,7 @@ mod tests {
         let agent = AgentIdentity {
             id: "agent-1".to_string(),
             name: "Claude Code".to_string(),
+            buddy_origin: None,
         };
         let image = dir.join("Sponsor strip.png");
         image::RgbaImage::from_pixel(1200, 200, image::Rgba([240, 80, 40, 255]))

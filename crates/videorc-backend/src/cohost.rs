@@ -9505,7 +9505,13 @@ async fn banner_tool_outcome(
     args: serde_json::Value,
     done: String,
 ) -> (CohostCommandStatus, String) {
-    let outcome = crate::buddy_act::call(state, "set_banner", args).await;
+    let outcome = crate::buddy_act::call_for_origin(
+        state,
+        crate::buddy_act::BuddyTurnOrigin::VoiceOrder,
+        "set_banner",
+        args,
+    )
+    .await;
     if outcome.outcome == crate::storage::AgentActivityOutcome::Ok {
         (CohostCommandStatus::Done, done)
     } else {
