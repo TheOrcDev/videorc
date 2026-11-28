@@ -132,6 +132,8 @@ const livekitKeys = { apiKey: 'devkey', apiSecret: `smoke-${Math.random().toStri
 // A guest at 523 Hz read -19 to -27 dB in Solo (run 3, 2026-11-09) though the
 // runner never subscribes to a backstage guest (`room.rs` wanted_sources);
 // one at 659 Hz never rose above -43 dB.
+/** The fake microphone file's length, longer than any run (see the aevalsrc below). */
+const FAKE_MICROPHONE_SECONDS = 300
 const PEOPLE = {
   host: { name: 'Host', color: '40C0FF', tone: 440 },
   ada: { name: 'Ada', color: 'C02020', tone: 1100 },
@@ -299,7 +301,10 @@ try {
         '-f',
         'lavfi',
         '-i',
-        `aevalsrc=if(lt(mod(t\\,0.5)\\,0.25)\\,0.5*sin(2*PI*${person.tone}*t)\\,0):s=48000:d=4`,
+        // Long enough that Chrome's fake microphone never loops during a run:
+        // at each 4 s loop of a short file the guest's tone lost 3 to 13 dB for
+        // a 1.5 s tone window (seen on ogre), which the gate read as a mix fault.
+        `aevalsrc=if(lt(mod(t\\,0.5)\\,0.25)\\,0.5*sin(2*PI*${person.tone}*t)\\,0):s=48000:d=${FAKE_MICROPHONE_SECONDS}`,
         '-ac',
         '1',
         '-c:a',
