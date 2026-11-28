@@ -99,6 +99,39 @@ pub(crate) enum Host {
     Floating,
 }
 
+/// Where each host last laid the video out (the slot, its window's
+/// geometry). The layer moving into a host is placed where that host had
+/// it, never where the other host did: docked back from the Preview window,
+/// the layer kept the window's 960x540 in a 619x348 slot until the main
+/// window drew again (>2 s under VideoToolbox output, 2026-11-28).
+#[cfg(target_os = "macos")]
+#[derive(Debug, Default, Clone, Copy)]
+struct HostPlaces {
+    docked: Option<(LayerRect, WindowGeometry)>,
+    floating: Option<(LayerRect, WindowGeometry)>,
+}
+
+#[cfg(target_os = "macos")]
+impl HostPlaces {
+    fn note(&mut self, host: Host, rect: LayerRect, geometry: WindowGeometry) {
+        *self.slot(host) = Some((rect, geometry));
+    }
+
+    fn of(&self, host: Host) -> Option<(LayerRect, WindowGeometry)> {
+        match host {
+            Host::Docked => self.docked,
+            Host::Floating => self.floating,
+        }
+    }
+
+    fn slot(&mut self, host: Host) -> &mut Option<(LayerRect, WindowGeometry)> {
+        match host {
+            Host::Docked => &mut self.docked,
+            Host::Floating => &mut self.floating,
+        }
+    }
+}
+
 /// The macOS half: the element, the docked host and the floating window's.
 #[cfg(target_os = "macos")]
 struct Native {
@@ -106,6 +139,10 @@ struct Native {
     docked: macos::HostView,
     floating_view: Option<objc2::rc::Retained<objc2_app_kit::NSView>>,
     host: Host,
+    places: HostPlaces,
+    /// Docked back and not yet placed by the main window's own draw: when
+    /// it was, for the log line that says how long that draw took.
+    redocked_at: Option<std::time::Instant>,
 }
 
 pub struct Preview {
@@ -311,6 +348,8 @@ impl Preview {
                     docked,
                     floating_view: None,
                     host: Host::Docked,
+                    places: HostPlaces::default(),
+                    redocked_at: None,
                 }),
                 floating: None,
                 opening: false,
@@ -1057,18 +1096,30 @@ impl Preview {
         let Some(native) = self.native.as_mut() else {
             return;
         };
+        let rect = LayerRect {
+            x: 0.0,
+            y: 0.0,
+            width: f64::from(slot.size.width),
+            height: f64::from(slot.size.height),
+        };
+        native.places.note(host, rect, geometry);
         if native.host != host {
             return;
         }
-        native.element.place(
-            LayerRect {
-                x: 0.0,
-                y: 0.0,
-                width: f64::from(slot.size.width),
-                height: f64::from(slot.size.height),
-            },
-            geometry,
-        );
+        if host == Host::Docked
+            && let Some(at) = native.redocked_at.take()
+        {
+            self.logger.log(
+                Level::Info,
+                &format!(
+                    "[preview] the docked slot placed the layer {}x{} {} ms after docking",
+                    rect.width.round(),
+                    rect.height.round(),
+                    at.elapsed().as_millis()
+                ),
+            );
+        }
+        native.element.place(rect, geometry);
     }
 
     #[cfg(target_os = "macos")]
@@ -1111,6 +1162,12 @@ impl Preview {
         }
         macos::tune_video_layer(&view, radius);
         native.host = host;
+        // The layer (and the surface's bounds) keep the other host's rect
+        // until this host draws again: place it where this host last had
+        // it now, and let that draw correct it.
+        if let Some((rect, geometry)) = native.places.of(host) {
+            native.element.place(rect, geometry);
+        }
         true
     }
 
@@ -1362,6 +1419,7 @@ impl Preview {
         self.attach_to(Host::Docked);
         if let Some(native) = self.native.as_mut() {
             native.floating_view = None;
+            native.redocked_at = Some(std::time::Instant::now());
         }
         self.mode = WindowMode::Docked;
         self.apply_visibility();
@@ -1525,6 +1583,49 @@ fn rect_json(rect: videorc_preview::LayerRect) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Docked back from the Preview window, the layer goes where the
+    /// docked slot last was, never at the window's size.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_host_is_placed_where_it_last_laid_the_video_out() {
+        let geometry = |x: f64| WindowGeometry {
+            screen_x: x,
+            screen_y: 40.0,
+            content_width: 1650.0,
+            content_height: 962.0,
+            screen_height: 1117.0,
+            scale_factor: 2.0,
+        };
+        let rect = |width: f64, height: f64| LayerRect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+        };
+        let mut places = HostPlaces::default();
+        assert!(places.of(Host::Docked).is_none());
+        places.note(Host::Docked, rect(619.0, 348.0), geometry(0.0));
+        places.note(Host::Floating, rect(960.0, 540.0), geometry(900.0));
+        assert_eq!(
+            places.of(Host::Docked),
+            Some((rect(619.0, 348.0), geometry(0.0)))
+        );
+        assert_eq!(
+            places.of(Host::Floating),
+            Some((rect(960.0, 540.0), geometry(900.0)))
+        );
+        // A later docked draw replaces only the docked slot.
+        places.note(Host::Docked, rect(640.0, 360.0), geometry(0.0));
+        assert_eq!(
+            places.of(Host::Docked).map(|(r, _)| r),
+            Some(rect(640.0, 360.0))
+        );
+        assert_eq!(
+            places.of(Host::Floating).map(|(r, _)| r),
+            Some(rect(960.0, 540.0))
+        );
+    }
 
     #[test]
     fn windows_without_preview_yet_shows_placeholder_while_other_platforms_show_failed() {
