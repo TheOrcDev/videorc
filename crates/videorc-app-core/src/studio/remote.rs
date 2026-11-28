@@ -516,6 +516,7 @@ impl<B: StudioBackend> Studio<B> {
         if changed {
             let snapshot = self.snapshot();
             self.note_remote_surface(&snapshot);
+            self.note_agent_surface(&snapshot);
         }
     }
 

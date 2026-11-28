@@ -975,6 +975,9 @@ fn main() -> Result<()> {
         // Stream Deck and the phone's window keys, and what they see of the
         // app's windows (plan 260, L7).
         app::remote_keys::install(cx, studio.clone(), remote_preview.clone());
+        // Agent Library actions (`delete_recording`, `export_recording`, and
+        // `rename_recording` refresh; plan 209 S15).
+        app::agent_library::install(&core_handle, studio.clone(), library.clone());
 
         // Follow the app in front and the password-manager hide (plan 210
         // D10/D11): the core's follower, fed by the platform's front-app

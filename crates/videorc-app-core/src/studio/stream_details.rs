@@ -34,10 +34,27 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     fn edit_details(&self, edit: impl FnOnce(&mut DetailsState)) {
-        self.details_tx.send_if_modified(|state| {
+        let changed = self.details_tx.send_if_modified(|state| {
             let before = state.clone();
             edit(state);
             *state != before
+        });
+        if changed {
+            let snapshot = self.snapshot();
+            self.note_agent_surface(&snapshot);
+        }
+    }
+
+    /// Updates the Studio's cached metadata draft and validation after an
+    /// external save (`update_stream_info`).
+    pub(super) fn apply_saved_metadata_draft(
+        &self,
+        saved: MetadataDraft,
+        validation: Option<Validation>,
+    ) {
+        self.edit_details(|state| {
+            state.draft = Some(saved);
+            state.validation = validation;
         });
     }
 

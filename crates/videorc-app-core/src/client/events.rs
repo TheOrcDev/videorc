@@ -41,6 +41,13 @@ pub mod names {
     /// A Stream Deck or phone intent the backend admitted and relays to the
     /// UI process to run (plan 220 S2.4c, D5): `{intentId, intent: {kind, …}}`.
     pub const REMOTE_INTENT: &str = "remote.intent";
+    /// Plan 209 S6: an agent tool call relayed to the Studio socket that
+    /// called `agent.intent.listen`, and its cancel signal.
+    pub const AGENT_INTENT: &str = "agent.intent";
+    pub const AGENT_INTENT_CANCEL: &str = "agent.intent.cancel";
+    /// Plan 209: agents enabled/connected state and activity stream.
+    pub const AGENTS_STATUS: &str = "agents.status";
+    pub const AGENTS_ACTIVITY: &str = "agents.activity";
     /// Plan 220 S3.0f: the events the Studio's toasts read, passed on as
     /// JSON (`crate::notices` reads their payloads): each destination's
     /// runtime state, the clip ring's state and saves, and a clip mark.

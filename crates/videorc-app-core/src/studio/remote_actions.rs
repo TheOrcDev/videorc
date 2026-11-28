@@ -190,7 +190,10 @@ impl<B: StudioBackend> Studio<B> {
             return refused(copy::TAKEOVER_MISSING);
         }
         match self.backend.screens_activate(asset_id).await {
-            Ok(_) => accepted(),
+            Ok(_) => {
+                self.commit_takeover_from_action(true).await;
+                accepted()
+            }
             Err(error) => {
                 self.config.logger.warn(format!(
                     "[remote-control] the takeover did not show: {} ({})",
@@ -204,7 +207,10 @@ impl<B: StudioBackend> Studio<B> {
     /// `takeoverHide`: back to the scene (`screens.clear`).
     pub(super) async fn remote_takeover_hide(&self) -> IntentOutcome {
         match self.backend.screens_clear().await {
-            Ok(()) => accepted(),
+            Ok(()) => {
+                self.commit_takeover_from_action(false).await;
+                accepted()
+            }
             Err(error) => {
                 self.config.logger.warn(format!(
                     "[remote-control] the takeover did not hide: {} ({})",

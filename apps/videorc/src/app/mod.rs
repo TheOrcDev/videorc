@@ -9,6 +9,7 @@
 
 pub mod account_menu;
 pub mod accounts;
+pub mod agent_library;
 pub mod args;
 pub mod bridge;
 pub mod bundled_backgrounds;

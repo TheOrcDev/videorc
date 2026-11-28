@@ -157,6 +157,29 @@ impl<B: StudioBackend> Studio<B> {
     /// `commitActiveScreen`: the mute a takeover on air takes, or gives back.
     #[doc(hidden)]
     pub async fn commit_takeover(&self, on_air: bool) {
+        let _guard = self.takeover_commit.lock().await;
+        self.commit_takeover_locked(on_air).await;
+    }
+
+    /// Commits a takeover state transition immediately after a direct
+    /// `screens.activate` / `screens.clear` action, matching Electron's
+    /// synchronous `commitActiveScreen` inside `activateScreen` /
+    /// `clearActiveScreen`. Serialized with [`Self::commit_takeover`] so a
+    /// delayed `screens.active.changed` event never overwrites a subsequent
+    /// manual mute.
+    pub(super) async fn commit_takeover_from_action(&self, on_air: bool) {
+        let _guard = self.takeover_commit.lock().await;
+        {
+            let mut pending = self.takeover_pending_lock();
+            if pending.active == Some(on_air) {
+                pending.active = None;
+            }
+            pending.read = false;
+        }
+        self.commit_takeover_locked(on_air).await;
+    }
+
+    async fn commit_takeover_locked(&self, on_air: bool) {
         let snapshot = self.snapshot();
         let ownership = stored_mute_ownership(&self.lock().settings);
         let room_open = self

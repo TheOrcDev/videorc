@@ -15,6 +15,7 @@ use videorc_protocol::{
 
 use crate::client::methods::Method;
 use crate::client::methods::{
+    AgentIntentAck, AgentIntentAckParams, AgentIntentListen, AgentSurfacePublish, AgentsStatusGet,
     AudioProcessingUpdate, CloudShowResume, DevicesList, HealthPing, PreviewScreenStart,
     RecordingStatusGet, RemoteIntentAck, RemoteIntentAckParams, RemoteSurfacePublish, SceneGet,
     SessionHealthEventsList, SessionLogsList, SessionStart, SessionStop, SessionsList,
@@ -88,6 +89,44 @@ pub trait StudioBackend: Send + Sync + 'static {
         &self,
         snapshot: Value,
     ) -> impl Future<Output = Result<(), RpcError>> + Send;
+    /// Plan 209 S6: marks this socket as the Studio's agent-intent listener
+    /// (`agent.intent.listen`). Connection-scoped.
+    fn agent_intent_listen(&self) -> impl Future<Output = Result<(), RpcError>> + Send {
+        async { Err(RpcError::not_connected(AgentIntentListen::NAME)) }
+    }
+    /// Plan 209 S6: the ack of a relayed `agent.intent` (`agent.intent.ack`).
+    fn agent_intent_ack(
+        &self,
+        params: AgentIntentAckParams,
+    ) -> impl Future<Output = Result<(), RpcError>> + Send {
+        let _ = params;
+        async { Err(RpcError::not_connected(AgentIntentAck::NAME)) }
+    }
+    /// Plan 209 S6: publishes the allowlisted Studio surface for agents
+    /// (`agent.surface.publish`).
+    fn agent_surface_publish(
+        &self,
+        payload: Value,
+    ) -> impl Future<Output = Result<(), RpcError>> + Send {
+        let _ = payload;
+        async { Err(RpcError::not_connected(AgentSurfacePublish::NAME)) }
+    }
+    /// Plan 209: reads `agents.status` so the surface publisher knows whether
+    /// Agents is enabled on this connection.
+    fn agents_status(&self) -> impl Future<Output = Result<Value, RpcError>> + Send {
+        async { Err(RpcError::not_connected(AgentsStatusGet::NAME)) }
+    }
+    /// Plan 214 E2: Videorc Camera requests (`virtualCamera.status`,
+    /// `virtualCamera.enable`, `virtualCamera.disable`) for `get_settings` /
+    /// `update_settings`.
+    fn virtual_camera_request(
+        &self,
+        method: &'static str,
+        params: Value,
+    ) -> impl Future<Output = Result<Value, RpcError>> + Send {
+        let _ = params;
+        async move { Err(RpcError::not_connected(method)) }
+    }
     /// Plan 220 S2.6c: the screen capture's start with the exclusion list,
     /// applied in place to a running capture (`preview.screen.start`).
     fn preview_screen_start(
@@ -479,6 +518,30 @@ impl StudioBackend for BackendClient {
     }
 
     async fn buddy_request(&self, method: &'static str, params: Value) -> Result<Value, RpcError> {
+        self.request(method, params).await
+    }
+
+    async fn agent_intent_listen(&self) -> Result<(), RpcError> {
+        self.call::<AgentIntentListen>(&()).await.map(|_| ())
+    }
+
+    async fn agent_intent_ack(&self, params: AgentIntentAckParams) -> Result<(), RpcError> {
+        self.call::<AgentIntentAck>(&params).await.map(|_| ())
+    }
+
+    async fn agent_surface_publish(&self, payload: Value) -> Result<(), RpcError> {
+        self.call::<AgentSurfacePublish>(&payload).await.map(|_| ())
+    }
+
+    async fn agents_status(&self) -> Result<Value, RpcError> {
+        self.call::<AgentsStatusGet>(&()).await
+    }
+
+    async fn virtual_camera_request(
+        &self,
+        method: &'static str,
+        params: Value,
+    ) -> Result<Value, RpcError> {
         self.request(method, params).await
     }
 }
