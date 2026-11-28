@@ -231,6 +231,16 @@ export function buildRecordingStudioGateSteps({
         args: ['smoke:live-layout-switch-recording']
       },
       {
+        // #2577: while recording, a switch back to a window scene never
+        // completed (the scene going on had been saved with the old
+        // window). Every switch between two fixture-window scenes must
+        // complete, the take started the app's way (the Studio's Record on
+        // GPUI). No latency budget: only switches that never land fail.
+        label: 'scene switch back to a window scene while recording probe',
+        command: 'pnpm',
+        args: ['probe:scene-window-switch:switch-back']
+      },
+      {
         label: 'comment highlight stream artifact smoke',
         command: 'pnpm',
         args: ['smoke:comment-highlight-stream']

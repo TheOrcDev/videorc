@@ -51,7 +51,14 @@
 //
 // Usage: pnpm probe:scene-window-switch [-- --switches 20 --budget-ms 150
 //   --variants idle,recording,layout --mode scenes|direct --canvas 1920x1080
-//   --fps 30 --settle-ms 1200 --out <dir> --start backend|studio]
+//   --fps 30 --settle-ms 1200 --out <dir> --start backend|studio|auto
+//   --require-switches]
+//
+// `--start studio` (GPUI) starts the recording variants' take with the
+// Studio's Record; `auto` does that on GPUI and session.start on Electron.
+// `--require-switches` exits 1 when any switch never completes, with no
+// latency budget (the recording-studio gate's switch-back check: a switch
+// back to a window scene once never completed while recording, #2577).
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
@@ -314,6 +321,8 @@ try {
   summary.split = overallSplit(summary.variants)
   summary.budget = evaluateBudget(summary, options.budgetMs)
   if (summary.budget && !summary.budget.pass) exitCode = 1
+  summary.requiredSwitches = evaluateRequiredSwitches(summary, options.requireSwitches)
+  if (summary.requiredSwitches && !summary.requiredSwitches.pass) exitCode = 1
 } catch (error) {
   if (error instanceof ProbeExit) {
     exitCode = error.code
@@ -345,8 +354,12 @@ process.exit(exitCode)
 
 // ---------------------------------------------------------------------------
 
+function startsFromStudio() {
+  return options.start === 'studio' || (options.start === 'auto' && smokeAppIsGpui())
+}
+
 function startedBy() {
-  return options.start === 'studio' ? 'the Studio\'s Record (studio-record)' : 'session.start'
+  return startsFromStudio() ? 'the Studio\'s Record (studio-record)' : 'session.start'
 }
 
 // `--start studio` (GPUI): the take starts and stops the way Record and Stop
@@ -385,7 +398,7 @@ async function runVariant(name, { renderer, targets, record, smoke, layoutMark =
       { timeoutMs }
     )
     const visual = (await renderer.state()).visual
-    started = options.start === 'studio'
+    started = startsFromStudio()
       ? await startFromStudio(smoke)
       : await request(ws, timeoutMs, 'session.start', {
       sources: visual.sources,
@@ -431,7 +444,7 @@ async function runVariant(name, { renderer, targets, record, smoke, layoutMark =
       variant.flashes.push(await flashFixture(targets.alpha.fixture, 'end'))
     }
     await sleep(900)
-    const stopped = options.start === 'studio'
+    const stopped = startsFromStudio()
       ? await stopFromStudio(smoke)
       : await request(ws, timeoutMs, 'session.stop')
     await renderer.waitFor((state) => state.recording === 'idle', `${name}: session stopped`)
@@ -646,6 +659,15 @@ function overallSplit(variants) {
   return largestShare(splits)
 }
 
+/** `--require-switches`: every switch completed, in every variant. */
+function evaluateRequiredSwitches(summaryValue, required) {
+  if (!required) return null
+  const failures = Object.values(summaryValue.variants)
+    .filter((variant) => (variant.stats?.failed ?? 0) > 0)
+    .map((variant) => `${variant.name}: ${variant.stats.failed}/${variant.stats.switches} switch(es) never completed`)
+  return { pass: failures.length === 0, failures }
+}
+
 function evaluateBudget(summaryValue, budgetMs) {
   if (budgetMs == null) return null
   const failures = []
@@ -697,6 +719,13 @@ function printHuman(summaryValue) {
       summaryValue.budget.pass
         ? `probe:scene-window-switch budget ${summaryValue.budget.budgetMs} ms: PASS`
         : `probe:scene-window-switch budget ${summaryValue.budget.budgetMs} ms: FAIL ${summaryValue.budget.failures.join('; ')}`
+    )
+  }
+  if (summaryValue.requiredSwitches) {
+    console.log(
+      summaryValue.requiredSwitches.pass
+        ? 'probe:scene-window-switch every switch completed: PASS'
+        : `probe:scene-window-switch every switch completed: FAIL ${summaryValue.requiredSwitches.failures.join('; ')}`
     )
   }
   if (summaryValue.error)
@@ -1241,7 +1270,8 @@ function parseArgs(argv) {
     out: null,
     summaryOut: null,
     fixtureDir: null,
-    start: 'backend'
+    start: 'backend',
+    requireSwitches: false
   }
   const take = (index) => {
     if (index + 1 >= argv.length) throw new Error(`${argv[index]} needs a value`)
@@ -1292,8 +1322,13 @@ function parseArgs(argv) {
       case '--fixture-dir':
         parsed.fixtureDir = value()
         break
-      case '--start':
-        parsed.start = value() === 'studio' ? 'studio' : 'backend'
+      case '--start': {
+        const start = value()
+        parsed.start = ['studio', 'auto'].includes(start) ? start : 'backend'
+        break
+      }
+      case '--require-switches':
+        parsed.requireSwitches = true
         break
       default:
         throw new Error(`Unknown argument ${argument}`)
