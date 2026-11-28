@@ -86,25 +86,51 @@ export class MainResourceCapabilityRegistry {
   }
 }
 
+const MAX_STANDARD_WINDOWS_PATH_LEN = 260
+
+/**
+ * Strip Windows' verbatim prefix (`\\?\`) only when what follows is a plain
+ * drive path (`X:\...`) within `MAX_PATH` whose segments will not change
+ * meaning under Win32 normalization (matches Rust `strip_verbatim_drive_prefix`).
+ */
+export function stripVerbatimDrivePrefix(rawPath: string): string {
+  if (!rawPath.startsWith('\\\\?\\')) return rawPath
+  const rest = rawPath.slice(4)
+  if (!/^[a-zA-Z]:\\/.test(rest)) return rawPath
+  if (rest.length > MAX_STANDARD_WINDOWS_PATH_LEN || rest.includes('/')) return rawPath
+  const segments = rest.slice(3).split('\\')
+  if (
+    segments.some(
+      (segment) =>
+        segment === '.' || segment === '..' || segment.endsWith('.') || segment.endsWith(' ')
+    )
+  ) {
+    return rawPath
+  }
+  return rest
+}
+
 function canonicalResourcePath(rawPath: string, kind: ResourceCapabilityKind): string {
   if (typeof rawPath !== 'string' || rawPath.length === 0 || rawPath.trim() !== rawPath) {
     throw new Error('Resource path is invalid.')
   }
-  const windows = rawPath.replaceAll('/', '\\').toLowerCase()
+  const effective = process.platform === 'win32' ? stripVerbatimDrivePrefix(rawPath) : rawPath
+  const windows = effective.replaceAll('/', '\\').toLowerCase()
   if (
     windows.startsWith('\\\\?\\') ||
     windows.startsWith('\\\\.\\') ||
     windows.startsWith('\\??\\') ||
     windows.startsWith('\\device\\') ||
     windows.startsWith('\\\\') ||
-    /^[a-z]:[^\\/]/i.test(rawPath)
+    /^[a-z]:(?:$|[^\\/])/i.test(effective)
   ) {
     throw new Error('Windows device, UNC, and drive-relative paths are not supported.')
   }
-  if (!isAbsolute(rawPath) || rawPath.split(/[\\/]/).includes('..')) {
+  if (!isAbsolute(effective) || effective.split(/[\\/]/).includes('..')) {
     throw new Error('Resource path must be absolute and traversal-free.')
   }
-  const canonical = realpathSync(rawPath)
+  const resolved = realpathSync(effective)
+  const canonical = process.platform === 'win32' ? stripVerbatimDrivePrefix(resolved) : resolved
   const stats = statSync(canonical)
   if ((kind === 'input-file' || kind === 'background-asset') && !stats.isFile()) {
     throw new Error('Resource must be a regular file.')
