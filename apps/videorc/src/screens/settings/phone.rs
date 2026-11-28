@@ -343,7 +343,7 @@ impl SettingsScreen {
                     } else {
                         "Copy link instead"
                     })
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .on_click({
                         let entity = entity.clone();
                         let url = url.clone();
