@@ -165,7 +165,7 @@ impl DestinationsPanel {
                         body = body.child(
                             Button::new(format!("category-clear-{platform}"))
                                 .label(page_copy::CLEAR_CATEGORY)
-                                .variant(ButtonVariant::Ghost)
+                                .variant(ButtonVariant::Outline)
                                 .on_click(move |_, _, cx| {
                                     entity.update(cx, |this, cx| {
                                         this.clear_category(platform.clone());
