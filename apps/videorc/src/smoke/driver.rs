@@ -582,6 +582,13 @@ fn pointer_click(
         }),
         cx,
     );
+    // A real click's release arrives after the press can paint. The Scene
+    // stage installs its captured move/up handlers in that paint: a release
+    // in the press's own frame never reached it and left its gesture held
+    // ("dragging") until the next command (as `pointer_drag`'s press).
+    // Build the frame in-process without activating or presenting a window.
+    window.refresh();
+    window.draw(cx).clear(cx);
     window.dispatch_event(
         PlatformInput::MouseUp(MouseUpEvent {
             button: MouseButton::Left,
