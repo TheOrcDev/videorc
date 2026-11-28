@@ -70,8 +70,7 @@ uuid = { version = "1.19", features = ["v4"] }
 webpki-root-certs = "1"
 
 # Plan 260 S1.8 (D9): the talk show's room from the backend, on the platforms
-# `build.rs` gives `backend_room` (keep the two lists the same). Windows is
-# owed: its native webrtc-sys build has not passed yet (S0.8).
+# `build.rs` gives `backend_room` (keep the two lists the same).
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 livekit = { version = "=0.12.0", default-features = false, features = ["tokio", "rustls-tls-native-roots"] }
 
@@ -124,6 +123,13 @@ glow = "0.16"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62.2", features = ["Foundation", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11", "Wdk_System_SystemServices", "Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_DirectComposition", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_MediaFoundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Performance", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Variant", "Win32_System_WinRT", "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
 windows-core = "0.62.2"
+# The talk show's room on Windows, behind the `windows-room` feature (off by
+# default, so the shipped Windows backend does not change). libwebrtc's MSVC
+# build is /MT, so a build with the feature must use the static CRT for the
+# whole binary: `RUSTFLAGS="-C target-feature=+crt-static"` (S0.8, issue
+# #2464). Without it the link stops with LNK2038 (`MT_StaticRelease` vs
+# `MD_DynamicRelease`).
+livekit = { version = "=0.12.0", default-features = false, features = ["tokio", "rustls-tls-native-roots"], optional = true }
 # Registered at startup so WER dumps crashes the in-process filter never sees.
 videorc-wer-helper = { path = "../videorc-wer-helper" }
 
@@ -136,6 +142,9 @@ buddy-pack-example = []
 # Plan 190: type-check the Linux GLES live background renderer on any OS
 # (`cargo check --features live-background-gl-check`). Linux always builds it.
 live-background-gl-check = ["dep:khronos-egl", "dep:glow"]
+# The talk show's room from the Windows backend (plan 260 S1.8, D9). Needs
+# `-C target-feature=+crt-static` (see the livekit dependency above).
+windows-room = ["dep:livekit"]
 
 # Plan 209 S4: the stdio bridge agent apps run. Named with a hyphen so the
 # shipped file is `videorc-mcp` (`videorc-mcp.exe` on Windows); the source

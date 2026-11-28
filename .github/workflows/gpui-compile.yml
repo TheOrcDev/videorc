@@ -131,6 +131,15 @@ jobs:
       - name: Compile GPUI and test targets without running tests
         run: cargo check --locked -p videorc-app-core -p videorc-kit -p videorc-protocol -p videorc-app --all-targets
 
+      - name: Link the backend with its room host (LiveKit / libwebrtc)
+        # `cargo check` never links. libwebrtc's static CRT only shows up at
+        # the link (LNK2038), so build the backend binary itself with the
+        # `windows-room` feature (issue #2464). The static CRT is this step's
+        # own setting: the feature is off in every shipped build.
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --locked -p videorc-backend --bin videorc-backend --features windows-room
+
       - name: Plan 260 crates (clippy + test)
         # Plan 260 S1.0: every crate plan 260 adds (the workspace minus the
         # backend, the addon and the WER helper, which have their own steps).

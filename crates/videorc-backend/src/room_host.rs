@@ -17,9 +17,9 @@
 //! the `cloud.room.overlay` hand-off), S1.8c the host's media, S1.8d the subscriptions (the plan's S1.8
 //! cut).
 //!
-//! On the platforms `build.rs` marks `backend_room` (macOS and Linux; the
-//! SDK is a dependency of the same list). Windows is owed: its native
-//! webrtc-sys build has not passed yet (S0.8). Off macOS the room's media
+//! On the platforms `build.rs` marks `backend_room`: macOS, Linux, and Windows
+//! builds with the `windows-room` feature (the SDK is a dependency of the same
+//! list; Windows compiles and links, runtime proof is owed, issue #2464). Off macOS the room's media
 //! comes from the paths the backend already has: the compositor's camera role
 //! and the preview's screen frames (CPU bytes), the room microphone tap, and
 //! `sound_monitor::DeviceOutput` for the guests (PipeWire on Linux). Two
