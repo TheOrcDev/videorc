@@ -10215,7 +10215,7 @@ fn gpu_compositor_frame(
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", backend_room))]
 // Placement is a flat description of one draw: geometry in, shader vec4s out.
 // Bundling the eight scalars into structs would add indirection at ~10 call
 // sites for no reuse.
@@ -14629,7 +14629,7 @@ fn source_pixel_len(source: &RgbaSource<'_>) -> usize {
 /// camera, with its decoded pixels from the compositor's own image cache
 /// (`true` when they are BGRA). `None` without a background, or before the
 /// picture is decoded.
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 pub(crate) struct RoomBackground {
     pub(crate) background: EffectiveSceneBackground,
     pub(crate) pixels: Arc<Vec<u8>>,
@@ -14637,7 +14637,7 @@ pub(crate) struct RoomBackground {
     pub(crate) bgra: bool,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 impl CompositorRuntime {
     pub(crate) fn room_background(&self) -> Option<RoomBackground> {
         let background = self.scene.as_ref()?.scene.as_ref()?.background.as_ref()?;
@@ -14665,7 +14665,7 @@ impl CompositorRuntime {
 /// `gpu_source_placement`), on `ground` where a fitted picture leaves bars.
 /// The program draws no blur, dim, saturation or vignette on this path, so
 /// neither does this.
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 pub(crate) fn room_background_rgba(
     room: &RoomBackground,
     out_width: u32,

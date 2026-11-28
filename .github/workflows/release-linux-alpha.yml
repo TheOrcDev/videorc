@@ -100,7 +100,8 @@ jobs:
             pkg-config \
             clang \
             libpipewire-0.3-dev \
-            libspa-0.2-dev
+            libspa-0.2-dev \
+            libglib2.0-dev
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
