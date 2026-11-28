@@ -57,7 +57,7 @@ import {
 import type { SessionStartFailure } from '@/lib/session-start-failure'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import { shortcutAccelerator } from '@/lib/shortcuts'
-import { connectionBlockedReason, START_BLOCKED_COPY } from '@/lib/state-labels'
+import { connectionBlockedReason } from '@/lib/state-labels'
 import { classifyStreamHealthAttribution } from '@/lib/stream-health-attribution'
 import {
   cameraCaptureNotice,
@@ -228,22 +228,17 @@ export type BlockedJump = {
   settingsTab?: SettingsTabId
 }
 
-/** The reasons whose fix is one step away, so the row is that step (see below). */
-const JUMP_IS_THE_ROW: ReadonlySet<string> = new Set([
-  START_BLOCKED_COPY.noDestination,
-  START_BLOCKED_COPY.destinationSetup
-])
-
 /**
  * Why a start cannot run right now, as one quiet line under the transport
  * (plan 174 S3.2, B-9; never the yellow top banner of post-0.9.4 F8), with
  * the jump to the page that owns the fix. Without the shell's navigation
  * (a bare transport under test) the line stands alone.
  *
- * With no destination on, or one still to finish, the fix is one step away,
- * so the row is the step itself (owner calls, 2026-11-27 and 2026-11-28): one
- * "Open Destinations" button across the row, with the reason on its hover and
- * focus. Buttons, not links.
+ * A reason with a jump is one step from its fix, so the row is the step itself
+ * (owner calls, 2026-11-27 and 2026-11-28): one kit button across the row
+ * ("Open Destinations", "Open Health"), with the reason on its hover and focus
+ * and as its description. Buttons, not links. A reason with no jump stays a
+ * quiet line.
  */
 function BlockedReasonLine({
   reason,
@@ -258,7 +253,7 @@ function BlockedReasonLine({
       ? (): void =>
           jump.to === 'settings' ? nav.openSettings(jump.settingsTab) : nav.setActive(jump.to)
       : null
-  if (jump && openJump && JUMP_IS_THE_ROW.has(reason)) {
+  if (jump && openJump) {
     return <BlockedJumpButton label={jump.label} reason={reason} onOpen={openJump} />
   }
   return (
@@ -268,15 +263,6 @@ function BlockedReasonLine({
     >
       <InfoIcon className="size-3.5 shrink-0" />
       <span className="min-w-0">{reason}</span>
-      {jump && openJump ? (
-        <button
-          className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
-          type="button"
-          onClick={openJump}
-        >
-          {jump.label}
-        </button>
-      ) : null}
     </div>
   )
 }
