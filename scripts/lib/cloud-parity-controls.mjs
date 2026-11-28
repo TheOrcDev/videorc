@@ -26,7 +26,8 @@ import {
 /** The fake Chromium devices have labels unlike the native fixture catalog:
  * see `roomFixtureDevicesSource`. */
 export async function prepareParityRoom(h, controls) {
-  return h.eval(roomFixtureDevicesSource(controls))
+  // Through the seams (`h.studio`, set by `runBaseline`) on either app.
+  return h.studio ? h.studio.fixtureDevices(controls) : h.eval(roomFixtureDevicesSource(controls))
 }
 
 export async function assertInitialRoomControls(h, cameraId) {
