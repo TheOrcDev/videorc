@@ -242,7 +242,7 @@ export function AssetsTab(): ReactElement {
                 onStyle={(_id, patch) => applyWorkingBackgroundStyle(patch)}
               />
             )}
-            <Button variant="ghost" onClick={() => applyBackgroundSlot(null)}>
+            <Button variant="outline" onClick={() => applyBackgroundSlot(null)}>
               Use no background
             </Button>
           </div>
@@ -439,10 +439,10 @@ function PresetTile({
 
       {!asset ? (
         <div className="absolute top-1 right-1 z-10 flex gap-1">
-          <Button variant="ghost" onClick={onReplace}>
+          <Button variant="outline" onClick={onReplace}>
             Add image…
           </Button>
-          <Button variant="ghost" onClick={onRestore}>
+          <Button variant="outline" onClick={onRestore}>
             Restore default
           </Button>
         </div>

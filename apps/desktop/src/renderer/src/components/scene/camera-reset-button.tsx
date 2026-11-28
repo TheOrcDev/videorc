@@ -39,7 +39,12 @@ export function CameraResetButton({
   const [confirming, setConfirming] = useState(false)
   return (
     <>
-      <Button className="mt-2 w-fit" size="xs" variant="ghost" onClick={() => setConfirming(true)}>
+      <Button
+        className="mt-2 w-fit"
+        size="xs"
+        variant="outline"
+        onClick={() => setConfirming(true)}
+      >
         <ResetIcon data-icon="inline-start" />
         Reset camera settings
       </Button>

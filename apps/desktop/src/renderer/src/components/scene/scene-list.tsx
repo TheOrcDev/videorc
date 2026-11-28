@@ -67,7 +67,7 @@ export function SceneList({
             className={cn(sceneEditMode && 'invisible')}
             data-testid="scene-edit"
             disabled={sceneEditMode}
-            variant="ghost"
+            variant="outline"
             onClick={onEditScene}
           >
             {EDIT_SCENE_LABEL}

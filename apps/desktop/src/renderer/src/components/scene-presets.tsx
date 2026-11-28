@@ -122,7 +122,7 @@ export function ScenesSection(): ReactElement {
       action={
         <>
           {/* Plan 215 D4: the same Edit scene as the Scene page's and ⌘K's. */}
-          <Button variant="ghost" onClick={editScene}>
+          <Button variant="outline" onClick={editScene}>
             {EDIT_SCENE_LABEL}
           </Button>
           <DisabledReason reason={readOnly ? SCENES_READ_ONLY_REASON : null}>

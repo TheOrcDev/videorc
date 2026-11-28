@@ -273,7 +273,7 @@ export function SourceCropFields({
         data-videorc-crop-reset
         disabled={disabled}
         size="xs"
-        variant="ghost"
+        variant="outline"
         onClick={() => {
           if (cropped) onCommit({ ...NO_STAGE_CROP })
         }}

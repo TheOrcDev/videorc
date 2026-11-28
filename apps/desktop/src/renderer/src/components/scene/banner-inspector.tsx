@@ -447,7 +447,7 @@ export function BannerInspector({
           </div>
         </Field>
         <BannerTimingFold banner={banner} disabled={blocked} onPatch={onPatch} />
-        <Button className="self-end" variant="ghost" onClick={onManage}>
+        <Button className="self-end" variant="outline" onClick={onManage}>
           Manage in Images
           <ArrowRightIcon data-icon="inline-end" />
         </Button>

@@ -88,7 +88,7 @@ export function CameraKeyEdgesFields({
           className="w-fit"
           data-videorc-key-edges-reset
           size="xs"
-          variant="ghost"
+          variant="outline"
           onClick={() => onCommit({ ...NO_CAMERA_KEY_EDGES })}
         >
           <ResetIcon data-icon="inline-start" />

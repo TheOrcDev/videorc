@@ -38,7 +38,7 @@ export function AgentsSessionRow(): ReactElement | null {
           data-testid="session-agents-stop"
           disabled={stopping}
           size="xs"
-          variant="ghost"
+          variant="outline"
           onClick={onStop}
         >
           Stop
