@@ -234,6 +234,48 @@ impl PreviewReload {
     }
 }
 
+/// The reload the preview feed sent and the mark (`ReloadMark`) taken with
+/// it, kept as one pair so a commit is confirmed only with the mark of the
+/// request it answers. Both come from one snapshot
+/// (`ScenesView::reload_mark`): a mark newer than the reload's sources reads
+/// the scene being left's window as a pick made in the scene going on and
+/// saves it there (the scene-window-switch probe, 2026-11-28: "Fixture
+/// Alpha" kept "Fixture Beta"'s window and every switch back showed Beta).
+#[derive(Debug, Clone)]
+pub struct SentReload<M> {
+    mark: M,
+    reload: Option<PreviewReload>,
+}
+
+impl<M: Clone + PartialEq> SentReload<M> {
+    pub fn new(mark: M, reload: Option<PreviewReload>) -> Self {
+        Self { mark, reload }
+    }
+
+    /// A request goes out (or is confirmed again): its mark and reload
+    /// change together.
+    pub fn send(&mut self, mark: M, reload: Option<PreviewReload>) {
+        self.mark = mark;
+        self.reload = reload;
+    }
+
+    pub fn mark(&self) -> &M {
+        &self.mark
+    }
+
+    pub fn reload(&self) -> Option<&PreviewReload> {
+        self.reload.as_ref()
+    }
+
+    /// What the backend committing `committed` confirms: the mark taken with
+    /// the request it answers, with that request's layout and sources. None
+    /// for a commit of any other request (one a newer send replaced).
+    pub fn confirms(&self, committed: &SceneConfigParams) -> Option<(M, Value, Value)> {
+        let (layout, sources) = self.reload.as_ref()?.confirms(committed)?;
+        Some((self.mark.clone(), layout.clone(), sources.clone()))
+    }
+}
+
 /// [`preview_scene_request`] with the capture config it reads.
 pub fn preview_scene_reload(
     snapshot: &StudioSnapshot,
@@ -248,6 +290,57 @@ pub fn preview_scene_reload(
 
 #[cfg(test)]
 mod tests {
+
+    fn reload(window: &str) -> PreviewReload {
+        let sources = serde_json::json!({ "windowId": window });
+        let layout = serde_json::json!({ "layoutPreset": "screen-only" });
+        PreviewReload {
+            request: SceneConfigParams {
+                sources: SourceSelection {
+                    screen_id: None,
+                    window_id: Some(window.to_string()),
+                    camera_id: None,
+                    microphone_id: None,
+                    test_pattern: false,
+                },
+                layout: videorc_protocol::default_layout_settings(),
+                video: None,
+                background: None,
+                protected_overlay_window_ids: Vec::new(),
+                transition_ms: None,
+            },
+            layout,
+            sources,
+        }
+    }
+
+    /// The race behind "Fixture Alpha" saved with Beta's window: the commit
+    /// of the scene being left lands after the next request went out. It
+    /// confirms nothing; the new request's commit confirms with its own mark.
+    #[test]
+    fn a_commit_confirms_only_with_the_mark_of_its_own_request() {
+        let beta = reload("window:beta");
+        let alpha = reload("window:alpha");
+        let mut sent = SentReload::new(1_u64, Some(beta.clone()));
+        assert_eq!(
+            sent.confirms(&beta.request)
+                .map(|(mark, _, sources)| (mark, sources)),
+            Some((1, serde_json::json!({ "windowId": "window:beta" })))
+        );
+        // The switch to Alpha: a new mark and its request, together.
+        sent.send(2, Some(alpha.clone()));
+        assert!(
+            sent.confirms(&beta.request).is_none(),
+            "Beta's late commit must not confirm under Alpha's mark"
+        );
+        assert_eq!(
+            sent.confirms(&alpha.request)
+                .map(|(mark, _, sources)| (mark, sources)),
+            Some((2, serde_json::json!({ "windowId": "window:alpha" })))
+        );
+        sent.send(3, None);
+        assert!(sent.confirms(&alpha.request).is_none());
+    }
     use super::*;
 
     fn input(state: &RecordingState) -> ReloadInput<'_> {

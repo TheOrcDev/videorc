@@ -709,13 +709,14 @@ impl<B: StudioBackend> Studio<B> {
     pub(super) async fn load_scene_from_capture_config(
         &self,
     ) -> Result<(), crate::client::RpcError> {
-        let mark: ReloadMark = self.scene_reload_mark();
-        let request = {
+        let (mark, request) = {
             let mut guard = self.lock();
             let inner = &mut *guard;
             if !matches!(inner.connection, Connection::Connected { .. }) {
                 return Ok(());
             }
+            // The mark with the capture config it is read with.
+            let mark: ReloadMark = inner.reload_mark();
             let view = inner.settings_view();
             let params = preview_scene::studio_scene_params(&view.capture, &view.studio, false);
             let Ok(mut params) = serde_json::to_value(&params) else {
@@ -725,9 +726,12 @@ impl<B: StudioBackend> Studio<B> {
                 params["background"] = background;
             }
             (
-                params,
-                view.capture_doc["layout"].clone(),
-                view.capture_doc["sources"].clone(),
+                mark,
+                (
+                    params,
+                    view.capture_doc["layout"].clone(),
+                    view.capture_doc["sources"].clone(),
+                ),
             )
         };
         let (params, layout, sources) = request;

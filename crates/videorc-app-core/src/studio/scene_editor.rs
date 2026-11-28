@@ -459,6 +459,7 @@ impl Inner {
             saved_id.as_deref(),
             now,
             logger,
+            "editor commit",
         );
         kept
     }
