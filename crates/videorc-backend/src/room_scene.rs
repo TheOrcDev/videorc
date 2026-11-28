@@ -23,9 +23,9 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::cloud_talk::{
-    CLOUD_ROOM_PRESENTATION_EVENT, CloudRoomPresentationEvent, CloudRoomSceneCommitParams,
-    PresentationOrientation, PresentationOutput, RoomBackgroundStatus, RoomBackgroundWanted,
-    RoomPresentationObservation, RoomPresentationState, RoomPresentationStatus,
+    CloudRoomPresentationEvent, CloudRoomSceneCommitParams, PresentationOrientation,
+    PresentationOutput, RoomBackgroundStatus, RoomBackgroundWanted, RoomPresentationObservation,
+    RoomPresentationState, RoomPresentationStatus,
 };
 use crate::room_capability::{CapabilityReceipts, capability_current};
 use crate::room_graphics::GraphicsSignal;
@@ -374,8 +374,8 @@ async fn send_due(
     };
     if let Some(status) = scene.status(&peers, &local_sid) {
         crate::room_content::scene_reported(&status);
-        state.emit_event(
-            CLOUD_ROOM_PRESENTATION_EVENT,
+        crate::room_presentation::publish(
+            state,
             CloudRoomPresentationEvent {
                 show_id: show_id.to_string(),
                 graphics: None,

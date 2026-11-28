@@ -24,8 +24,8 @@ use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc};
 
 use crate::cloud_talk::{
-    CLOUD_ROOM_PRESENTATION_EVENT, CloudRoomPresentationEvent, PresentationOrientation,
-    PresentationOutput, RoomPresentationGuests, RoomPresentationObservation, RoomPresentationState,
+    CloudRoomPresentationEvent, PresentationOrientation, PresentationOutput,
+    RoomPresentationGuests, RoomPresentationObservation, RoomPresentationState,
     RoomPresentationStatus,
 };
 use crate::room_assets::{SentAssets, with_references};
@@ -543,8 +543,8 @@ async fn send_due(
     }
     let (status, accepted) = avatar.report(&peers, &local_sid, now);
     if let Some(status) = status {
-        state.emit_event(
-            CLOUD_ROOM_PRESENTATION_EVENT,
+        crate::room_presentation::publish(
+            state,
             CloudRoomPresentationEvent {
                 show_id: show_id.to_string(),
                 graphics: None,

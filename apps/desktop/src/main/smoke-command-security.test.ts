@@ -200,6 +200,7 @@ describe('smoke command security', () => {
         'audio.test.inject-pcm',
         'captions.test.inject-audio',
         'captions.test.snapshot',
+        'cloud.room.presentation.get',
         'cohost.pet.import',
         'compositor.scene.update',
         'diagnostics.stats',

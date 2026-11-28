@@ -36,9 +36,7 @@ use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
 use tokio::sync::{Notify, oneshot};
 
-use crate::cloud_talk::{
-    CLOUD_ROOM_PRESENTATION_EVENT, CloudRoomPresentationEvent, RoomCameraSettings, RoomMediaStatus,
-};
+use crate::cloud_talk::{CloudRoomPresentationEvent, RoomCameraSettings, RoomMediaStatus};
 use crate::protocol::{CameraBackgroundMode, LayoutSettings};
 use crate::room_microphone::{Bridge, Command, Reply, Settings};
 use crate::state::AppState;
@@ -107,8 +105,8 @@ pub(crate) fn update_media(
         (fresh || entry.1 != before).then(|| entry.1.clone())
     };
     if let Some(media) = changed {
-        state.emit_event(
-            CLOUD_ROOM_PRESENTATION_EVENT,
+        crate::room_presentation::publish(
+            state,
             CloudRoomPresentationEvent {
                 show_id: show_id.to_string(),
                 graphics: None,
