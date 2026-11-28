@@ -167,9 +167,21 @@ fn delivery_projection(
 
 pub async fn send_chat_message(
     state: &AppState,
-    _agent: &AgentIdentity,
+    agent: &AgentIdentity,
     args: Value,
 ) -> ToolOutcome {
+    // Owner rule (2026-10-28): only the bubble is automatic. A Sidekick post in
+    // chat requires an explicit streamer order (voice or /buddy); every other
+    // Sidekick turn (chat-triggered answer, greeting, idle remark, scheduled
+    // turn, or unspecified) is refused before touching live_chat. External MCP
+    // agents keep today's behavior with their D11 notice.
+    if agent.id == crate::buddy_act::BUDDY_AGENT_ID
+        && !agent
+            .buddy_origin
+            .is_some_and(crate::buddy_act::BuddyTurnOrigin::allows_chat_post)
+    {
+        return ToolOutcome::refused(crate::buddy_act::CHAT_POST_REQUIRES_ORDER);
+    }
     let Some(text) = text_of(&args, "text") else {
         return ToolOutcome::refused("Say what to post: text.");
     };
@@ -913,5 +925,256 @@ mod tests {
             scrub("refused at rtmp://live.example/app/key now"),
             "refused at [address] now"
         );
+    }
+
+    #[tokio::test]
+    async fn buddy_chat_triggered_and_non_order_turns_cannot_post_to_chat() {
+        use crate::buddy_act::{self, BUDDY_AGENT_ID, BUDDY_AGENT_NAME, BuddyTurnOrigin};
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        seed(
+            &state,
+            &[
+                (
+                    StreamPlatform::Youtube,
+                    CommentsWriteState::Ready,
+                    FakeChatSendBehavior::Sent,
+                ),
+                (
+                    StreamPlatform::Twitch,
+                    CommentsWriteState::Ready,
+                    FakeChatSendBehavior::Sent,
+                ),
+            ],
+            &[],
+        )
+        .await;
+
+        for origin in [
+            BuddyTurnOrigin::ChatTrigger,
+            BuddyTurnOrigin::Greeting,
+            BuddyTurnOrigin::IdleRemark,
+            BuddyTurnOrigin::ScheduledTurn,
+            BuddyTurnOrigin::Unspecified,
+        ] {
+            let outcome = buddy_act::call_for_origin(
+                &state,
+                origin,
+                "send_chat_message",
+                json!({ "text": "unsolicited reply" }),
+            )
+            .await;
+            assert_eq!(
+                outcome,
+                ToolOutcome::refused(crate::buddy_act::CHAT_POST_REQUIRES_ORDER),
+                "origin {origin:?} must not post to chat"
+            );
+            assert!(
+                outcome.text.contains("bubble") && outcome.text.contains("Suggest"),
+                "refusal should point to bubble or Suggest card: {}",
+                outcome.text
+            );
+        }
+
+        // Default `buddy_act::call` and a bare Buddy `AgentIdentity` with
+        // `buddy_origin: None` both fail closed.
+        assert_eq!(
+            buddy_act::call(
+                &state,
+                "send_chat_message",
+                json!({ "text": "default buddy call" })
+            )
+            .await,
+            ToolOutcome::refused(crate::buddy_act::CHAT_POST_REQUIRES_ORDER)
+        );
+        let bare_buddy = AgentIdentity {
+            id: BUDDY_AGENT_ID.to_string(),
+            name: BUDDY_AGENT_NAME.to_string(),
+            buddy_origin: None,
+        };
+        assert_eq!(
+            send_chat_message(&state, &bare_buddy, json!({ "text": "bare buddy" })).await,
+            ToolOutcome::refused(crate::buddy_act::CHAT_POST_REQUIRES_ORDER)
+        );
+
+        // No send operation was created and no D11 posted-in-chat notice fired.
+        let rows = state.database.list_agent_activity(20, None).unwrap();
+        assert_eq!(rows.len(), 6);
+        assert!(
+            rows.iter()
+                .all(|row| row.outcome == crate::storage::AgentActivityOutcome::Refused)
+        );
+        while let Ok(event) = events.try_recv() {
+            if event.event == "agents.activity" {
+                assert!(
+                    event.payload.get("notice").is_none() || event.payload["notice"].is_null(),
+                    "refused Buddy chat post must not emit a D11 notice: {}",
+                    event.payload
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn buddy_typed_order_can_post_to_chat() {
+        use crate::buddy_act::{Halt, PendingAct, Plan, PlannedStep, run_steps};
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        seed(
+            &state,
+            &[
+                (
+                    StreamPlatform::Youtube,
+                    CommentsWriteState::Ready,
+                    FakeChatSendBehavior::Sent,
+                ),
+                (
+                    StreamPlatform::Twitch,
+                    CommentsWriteState::Ready,
+                    FakeChatSendBehavior::Sent,
+                ),
+            ],
+            &[],
+        )
+        .await;
+
+        let mut typed = PendingAct::new(
+            "/buddy post links in chat",
+            Plan {
+                line: "Posting it.".into(),
+                unknown: false,
+                steps: vec![PlannedStep::Run {
+                    tool: "send_chat_message".into(),
+                    args: json!({ "text": "Links: https://example.com" }),
+                }],
+            },
+        );
+        assert_eq!(
+            run_steps(&state, &mut typed, false, false).await,
+            Halt::Done
+        );
+        assert_eq!(
+            typed.results,
+            vec!["Posted in chat on YouTube and Twitch.".to_string()]
+        );
+
+        let rows = state.database.list_agent_activity(10, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, crate::storage::AgentActivityOutcome::Ok);
+        let mut notices = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.event == "agents.activity"
+                && let Some(notice) = event.payload["notice"].as_str()
+            {
+                notices.push(notice.to_string());
+            }
+        }
+        assert_eq!(notices, vec!["Sidekick posted in chat.".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn buddy_voice_order_can_post_to_chat() {
+        use crate::buddy_act::{Halt, PendingAct, Plan, PlannedStep, run_steps};
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        seed(
+            &state,
+            &[
+                (
+                    StreamPlatform::Youtube,
+                    CommentsWriteState::Ready,
+                    FakeChatSendBehavior::Sent,
+                ),
+                (
+                    StreamPlatform::Twitch,
+                    CommentsWriteState::Ready,
+                    FakeChatSendBehavior::Sent,
+                ),
+            ],
+            &[],
+        )
+        .await;
+
+        let mut voice = PendingAct::new(
+            "sidekick tell chat we're starting soon",
+            Plan {
+                line: "Posting it.".into(),
+                unknown: false,
+                steps: vec![PlannedStep::Run {
+                    tool: "send_chat_message".into(),
+                    args: json!({ "text": "Starting in 2 minutes!" }),
+                }],
+            },
+        );
+        assert_eq!(run_steps(&state, &mut voice, true, false).await, Halt::Done);
+        assert_eq!(
+            voice.results,
+            vec!["Posted in chat on YouTube and Twitch.".to_string()]
+        );
+
+        let rows = state.database.list_agent_activity(10, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, crate::storage::AgentActivityOutcome::Ok);
+        let mut notices = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.event == "agents.activity"
+                && let Some(notice) = event.payload["notice"].as_str()
+            {
+                notices.push(notice.to_string());
+            }
+        }
+        assert_eq!(notices, vec!["Sidekick posted in chat.".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn external_mcp_agent_can_post_to_chat_and_emits_d11_notice() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let (agent, _) = connect_agent(&state, "Claude Code");
+        seed(
+            &state,
+            &[
+                (
+                    StreamPlatform::Youtube,
+                    CommentsWriteState::Ready,
+                    FakeChatSendBehavior::Sent,
+                ),
+                (
+                    StreamPlatform::Twitch,
+                    CommentsWriteState::Ready,
+                    FakeChatSendBehavior::Sent,
+                ),
+            ],
+            &[],
+        )
+        .await;
+
+        let request = rmcp::model::CallToolRequestParams::new("send_chat_message").with_arguments(
+            json!({ "text": "Hello from Claude Code" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        let result = crate::agent_call::call_tool(&state, &agent, request).await;
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["state"], "sent");
+        let operation_id = structured["operationId"].as_str().unwrap();
+        let stored = state
+            .database
+            .get_chat_send_operation(operation_id)
+            .unwrap()
+            .expect("chat send stored");
+        assert_eq!(stored.text, "Hello from Claude Code");
+
+        let mut notices = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.event == "agents.activity"
+                && let Some(notice) = event.payload["notice"].as_str()
+            {
+                notices.push(notice.to_string());
+            }
+        }
+        assert_eq!(notices, vec!["Claude Code posted in chat.".to_string()]);
     }
 }

@@ -74,12 +74,61 @@ pub const SIGNED_OUT: &str = "Sign in to ask Sidekick.";
 pub const VOICE_PAUSED: &str = "Voice commands are paused by Videorc.";
 pub const EMPTY_SENTENCE: &str = "Say what Sidekick should do, like /sidekick switch to BRB.";
 pub const TOO_LONG: &str = "That's too long for Sidekick. Keep it under 500 characters.";
+/// Owner rule (2026-10-28): only the bubble is automatic. A Sidekick post in
+/// chat requires an explicit streamer voice or `/sidekick` (`/buddy`) order;
+/// every other Sidekick turn is refused and told to use the bubble or a Suggest
+/// card instead.
+pub const CHAT_POST_REQUIRES_ORDER: &str = "Sidekick only posts in chat when you order it by voice or /sidekick. Use the bubble or a Suggest card instead.";
 const DEFAULT_LINE: &str = "On it.";
 
+/// Why Sidekick (Buddy) is invoking an agent tool.
+///
+/// Owner rule (2026-10-28): only the bubble is automatic. A Sidekick post in
+/// chat (`send_chat_message`) is permitted only on a turn started by an
+/// explicit streamer order (`VoiceOrder` or `TypedOrder`); every other Buddy
+/// turn (chat-triggered, greeting, idle remark, scheduled turn, or unspecified)
+/// is refused so it uses the bubble or a Suggest card instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BuddyTurnOrigin {
+    /// Explicit wake-word voice order from the streamer ("Sidekick, …").
+    VoiceOrder,
+    /// Explicit typed `/buddy` / `/sidekick` order (`cohost.act`).
+    TypedOrder,
+    /// Triggered by a viewer chat message. Today `cohost_auto_chat` never
+    /// enters `buddy_act`; kept as an explicit variant to guard future callers
+    /// and unit tests.
+    #[allow(dead_code)]
+    ChatTrigger,
+    /// Triggered by a greeting event.
+    #[allow(dead_code)]
+    Greeting,
+    /// Triggered by an idle remark / banter pass.
+    #[allow(dead_code)]
+    IdleRemark,
+    /// Triggered by a scheduled / background turn.
+    #[allow(dead_code)]
+    ScheduledTurn,
+    /// Any other turn without an explicit streamer order (fail-closed).
+    #[default]
+    Unspecified,
+}
+
+impl BuddyTurnOrigin {
+    /// True only when the turn was started by an explicit streamer order.
+    pub const fn allows_chat_post(self) -> bool {
+        matches!(self, Self::VoiceOrder | Self::TypedOrder)
+    }
+}
+
 pub fn identity() -> AgentIdentity {
+    identity_for(BuddyTurnOrigin::Unspecified)
+}
+
+pub fn identity_for(origin: BuddyTurnOrigin) -> AgentIdentity {
     AgentIdentity {
         id: BUDDY_AGENT_ID.to_string(),
         name: BUDDY_AGENT_NAME.to_string(),
+        buddy_origin: Some(origin),
     }
 }
 
@@ -116,12 +165,25 @@ pub fn buddy_tool(name: &str) -> Result<&'static AgentTool, String> {
     }
 }
 
-/// One Buddy tool call, start to finish: the subset, then the agent tool
-/// path (schema, rate limit, executor or Studio relay), then its Activity
-/// row as "Buddy". A successful `onAir` call carries its D11 notice, like an
-/// agent's ("Buddy ended the livestream.").
+/// One Buddy tool call without an explicit streamer order origin (fail-closed
+/// for chat posting). Production callers must use [`call_for_origin`] so every
+/// Buddy tool invocation names its [`BuddyTurnOrigin`].
+#[cfg(test)]
 pub async fn call(state: &AppState, name: &str, arguments: Value) -> ToolOutcome {
-    let agent = identity();
+    call_for_origin(state, BuddyTurnOrigin::Unspecified, name, arguments).await
+}
+
+/// One Buddy tool call, start to finish, carrying the turn's [`BuddyTurnOrigin`]:
+/// the subset, then the agent tool path (schema, rate limit, executor or Studio
+/// relay), then its Activity row as "Sidekick". A successful `onAir` call
+/// carries its D11 notice, like an agent's ("Sidekick ended the livestream.").
+pub async fn call_for_origin(
+    state: &AppState,
+    origin: BuddyTurnOrigin,
+    name: &str,
+    arguments: Value,
+) -> ToolOutcome {
+    let agent = identity_for(origin);
     let summary = agent_call::summarize_arguments(&arguments);
     let (tool, outcome) = match buddy_tool(name) {
         Ok(tool) => (
@@ -1282,7 +1344,12 @@ pub async fn run_steps(
                 let read_only = agent_tools::catalog()
                     .tool(&tool)
                     .is_some_and(|tool| tool.annotations.read_only_hint);
-                let outcome = call(state, &tool, args).await;
+                let origin = if spoken {
+                    BuddyTurnOrigin::VoiceOrder
+                } else {
+                    BuddyTurnOrigin::TypedOrder
+                };
+                let outcome = call_for_origin(state, origin, &tool, args).await;
                 if outcome.outcome == AgentActivityOutcome::Ok {
                     act.any_ok = true;
                     act.acted |= !read_only;

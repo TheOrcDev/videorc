@@ -96,6 +96,10 @@ pub struct AgentLastAction {
 pub struct AgentIdentity {
     pub id: String,
     pub name: String,
+    /// Present only for Sidekick (`BUDDY_AGENT_ID`): records what started the
+    /// Buddy turn so tools like `send_chat_message` can enforce the owner rule
+    /// (posts require an explicit streamer voice or `/buddy` order).
+    pub buddy_origin: Option<crate::buddy_act::BuddyTurnOrigin>,
 }
 
 #[derive(Debug, Default)]
@@ -180,6 +184,7 @@ impl AgentRegistry {
             .map(|agent| AgentIdentity {
                 id: agent.id.clone(),
                 name: agent.name.clone(),
+                buddy_origin: None,
             })
     }
 
@@ -398,7 +403,8 @@ mod tests {
             registry.authenticate(&token),
             Some(AgentIdentity {
                 id: record.id.clone(),
-                name: "Claude Desktop".to_string()
+                name: "Claude Desktop".to_string(),
+                buddy_origin: None,
             })
         );
         assert_eq!(registry.authenticate(&format!("{token}x")), None);

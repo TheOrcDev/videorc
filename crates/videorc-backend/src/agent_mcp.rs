@@ -1273,6 +1273,7 @@ pub(crate) mod test_support {
             AgentIdentity {
                 id: record.id,
                 name: record.name,
+                buddy_origin: None,
             },
             token,
         )
