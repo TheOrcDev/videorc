@@ -34,17 +34,16 @@ use videorc_app_core::editor::inspector::{
 };
 use videorc_app_core::editor::stage::{
     CameraCorner, CommitTicket, DraftChannel, DraftSend, DraftWanted, GestureKind, GestureStart,
-    hold_params,
     Ghost, HandleId, HitTarget, KeyChord, Modifiers as StageModifiers, OVERLAY_ITEMS, PictureInput,
     PixelSize, PresetCameraLayout, SelectionHit, Settled, StageCrop, StageEdits, StageGesture,
     StageHit, StageItemBadge, StageMapping, StageRect, background_stage_margin,
     banner_fills_canvas, banner_fit_rect, banner_stage_id, buddy_pet_box, clamp_overlay_rect,
-    draft_params, effective_camera_mask_shape, layer_fit, output_badge, overlay_item_label,
-    overlay_orientation_key, overlay_stage_id, preset_camera_corner_rect, round_crop_for_commit,
-    round_rect_for_commit, same_stage_rect, scene_camera_on_stage, scene_frame_rect,
-    scene_picture_rect, screen_box_is_picture, snap_corner_of, stage_crop_of, stage_handle_offset,
-    stage_hit, stage_nudge_for_key, stage_pixel_size, stage_point, stage_snap_targets,
-    visible_stage_handles,
+    draft_params, effective_camera_mask_shape, hold_params, layer_fit, output_badge,
+    overlay_item_label, overlay_orientation_key, overlay_stage_id, preset_camera_corner_rect,
+    round_crop_for_commit, round_rect_for_commit, same_stage_rect, scene_camera_on_stage,
+    scene_frame_rect, scene_picture_rect, screen_box_is_picture, snap_corner_of, stage_crop_of,
+    stage_handle_offset, stage_hit, stage_nudge_for_key, stage_pixel_size, stage_point,
+    stage_snap_targets, visible_stage_handles,
 };
 use videorc_app_core::livestream::plan;
 use videorc_app_core::studio::Connection;
@@ -1500,7 +1499,10 @@ mod tests {
             selection_hold(true, Some("overlay:buddy")),
             DraftWanted::Hold(hold_params("overlay:buddy"))
         );
-        assert_eq!(selection_hold(false, Some("overlay:buddy")), DraftWanted::None);
+        assert_eq!(
+            selection_hold(false, Some("overlay:buddy")),
+            DraftWanted::None
+        );
         assert_eq!(selection_hold(true, None), DraftWanted::None);
         // The hold names the item and draws no chrome (GPUI draws its own).
         let DraftWanted::Hold(params) = selection_hold(true, Some("banner:b")) else {

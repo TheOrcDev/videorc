@@ -559,7 +559,12 @@ impl ScenePage {
         stage_id: &str,
         cx: &mut Context<Self>,
     ) -> Result<serde_json::Value, String> {
-        if !self.editor.chips.iter().any(|chip| chip.stage_id == stage_id) {
+        if !self
+            .editor
+            .chips
+            .iter()
+            .any(|chip| chip.stage_id == stage_id)
+        {
             return Err(format!("scene-stage-select: no chip is {stage_id:?}."));
         }
         self.select_stage(&SharedString::from(stage_id.to_string()), cx);

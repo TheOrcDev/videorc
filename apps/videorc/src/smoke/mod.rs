@@ -267,10 +267,7 @@ impl SmokeCommandHandler for ShellCommands {
             }
             if command == "scene-stage-gesture" {
                 let (action, at) = stage_gesture_params(&params)?;
-                return self
-                    .ui
-                    .run(move |cx| stage_gesture(action, at, cx))
-                    .await?;
+                return self.ui.run(move |cx| stage_gesture(action, at, cx)).await?;
             }
             if command == "scene-stage-select" {
                 if params.keys().any(|key| key != "id") {
@@ -441,7 +438,9 @@ fn stage_gesture_params(
         .keys()
         .find(|key| !matches!(key.as_str(), "action" | "x" | "y"))
     {
-        return Err(format!("scene-stage-gesture takes action, x and y, not {key:?}."));
+        return Err(format!(
+            "scene-stage-gesture takes action, x and y, not {key:?}."
+        ));
     }
     let action = match params.get("action").and_then(Value::as_str) {
         Some("press") => StageGestureAction::Press,
@@ -628,9 +627,11 @@ mod tests {
                 .contains("needs y")
         );
         assert!(
-            stage_gesture_params(&params(json!({ "action": "move", "x": 1, "y": 2, "steps": 3 })))
-                .unwrap_err()
-                .contains("\"steps\"")
+            stage_gesture_params(&params(
+                json!({ "action": "move", "x": 1, "y": 2, "steps": 3 })
+            ))
+            .unwrap_err()
+            .contains("\"steps\"")
         );
     }
 

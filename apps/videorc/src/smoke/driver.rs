@@ -617,7 +617,12 @@ fn pointer_drag(
 }
 
 /// The pointer to `at`, pressed there, and the frame after the press.
-pub(super) fn pointer_press(at: (f64, f64), modifiers: Modifiers, window: &mut Window, cx: &mut App) {
+pub(super) fn pointer_press(
+    at: (f64, f64),
+    modifiers: Modifiers,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let position = point(px(at.0 as f32), px(at.1 as f32));
     window.dispatch_event(
         PlatformInput::MouseMove(MouseMoveEvent {
@@ -647,7 +652,12 @@ pub(super) fn pointer_press(at: (f64, f64), modifiers: Modifiers, window: &mut W
 }
 
 /// A pressed pointer's move to `at`.
-pub(super) fn pointer_move(at: (f64, f64), modifiers: Modifiers, window: &mut Window, cx: &mut App) {
+pub(super) fn pointer_move(
+    at: (f64, f64),
+    modifiers: Modifiers,
+    window: &mut Window,
+    cx: &mut App,
+) {
     window.dispatch_event(
         PlatformInput::MouseMove(MouseMoveEvent {
             position: point(px(at.0 as f32), px(at.1 as f32)),
@@ -659,7 +669,12 @@ pub(super) fn pointer_move(at: (f64, f64), modifiers: Modifiers, window: &mut Wi
 }
 
 /// The release at `at`.
-pub(super) fn pointer_release(at: (f64, f64), modifiers: Modifiers, window: &mut Window, cx: &mut App) {
+pub(super) fn pointer_release(
+    at: (f64, f64),
+    modifiers: Modifiers,
+    window: &mut Window,
+    cx: &mut App,
+) {
     window.dispatch_event(
         PlatformInput::MouseUp(MouseUpEvent {
             button: MouseButton::Left,

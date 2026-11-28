@@ -716,7 +716,8 @@ impl Shell {
     /// `scene-stage-state`: the Scene page's canvas editor as its next render
     /// shows it ([`crate::screens::scene::ScenePage::smoke_stage_state`]).
     pub fn smoke_scene_stage(&mut self, cx: &mut Context<Self>) -> serde_json::Value {
-        self.scene.update(cx, |scene, cx| scene.smoke_stage_state(cx))
+        self.scene
+            .update(cx, |scene, cx| scene.smoke_stage_state(cx))
     }
 
     /// `scene-stage-select`: the Scene page's chip for `stage_id`, clicked.
