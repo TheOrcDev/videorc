@@ -730,6 +730,18 @@ impl Shell {
             .update(cx, |scene, cx| scene.smoke_select_stage(stage_id, cx))
     }
 
+    /// `room-switch-set`: the Studio's room switches.
+    pub fn smoke_room_switch(
+        &mut self,
+        switch: &str,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, String> {
+        self.studio.update(cx, |studio, cx| {
+            studio.smoke_room_switch(switch, enabled, cx)
+        })
+    }
+
     /// Gallery Vertical stream: Studio with the bottom-row Vertical stream
     /// panel scrolled into view (after `gallery-seed-vertical-stream`).
     pub fn reveal_studio_vertical_stream(&mut self, window: &mut Window, cx: &mut Context<Self>) {

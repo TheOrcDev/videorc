@@ -220,6 +220,14 @@ impl ShellSmoke for ShellWindows {
             .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())
     }
 
+    fn room_switch(&self, switch: &str, enabled: bool, cx: &mut App) -> Result<Value, String> {
+        self.main
+            .update(cx, |shell, _, cx| {
+                shell.smoke_room_switch(switch, enabled, cx)
+            })
+            .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())?
+    }
+
     fn preview(&self, command: &str, cx: &mut App) -> Result<Value, String> {
         let preview = self
             .preview

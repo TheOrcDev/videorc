@@ -97,6 +97,9 @@ pub trait ShellSmoke: 'static {
     fn scene_stage(&self, cx: &mut App) -> Result<Value, String>;
     /// `scene-stage-select`: a stage item's chip clicked, by its stage id.
     fn scene_select(&self, stage_id: &str, cx: &mut App) -> Result<Value, String>;
+    /// `room-switch-set`: one of the open room's switches, through the code
+    /// its control runs ([`ROOM_SWITCHES`]).
+    fn room_switch(&self, switch: &str, enabled: bool, cx: &mut App) -> Result<Value, String>;
 }
 
 /// The preview's commands on the GPUI app. The preview draws in the main
@@ -201,6 +204,7 @@ impl SmokeCommandHandler for ShellCommands {
             || command == "scene-stage-state"
             || command == "scene-stage-gesture"
             || command == "scene-stage-select"
+            || command == "room-switch-set"
             || PREVIEW_COMMANDS.contains(&command)
     }
 
@@ -288,6 +292,13 @@ impl SmokeCommandHandler for ShellCommands {
                     return Err("scene-stage-state takes no parameters.".into());
                 }
                 return self.ui.run(|cx| shell(cx)?.scene_stage(cx)).await?;
+            }
+            if command == "room-switch-set" {
+                let (switch, enabled) = room_switch_params(&params)?;
+                return self
+                    .ui
+                    .run(move |cx| shell(cx)?.room_switch(switch, enabled, cx))
+                    .await?;
             }
             if command == "studio-reveal-vertical-stream" {
                 return self
@@ -488,6 +499,38 @@ fn stage_gesture(
     Ok(serde_json::json!({ "action": format!("{action:?}").to_lowercase(), "x": at.0, "y": at.1 }))
 }
 
+/// `room-switch-set`'s switches (Electron's `roomSounds`, `roomScenes`,
+/// `roomGraphics`, `roomAvatar`, `roomAvatarGuests`).
+pub const ROOM_SWITCHES: &[&str] = &["sounds", "scenes", "graphics", "avatar", "avatarGuests"];
+
+/// `{switch, enabled}`.
+fn room_switch_params(
+    params: &serde_json::Map<String, Value>,
+) -> Result<(&'static str, bool), String> {
+    if let Some(key) = params
+        .keys()
+        .find(|key| !matches!(key.as_str(), "switch" | "enabled"))
+    {
+        return Err(format!(
+            "room-switch-set takes switch and enabled, not {key:?}."
+        ));
+    }
+    let named = params
+        .get("switch")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let switch = ROOM_SWITCHES
+        .iter()
+        .copied()
+        .find(|known| *known == named)
+        .ok_or_else(|| format!("room-switch-set's switch is one of {ROOM_SWITCHES:?}."))?;
+    let enabled = params
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or("room-switch-set needs enabled (true or false).")?;
+    Ok((switch, enabled))
+}
+
 type Job = Box<dyn FnOnce(&mut App) + Send>;
 
 /// A handle the server's tasks use to run work on GPUI's foreground.
@@ -598,7 +641,9 @@ pub fn start(cx: &mut App, start: SmokeStart) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenTab, SmokeDialog, StageGestureAction, stage_gesture_params};
+    use super::{
+        OpenTab, SmokeDialog, StageGestureAction, room_switch_params, stage_gesture_params,
+    };
     use serde_json::{Map, Value, json};
     use videorc_app_core::first_run::{Goal, Step};
 
@@ -632,6 +677,37 @@ mod tests {
             ))
             .unwrap_err()
             .contains("\"steps\"")
+        );
+    }
+
+    #[test]
+    fn a_room_switch_names_one_of_the_room_switches() {
+        assert_eq!(
+            room_switch_params(&params(json!({ "switch": "sounds", "enabled": true }))),
+            Ok(("sounds", true))
+        );
+        assert_eq!(
+            room_switch_params(&params(
+                json!({ "switch": "avatarGuests", "enabled": false })
+            )),
+            Ok(("avatarGuests", false))
+        );
+        assert!(
+            room_switch_params(&params(json!({ "switch": "lights", "enabled": true })))
+                .unwrap_err()
+                .contains("one of")
+        );
+        assert!(
+            room_switch_params(&params(json!({ "switch": "scenes" })))
+                .unwrap_err()
+                .contains("needs enabled")
+        );
+        assert!(
+            room_switch_params(&params(
+                json!({ "switch": "scenes", "enabled": true, "x": 1 })
+            ))
+            .unwrap_err()
+            .contains("\"x\"")
         );
     }
 
