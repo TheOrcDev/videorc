@@ -267,6 +267,11 @@ try {
   await smokeCommandRetry(smoke, 'preview-window-open')
   let budgetSurfaceStatus = null
   if (previewMode === 'detached') {
+    // Electron's open keeps the Preview where it is, and a fresh profile
+    // starts it docked: the detached scenario floats it explicitly (main
+    // failed here with "mode was docked … 608x342", 2026-11-28). The GPUI
+    // app's open already floats it.
+    if (!gpuiApp) await smokeCommandRetry(smoke, 'preview-window-set-mode', { mode: 'floating' })
     const beforeWarmup = await prepareStableDetachedPreview(smoke)
     recordDetachedPreviewGeometryPhase('beforeWarmup', beforeWarmup.phase)
     assertDetachedPreviewGeometryPhase(beforeWarmup.phase)
