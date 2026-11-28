@@ -70,6 +70,7 @@ pub const STUDIO_SMOKE_COMMANDS: &[&str] = &[
     "studio-performance-check",
     "studio-record",
     "studio-replay-buffer",
+    "studio-room-fixture-devices",
     "studio-privacy-add-app",
     "studio-privacy-state",
     "studio-scene-apply",
@@ -427,6 +428,48 @@ impl StudioSmoke {
             .await
             .map_err(|error| format!("The capture config was not saved: {error}"))?;
         Ok(json!({ "configured": true, "state": state_json(&self.studio.snapshot()) }))
+    }
+
+    /// `__videorcSmokeScenePresets.roomFixtureDevices()` with
+    /// `roomNativeMicrophone(nativeMicrophone)`: the DEV fixture camera and
+    /// microphone (the backend's synthetic `u32::MAX` one, and its alternate,
+    /// when `nativeMicrophone`), seeded into every device list.
+    fn room_fixture_devices(&self, params: &Map<String, Value>) -> Value {
+        let native = params.get("nativeMicrophone").and_then(Value::as_bool) != Some(false);
+        let device = |id: &str, name: &str, kind: DeviceKind| Device {
+            app: None,
+            window_title: None,
+            display_uuid: None,
+            id: id.to_string(),
+            name: name.to_string(),
+            kind,
+            status: DeviceStatus::Available,
+            detail: None,
+            width: None,
+            height: None,
+        };
+        let mut fixtures = vec![
+            device("parity-camera", "Parity camera", DeviceKind::Camera),
+            device(
+                if native {
+                    "microphone:coreaudio:4294967295"
+                } else {
+                    "parity-microphone"
+                },
+                "Parity microphone",
+                DeviceKind::Microphone,
+            ),
+        ];
+        if native {
+            fixtures.push(device(
+                "microphone:coreaudio:4294967294",
+                "Alternate parity microphone",
+                DeviceKind::Microphone,
+            ));
+        }
+        let ids: Vec<String> = fixtures.iter().map(|device| device.id.clone()).collect();
+        self.studio.seed_room_fixture_devices(fixtures);
+        json!({ "seeded": ids })
     }
 
     /// Plan 260 C4: synthetic talk-show room for the screen gallery.
@@ -996,6 +1039,7 @@ impl SmokeCommandHandler for StudioSmoke {
                 "studio-stop" => self.stop(params).await,
                 "studio-capture-configure" => self.capture_configure(params).await,
                 "studio-replay-buffer" => self.replay_buffer(params),
+                "studio-room-fixture-devices" => Ok(self.room_fixture_devices(&params)),
                 "studio-performance-check" => self.performance_check(params),
                 "select-screen-device" => self.select_screen(params).await,
                 "select-camera-device" => self.select_camera(params).await,

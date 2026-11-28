@@ -17,6 +17,10 @@ pub struct SourcesState {
     /// Counts the device lists read (`deviceList.devices` changing).
     pub devices_revision: u64,
     pub scene: Option<Scene>,
+    /// Smoke-only room fixture devices (`roomFixtureDevices`): seeded once and
+    /// kept in every later list, as Electron's `seedRoomFixtureDevices` keeps
+    /// them, so a re-list (a camera lend, a display change) never drops them.
+    pub fixture_devices: Vec<Device>,
 }
 
 impl Default for SourcesState {
@@ -29,6 +33,7 @@ impl Default for SourcesState {
             devices_known: false,
             devices_revision: 0,
             scene: None,
+            fixture_devices: Vec::new(),
         }
     }
 }
@@ -49,10 +54,24 @@ pub enum SelectionProblem {
 }
 
 impl SourcesState {
-    pub fn set_devices(&mut self, devices: DeviceList) {
+    pub fn set_devices(&mut self, mut devices: DeviceList) {
+        for fixture in &self.fixture_devices {
+            if !devices.devices.iter().any(|device| device.id == fixture.id) {
+                devices.devices.push(fixture.clone());
+            }
+        }
         self.devices = devices;
         self.devices_known = true;
         self.devices_revision += 1;
+    }
+
+    /// Seeds the room fixture devices into this list and every later one.
+    pub fn seed_fixture_devices(&mut self, fixtures: Vec<Device>) {
+        self.fixture_devices = fixtures;
+        let known = self.devices_known;
+        let current = self.devices.clone();
+        self.set_devices(current);
+        self.devices_known = known;
     }
 
     /// The backend is gone: the list is stale until the next read.
@@ -153,6 +172,47 @@ mod tests {
             width: None,
             height: None,
         }
+    }
+
+    /// The talk-show smoke's room fixtures (Electron's `seedRoomFixtureDevices`)
+    /// stay in every later list, once each, and seeding before the first
+    /// list does not mark the list known.
+    #[test]
+    fn room_fixture_devices_survive_every_later_list() {
+        let mut sources = SourcesState::default();
+        let mic = device(
+            "microphone:coreaudio:4294967295",
+            DeviceKind::Microphone,
+            DeviceStatus::Available,
+        );
+        sources.seed_fixture_devices(vec![mic.clone()]);
+        assert!(!sources.devices_known);
+        assert_eq!(sources.devices.devices, vec![mic.clone()]);
+        for _ in 0..2 {
+            sources.set_devices(DeviceList {
+                devices: vec![
+                    device("screen:1", DeviceKind::Screen, DeviceStatus::Available),
+                    mic.clone(),
+                ],
+                warnings: Vec::new(),
+            });
+            sources.set_devices(DeviceList {
+                devices: vec![device(
+                    "screen:1",
+                    DeviceKind::Screen,
+                    DeviceStatus::Available,
+                )],
+                warnings: Vec::new(),
+            });
+            let ids: Vec<&str> = sources
+                .devices
+                .devices
+                .iter()
+                .map(|d| d.id.as_str())
+                .collect();
+            assert_eq!(ids, ["screen:1", "microphone:coreaudio:4294967295"]);
+        }
+        assert!(sources.devices_known);
     }
 
     #[test]

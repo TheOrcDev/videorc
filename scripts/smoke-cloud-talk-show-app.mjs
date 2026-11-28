@@ -1468,6 +1468,15 @@ async function seedHostDevices(smoke) {
     await request(backend, 15_000, 'ui.settings.set', {
       put: { 'videorc.settings': JSON.stringify({ ...settings, keepMicrophoneWarm: false }) }
     })
+    // `roomFixtureDevices` with the native microphone, as the renderer seeds
+    // them: without them in the device list, Sources clears the synthetic
+    // microphone as unavailable before the room reads it.
+    await requestSmokeCommand(
+      smoke,
+      'studio-room-fixture-devices',
+      { nativeMicrophone: true },
+      { timeoutMs: 15_000 }
+    )
     await requestSmokeCommand(
       smoke,
       'studio-capture-configure',
@@ -1489,11 +1498,13 @@ async function seedHostDevices(smoke) {
       },
       { timeoutMs: 15_000 }
     )
+    let lastSaved = null
     await waitFor(
       async () => {
         const snapshot = await request(backend, 15_000, 'ui.settings.get', {
           keys: ['videorc.captureConfig', 'videorc.settings']
         })
+        lastSaved = snapshot.entries
         const rawSavedSettings = snapshot.entries?.['videorc.settings']
         const savedSettings =
           typeof rawSavedSettings === 'string' ? JSON.parse(rawSavedSettings) : rawSavedSettings
@@ -1501,10 +1512,11 @@ async function seedHostDevices(smoke) {
         const config = typeof raw === 'string' ? JSON.parse(raw) : raw
         return (
           savedSettings?.keepMicrophoneWarm === false &&
+          // The store leaves a false Off out, as Electron's check reads it.
           config?.sources?.cameraId === 'parity-camera' &&
-          config.sources.cameraOff === false &&
+          config.sources.cameraOff !== true &&
           config.sources.microphoneId === SYNTHETIC_MICROPHONE_ID &&
-          config.sources.microphoneOff === false &&
+          config.sources.microphoneOff !== true &&
           config.audio?.microphoneMuted === false &&
           config.audio.microphoneGainDb === 0 &&
           config.audio.microphoneNoiseSuppression === 'off' &&
@@ -1514,7 +1526,10 @@ async function seedHostDevices(smoke) {
       15_000,
       'the Studio to save the room fixture sources and audio',
       100
-    )
+    ).catch((error) => {
+      log(`DIAG saved settings: ${JSON.stringify(lastSaved).slice(0, 4000)}`)
+      throw error
+    })
     return
   }
   const evalJs = async (code) =>
@@ -1577,6 +1592,13 @@ async function checkSeatHolder(moment) {
 }
 
 async function prebuildBackendOrThrow(env, onLine = log) {
+  // A prebuilt GPUI app (VIDEORC_GPUI_APP_BINARY, its backend beside it) needs
+  // no cargo build, as launchDevApp already treats it: compiling here would
+  // rebuild both crates in the checkout while the app-run lock is held.
+  if (gpuiApp && { ...process.env, ...env }.VIDEORC_GPUI_APP_BINARY) {
+    onLine('[smoke:prebuild] skipped: prebuilt GPUI app (VIDEORC_GPUI_APP_BINARY)')
+    return
+  }
   const failure = await prebuildDevBackend({ env, onLine })
   if (failure) throw new Error(failure)
 }

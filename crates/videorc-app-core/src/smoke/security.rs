@@ -261,6 +261,8 @@ pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     // S3.6a: the Clips ring armed for this run, with a smoke's length
     // (`__videorcSmokeSetReplayBuffer`).
     "studio-replay-buffer",
+    // The talk-show smoke's room fixture devices (`roomFixtureDevices`).
+    "studio-room-fixture-devices",
     "studio-state",
     "studio-stop",
     // S3.1e: the saved scenes through the Studio's actions, what the
