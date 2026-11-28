@@ -16,7 +16,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppKind } from './lib/app-launcher.mjs'
 import { isLinuxSmokeEvidenceLine } from './lib/linux-smoke-evidence.mjs'
 import {
   PORTAL_MONITOR_SOURCE_ID,
@@ -171,113 +171,112 @@ try {
       `Linux portal preview proof smoke PASS (portal ${screenAssessment.outcome}; proof skipped); evidence in ${outputDirectory}`
     )
   } else {
-
-  try {
-    await requestSmokeCommand(smoke, 'preview-window-open')
-  } catch (error) {
-    console.log(`[portal-proof] preview-window-open: ${error?.message ?? error}`)
-  }
-
-  const applied = await request(ws, timeoutMs, 'scene.layout.apply_preview', {
-    sources,
-    layout: layout('screen-only'),
-    video,
-    background: null,
-    protectedOverlayWindowIds: []
-  })
-  console.log(
-    `[portal-proof] scene.layout.apply_preview -> applied=${applied.applied} mode=${applied.mode} revision=${applied.sceneRevision} compositor=${applied.compositorStatus?.state}`
-  )
-  if (!applied.applied) {
-    fail(`ScreenOnly preview layout did not apply: ${JSON.stringify(applied)}`)
-  }
-
-  const proofDeadline = Date.now() + proofWaitMs
-  let compositor = applied.compositorStatus ?? null
-  let surface = null
-  let assessment = assessPortalPreviewProof({ compositor, surface })
-  while (Date.now() < proofDeadline) {
-    compositor = await request(ws, timeoutMs, 'compositor.status')
     try {
-      surface = await request(ws, timeoutMs, 'preview.surface.status')
-    } catch {
-      surface = surface ?? null
+      await requestSmokeCommand(smoke, 'preview-window-open')
+    } catch (error) {
+      console.log(`[portal-proof] preview-window-open: ${error?.message ?? error}`)
     }
-    if (smoke) {
+
+    const applied = await request(ws, timeoutMs, 'scene.layout.apply_preview', {
+      sources,
+      layout: layout('screen-only'),
+      video,
+      background: null,
+      protectedOverlayWindowIds: []
+    })
+    console.log(
+      `[portal-proof] scene.layout.apply_preview -> applied=${applied.applied} mode=${applied.mode} revision=${applied.sceneRevision} compositor=${applied.compositorStatus?.state}`
+    )
+    if (!applied.applied) {
+      fail(`ScreenOnly preview layout did not apply: ${JSON.stringify(applied)}`)
+    }
+
+    const proofDeadline = Date.now() + proofWaitMs
+    let compositor = applied.compositorStatus ?? null
+    let surface = null
+    let assessment = assessPortalPreviewProof({ compositor, surface, app: smokeAppKind() })
+    while (Date.now() < proofDeadline) {
+      compositor = await request(ws, timeoutMs, 'compositor.status')
       try {
-        const native = await requestSmokeCommand(smoke, 'native-preview-surface-status')
-        surface = {
-          ...(surface ?? {}),
-          ...(native ?? {}),
-          source: native?.source ?? native?.surfaceSource ?? surface?.source,
-          sourcePixelsPresent:
-            native?.sourcePixelsPresent ?? surface?.sourcePixelsPresent,
-          transport: native?.transport ?? surface?.transport,
-          backing: native?.backing ?? surface?.backing,
-          nativePreviewHostKind: native?.nativePreviewHostKind ?? surface?.nativePreviewHostKind
-        }
+        surface = await request(ws, timeoutMs, 'preview.surface.status')
       } catch {
-        // Backend preview.surface.status is enough if the smoke command is down.
+        surface = surface ?? null
       }
+      if (smoke) {
+        try {
+          const native = await requestSmokeCommand(smoke, 'native-preview-surface-status')
+          surface = {
+            ...(surface ?? {}),
+            ...(native ?? {}),
+            source: native?.source ?? native?.surfaceSource ?? surface?.source,
+            sourcePixelsPresent: native?.sourcePixelsPresent ?? surface?.sourcePixelsPresent,
+            transport: native?.transport ?? surface?.transport,
+            backing: native?.backing ?? surface?.backing,
+            nativePreviewHostKind: native?.nativePreviewHostKind ?? surface?.nativePreviewHostKind
+          }
+        } catch {
+          // Backend preview.surface.status is enough if the smoke command is down.
+        }
+      }
+      assessment = assessPortalPreviewProof({ compositor, surface, app: smokeAppKind() })
+      if (assessment.ok) break
+      await sleep(400)
     }
-    assessment = assessPortalPreviewProof({ compositor, surface })
-    if (assessment.ok) break
-    await sleep(400)
-  }
 
-  const evidence = {
-    schemaVersion: 1,
-    generatedAt: new Date().toISOString(),
-    contract: 'linux-l5-portal-preview-proof',
-    source: PORTAL_MONITOR_SOURCE_ID,
-    expect,
-    outcome: assessment.ok ? 'granted-proof' : 'failed',
-    consentMs,
-    layoutPreset: applied.scene?.layout?.layoutPreset ?? applied.mode,
-    sceneRevision: applied.sceneRevision ?? null,
-    compositor: {
-      state: compositor?.state ?? null,
-      runId: compositor?.runId ?? null,
-      framesRendered: compositor?.framesRendered ?? 0,
-      sceneRevision: compositor?.sceneRevision ?? null,
-      frameSceneRevision: compositor?.frameSceneRevision ?? null,
-      sceneSources: compositor?.sceneSources ?? []
-    },
-    surface: {
-      source: surface?.source ?? surface?.surfaceSource ?? null,
-      sourcePixelsPresent: surface?.sourcePixelsPresent ?? false,
-      transport: surface?.transport ?? null,
-      backing: surface?.backing ?? null,
-      nativePreviewHostKind: surface?.nativePreviewHostKind ?? null,
-      framesRendered: surface?.framesRendered ?? 0
-    },
-    screen: {
-      state: status.state,
-      message: status.message ?? null,
-      width: status.width ?? null,
-      height: status.height ?? null,
-      framesCaptured: status.framesCaptured ?? 0
-    },
-    failures: assessment.failures
-  }
-  writeFileSync(
-    join(outputDirectory, 'linux-portal-preview-proof.json'),
-    JSON.stringify(evidence, null, 2)
-  )
-  console.log(
-    `[portal-proof] compositor=${JSON.stringify(evidence.compositor)} surface=${JSON.stringify(evidence.surface)}`
-  )
+    const evidence = {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      contract: 'linux-l5-portal-preview-proof',
+      source: PORTAL_MONITOR_SOURCE_ID,
+      expect,
+      outcome: assessment.ok ? 'granted-proof' : 'failed',
+      consentMs,
+      layoutPreset: applied.scene?.layout?.layoutPreset ?? applied.mode,
+      sceneRevision: applied.sceneRevision ?? null,
+      compositor: {
+        state: compositor?.state ?? null,
+        runId: compositor?.runId ?? null,
+        framesRendered: compositor?.framesRendered ?? 0,
+        sceneRevision: compositor?.sceneRevision ?? null,
+        frameSceneRevision: compositor?.frameSceneRevision ?? null,
+        sceneSources: compositor?.sceneSources ?? []
+      },
+      surface: {
+        source: surface?.source ?? surface?.surfaceSource ?? null,
+        sourcePixelsPresent: surface?.sourcePixelsPresent ?? false,
+        transport: surface?.transport ?? null,
+        backing: surface?.backing ?? null,
+        nativePreviewHostKind: surface?.nativePreviewHostKind ?? null,
+        framesRendered: surface?.framesRendered ?? 0
+      },
+      screen: {
+        state: status.state,
+        message: status.message ?? null,
+        width: status.width ?? null,
+        height: status.height ?? null,
+        framesCaptured: status.framesCaptured ?? 0
+      },
+      failures: assessment.failures
+    }
+    writeFileSync(
+      join(outputDirectory, 'linux-portal-preview-proof.json'),
+      JSON.stringify(evidence, null, 2)
+    )
+    console.log(
+      `[portal-proof] compositor=${JSON.stringify(evidence.compositor)} surface=${JSON.stringify(evidence.surface)}`
+    )
 
-  const stopped = await request(ws, timeoutMs, 'preview.screen.stop')
-  console.log(`[portal-proof] preview.screen.stop -> ${stopped.state ?? JSON.stringify(stopped)}`)
-  if (!assessment.ok) fail(assessment.failures.join('; '))
-  console.log(
-    `Linux portal preview proof smoke PASS (sourcePixelsPresent=true, surfaceSource=${evidence.surface.source}, compositorState=${evidence.compositor.state}); evidence in ${outputDirectory}`
-  )
+    const stopped = await request(ws, timeoutMs, 'preview.screen.stop')
+    console.log(`[portal-proof] preview.screen.stop -> ${stopped.state ?? JSON.stringify(stopped)}`)
+    if (!assessment.ok) fail(assessment.failures.join('; '))
+    console.log(
+      `Linux portal preview proof smoke PASS (sourcePixelsPresent=true, surfaceSource=${evidence.surface.source}, compositorState=${evidence.compositor.state}); evidence in ${outputDirectory}`
+    )
   }
 } catch (error) {
   // fail() already reported its own message; report anything else once.
-  if (process.exitCode !== 1) console.error(`Linux portal preview proof smoke FAILED: ${error?.stack ?? error}`)
+  if (process.exitCode !== 1)
+    console.error(`Linux portal preview proof smoke FAILED: ${error?.stack ?? error}`)
   process.exitCode = 1
 } finally {
   await stopApp()
