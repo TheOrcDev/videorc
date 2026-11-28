@@ -30,6 +30,7 @@ import { join, relative } from 'node:path'
 import { createHash } from 'node:crypto'
 import { chromium } from 'playwright-core'
 import { managedHarness, OUTPUT, runMedia, waitFor } from './cloud-managed-smoke.mjs'
+import { paritySeams } from './cloud-parity-seams.mjs'
 import { writeBuddyPetFixturePack } from './buddy-pet-fixture.mjs'
 import {
   baselineReport,
@@ -160,6 +161,12 @@ export async function runBaseline({
     localEgress: outputs,
     maximumLogEntries: 4096
   })
+  // The seams into the app, for both apps (`h.studio.*`, `h.room.*`): the
+  // renderer's on Electron, the Rust app's commands and the backend room's
+  // presentation on GPUI (`cloud-parity-seams.mjs`).
+  const seams = paritySeams(h)
+  h.studio = seams.studio
+  h.room = seams.room
   if (markers) {
     const { installMarkers } = await import('./cloud-parity-markers.mjs')
     await installMarkers(h, webRoot)
