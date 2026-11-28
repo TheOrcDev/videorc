@@ -24,6 +24,7 @@ pub mod cohost;
 mod cohost_avatar;
 mod cohost_list;
 pub mod frame;
+mod image_proof;
 pub mod layout;
 pub mod panes;
 pub mod rows;

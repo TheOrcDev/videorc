@@ -183,8 +183,9 @@ pub struct ChatPane {
     /// `overlays.layout`, once read: the card's rects.
     overlay_layout: Option<Value>,
     anchor: HighlightAnchor,
-    /// Emote and GIF pictures (P198), keyed by remote URL.
+    /// Avatars, affiliation badges, emotes and GIFs, keyed by remote URL.
     pictures: Rc<HashMap<String, Picture>>,
+    painted_images: super::image_proof::PaintedImages,
     _search: Subscription,
     _draft: Subscription,
 }
@@ -332,6 +333,7 @@ impl ChatPane {
             overlay_layout: None,
             anchor: HighlightAnchor::default(),
             pictures: Rc::new(HashMap::new()),
+            painted_images: super::image_proof::PaintedImages::for_smoke(),
             _search: search_sub,
             _draft: draft_sub,
         };
@@ -534,7 +536,9 @@ impl ChatPane {
         let mut text = String::new();
         let mut phases = serde_json::Map::new();
         let mut reasons = serde_json::Map::new();
+        let mut row_images = Vec::new();
         for message in shown {
+            row_images.push(self.painted_images.row(&message.id));
             let presentation = videorc_app_core::chat::highlight::presentation(
                 &message.id,
                 &self.highlight.state,
@@ -570,6 +574,7 @@ impl ChatPane {
         }
         json!({
             "text": text,
+            "rowImages": row_images,
             "highlightPhases": phases,
             "highlightReasons": reasons,
             "highlightAnchor": self.anchor.id(),
@@ -621,7 +626,7 @@ impl ChatPane {
         cx.notify();
     }
 
-    /// Cache emote and GIF pictures for the rows on screen (P198).
+    /// Cache every image drawn by the rows on screen.
     fn warm_media(&mut self, cx: &mut Context<Self>) {
         let mut wanted: Vec<(String, bool)> = Vec::new();
         for message in &self.messages {
@@ -631,7 +636,7 @@ impl ChatPane {
                 self.live,
                 &self.mention_names,
             );
-            for (url, as_gif) in chat_media::media_urls(&row.pieces, &row.gifs) {
+            for (url, as_gif) in row.image_requests() {
                 if !self.pictures.contains_key(&url)
                     && !wanted.iter().any(|(existing, _)| existing == &url)
                 {
@@ -650,9 +655,7 @@ impl ChatPane {
                         self.live,
                         &self.mention_names,
                     );
-                    chat_media::media_urls(&row.pieces, &row.gifs)
-                        .into_iter()
-                        .map(|(url, _)| url)
+                    row.image_requests().into_iter().map(|(url, _)| url)
                 })
                 .collect();
             Rc::make_mut(&mut self.pictures).retain(|url, _| keep.contains(url));
@@ -670,10 +673,11 @@ impl ChatPane {
         let backend = self.studio.backend().clone();
         let remote = url.clone();
         let kind = chat_media::cache_kind_for_url(&remote, as_gif);
+        let renderer = cx.svg_renderer();
         let job = self.runtime.spawn(async move {
             let local = driver::cache_image_as(&*backend, &remote, kind).await?;
             let bytes = images::read_route(&local).await.ok()?;
-            Some(chat_media::picture_from_bytes(bytes))
+            Some(chat_media::decoded_picture(bytes, local, renderer))
         });
         cx.spawn(async move |this, cx| {
             let picture = job.await.ok().flatten().unwrap_or(Picture::Failed);
@@ -1227,6 +1231,7 @@ impl ChatPane {
 
 impl Render for ChatPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.painted_images.begin_frame();
         if self.clear_draft {
             self.clear_draft = false;
             self.draft
@@ -1446,6 +1451,7 @@ impl Render for ChatPane {
                                 operation,
                                 in_flight,
                                 &pictures,
+                                &self.painted_images,
                                 on_highlight.clone(),
                                 on_remove.clone(),
                             )
