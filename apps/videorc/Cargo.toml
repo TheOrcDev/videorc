@@ -12,8 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
-# The checkout root without Windows' verbatim `\\?\` prefix (`app::args`).
-dunce = "1.0"
 # GPUI, pinned once in the root manifest (plan 260 D1). The platform's
 # features are the app's: `font-kit` on macOS, `wayland`/`x11` on Linux, and
 # `runtime_shaders`, which compiles the Metal shaders at run time so a build

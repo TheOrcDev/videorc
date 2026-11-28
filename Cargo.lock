@@ -7940,7 +7940,6 @@ dependencies = [
  "block2 0.6.2",
  "chrono",
  "dispatch2",
- "dunce",
  "futures-util",
  "global-hotkey",
  "gpui-base",
@@ -7976,7 +7975,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "dunce",
  "futures-util",
  "getrandom 0.4.2",
  "jiff",

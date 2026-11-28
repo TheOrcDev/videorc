@@ -123,8 +123,7 @@ fn first_checkout(candidates: impl IntoIterator<Item = PathBuf>) -> Option<PathB
         .find(|candidate| {
             candidate.join("Cargo.toml").is_file() && candidate.join("crates").is_dir()
         })
-        // dunce: `C:\...`, not `\\?\C:\...`, which resource paths refuse.
-        .map(|candidate| dunce::canonicalize(&candidate).unwrap_or(candidate))
+        .map(|candidate| candidate.canonicalize().unwrap_or(candidate))
 }
 
 /// `debug` or `release`: the backend built the same way as this binary.
