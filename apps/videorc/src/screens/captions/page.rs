@@ -126,7 +126,10 @@ impl CaptionsPanel {
         } else {
             self.width
         };
-        let item = (column - 2. * size::GUTTER - STYLE_GAP) / 2.;
+        // A logical pixel of slack each: at a fractional scale (115 dpi on
+        // Windows) two chips that fit to the pixel rounded wider than the
+        // row, and the second wrapped, one chip a row in half the column.
+        let item = (column - 2. * size::GUTTER - STYLE_GAP) / 2. - 1.;
         (item - 2. * 8. - 2.).floor().max(120.)
     }
 
@@ -785,8 +788,11 @@ impl CaptionsPanel {
                 .border_t_1()
                 .border_color(hsla(t.border))
                 .child(
-                    // `max-w-md`.
+                    // `max-w-md`: at most 448 px, and never wider than the
+                    // row, so the words wrap in a narrow column instead of
+                    // running past the window's edge.
                     div()
+                        .w_full()
                         .max_w(px(448.))
                         .type_scale(text::META)
                         .text_color(muted)
