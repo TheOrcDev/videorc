@@ -18,6 +18,7 @@ import {
   collectProcessResourceDetails,
   formatCensus,
   ownedProcessLedgerPaths,
+  appProcessRoleContract,
   pruneDeadOwnedProcessRecords,
   waitForCleanProcessState,
   waitForNoLiveProcessState
@@ -40,6 +41,10 @@ const warmupMs = numberFromEnv('VIDEORC_PROCESS_MEMORY_WARMUP_MS', 2000)
 const sampleMs = numberFromEnv('VIDEORC_PROCESS_MEMORY_SAMPLE_MS', 5000)
 const intervalMs = numberFromEnv('VIDEORC_PROCESS_MEMORY_INTERVAL_MS', 1000)
 const samplingInvariants = performanceSamplingInvariants(sampleMs, intervalMs)
+// The app's own process: Electron's main, or the one GPUI process, which
+// counts as owned (process-census OWNED_APP_ROLES).
+const appRoles = appProcessRoleContract()
+const appRole = appRoles.appRole
 const tailWindowMs = numberFromEnv(
   'VIDEORC_PROCESS_MEMORY_TAIL_WINDOW_MS',
   Math.min(120000, Math.max(intervalMs, sampleMs / 3))
@@ -64,11 +69,12 @@ const thresholds = {
   },
   maxRoleCount: {
     backend: numberFromEnv('VIDEORC_PROCESS_MEMORY_MAX_BACKEND_COUNT', 1),
-    'native-preview-helper': numberFromEnv('VIDEORC_PROCESS_MEMORY_MAX_HELPER_COUNT', 1)
+    'native-preview-helper': numberFromEnv('VIDEORC_PROCESS_MEMORY_MAX_HELPER_COUNT', 1),
+    ...(appRole === 'gpui-app' ? appRoles.maxRoleCount : {})
   },
   minRoleCount: {
     backend: 1,
-    'electron-main': 1
+    [appRole]: 1
   },
   maxRoleSlopeMbPerMinute: roleThresholds('SLOPE_MB_MIN'),
   maxRoleSecondHalfSlopeMbPerMinute: roleThresholds('SECOND_HALF_SLOPE_MB_MIN'),
@@ -269,7 +275,8 @@ function roleThresholds(suffix) {
     'electron-main': 'MAIN',
     'electron-renderer': 'RENDERER',
     'electron-gpu': 'GPU',
-    'native-preview-helper': 'HELPER'
+    'native-preview-helper': 'HELPER',
+    ...appProcessRoleContract('gpui').envStems
   }
   return Object.fromEntries(
     Object.entries(mapping)

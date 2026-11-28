@@ -18,7 +18,10 @@ export const DETACHED_PREVIEW_CALIBRATION_PHASE_SAMPLE_COUNTS = Object.freeze({
 
 export function inspectDetachedPreviewCalibrationSample(windowState, surfaceStatus) {
   const expected = DETACHED_PREVIEW_CALIBRATION_SURFACE_SIZE
-  const previewBounds = normalizeBounds(windowState?.contentBounds)
+  // The video's rect in its window: Electron's `contentBounds` (the window's
+  // content under the drag bar); the GPUI app's `videoBounds` (its
+  // `contentBounds` is the whole window, title bar included).
+  const previewBounds = normalizeBounds(windowState?.videoBounds ?? windowState?.contentBounds)
   const nativeBounds = normalizeBounds(surfaceStatus?.bounds, { preferScreenCoordinates: true })
   const nativeScaleFactor = finite(surfaceStatus?.bounds?.scaleFactor)
   const failures = []

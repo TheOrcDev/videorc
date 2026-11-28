@@ -1,4 +1,5 @@
 import { summarizeNumericSeries } from './performance-contract.mjs'
+import { OWNED_APP_ROLES } from './process-census.mjs'
 
 const REQUIRED_TREND_ROLES = ['backend', 'electron-main', 'electron-renderer']
 
@@ -54,7 +55,12 @@ export function summarizeProcessMemory(censuses, { warmupMs = 0, tailWindowMs = 
   const prepared = []
 
   for (const [index, census] of censuses.entries()) {
+    // Ledger records, and the app process itself where it is one process
+    // (`gpui-app`, which no ledger records).
     const ownedPids = new Set(census.aliveRecords.map((record) => record.pid))
+    for (const row of census.processRows) {
+      if (OWNED_APP_ROLES.has(row.role)) ownedPids.add(row.pid)
+    }
     const roleTotals = {}
     let totalRssKb = 0
     let ownedRssKb = 0

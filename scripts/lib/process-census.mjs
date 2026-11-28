@@ -45,13 +45,55 @@ export function readOwnedProcessLedgers(ledgerPaths, { readFile = readFileSync }
   return records
 }
 
+/**
+ * The process roles of the app under test (`VIDEORC_APP`): `electron` (main,
+ * renderers, GPU) or `gpui`, one native process that draws its own windows
+ * and hosts the preview (`gpui-app`). Electron's roles stay as they were.
+ */
+export function processAppKind(env = process.env) {
+  return env.VIDEORC_APP === 'gpui' ? 'gpui' : 'electron'
+}
+
+/**
+ * Roles that are the app itself and count as owned though no ledger records
+ * them: the GPUI app spawns the backend and records it, never itself.
+ * Electron's main and renderers are measured by role, not as owned, as before.
+ */
+export const OWNED_APP_ROLES = new Set(['gpui-app'])
+
+/**
+ * The app's own processes as the performance and memory gates count them:
+ * each role the app must have running (`minRoleCount`), at most how many
+ * (`maxRoleCount`), and its env-name stem for per-role limits
+ * (`VIDEORC_PERF_MAX_<stem>_RSS_MB`, ..._SLOPE_MB_MIN). Electron: one main,
+ * one to three renderers. GPUI: one app process, which draws its windows and
+ * hosts the preview itself (no renderer, no GPU process).
+ */
+export function appProcessRoleContract(app = processAppKind()) {
+  if (app === 'gpui') {
+    return {
+      appRole: 'gpui-app',
+      minRoleCount: { 'gpui-app': 1 },
+      maxRoleCount: { 'gpui-app': 1 },
+      envStems: { 'gpui-app': 'APP' }
+    }
+  }
+  return {
+    appRole: 'electron-main',
+    minRoleCount: { 'electron-main': 1, 'electron-renderer': 1 },
+    maxRoleCount: { 'electron-main': 1, 'electron-renderer': 3 },
+    envStems: { 'electron-main': 'MAIN', 'electron-renderer': 'RENDERER', 'electron-gpu': 'GPU' }
+  }
+}
+
 export async function collectProcessCensus({
   ledgerPaths,
   pgid,
   rootPid,
   extraPids = [],
   readFile = readFileSync,
-  readProcessTable = readSystemProcessTable
+  readProcessTable = readSystemProcessTable,
+  app = processAppKind()
 }) {
   const records = readOwnedProcessLedgers(ledgerPaths, { readFile })
   const processTable = await readProcessTable()
@@ -68,7 +110,7 @@ export async function collectProcessCensus({
   }
   const processRows = processTable
     .filter((row) => interestingPids.has(row.pid))
-    .map((row) => ({ ...row, role: classifyProcessInTable(row, rowsByPid) }))
+    .map((row) => ({ ...row, role: classifyProcessInTable(row, rowsByPid, { app }) }))
     .sort((a, b) => a.pid - b.pid)
   const aliveRecords = records.filter((record) => rowsByPid.has(record.pid))
   const deadRecords = records.filter((record) => !rowsByPid.has(record.pid))
@@ -80,7 +122,7 @@ export async function collectProcessCensus({
     processRows,
     processGroupRows: processGroupRows.map((row) => ({
       ...row,
-      role: classifyProcessInTable(row, rowsByPid)
+      role: classifyProcessInTable(row, rowsByPid, { app })
     })),
     summary: summarizeRows(processRows)
   }
@@ -524,8 +566,8 @@ export function parseWindowsProcessTable(stdout) {
  * zygote → GPU. Without this the lifecycle gate counted no renderer on Linux
  * (Linux plan 0020).
  */
-export function classifyProcessInTable(row, rowsByPid) {
-  const role = classifyProcess(row)
+export function classifyProcessInTable(row, rowsByPid, { app = processAppKind() } = {}) {
+  const role = classifyProcess(row, { app })
   if (role !== 'electron-child' || !/--type=zygote(?:\s|$)/.test(row.args ?? '')) return role
   const isZygote = (candidate) => /--type=zygote(?:\s|$)/.test(candidate?.args ?? '')
   const parent = rowsByPid.get(row.ppid)
@@ -534,7 +576,7 @@ export function classifyProcessInTable(row, rowsByPid) {
   return isZygote(rowsByPid.get(parent.ppid)) ? 'electron-renderer' : role
 }
 
-export function classifyProcess(row) {
+export function classifyProcess(row, { app = processAppKind() } = {}) {
   if (isExitedProcessRow(row)) {
     return 'exited'
   }
@@ -577,6 +619,16 @@ export function classifyProcess(row) {
   }
   if (lowerText.includes('--type=')) {
     return 'electron-child'
+  }
+  // The GPUI app: `Videorc` (the bundle and the dev build's binary) or
+  // `videorc-app` (cargo's package binary). Never Electron's main.
+  if (
+    app === 'gpui' &&
+    ['videorc', 'videorc.exe', 'videorc-app', 'videorc-app.exe'].some((name) =>
+      executableNames.has(name)
+    )
+  ) {
+    return 'gpui-app'
   }
   if (
     (executableNames.has('electron') &&

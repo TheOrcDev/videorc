@@ -42,6 +42,7 @@ import {
   writePerformanceReport
 } from './lib/performance-contract.mjs'
 import {
+  appProcessRoleContract,
   classifyProcess,
   collectProcessCensus,
   collectProcessResourceDetails,
@@ -77,6 +78,11 @@ const previewMode = process.env.VIDEORC_PERF_PREVIEW_MODE ?? 'detached'
 const expectedTransport = process.env.VIDEORC_PERF_EXPECT_TRANSPORT ?? 'native-surface'
 const expectedBacking = process.env.VIDEORC_PERF_EXPECT_BACKING ?? 'cametal-layer'
 let minPresentFps = numberFromEnv('VIDEORC_PERF_MIN_PRESENT_FPS', 30)
+// A preview presenting every frame of a 30 fps compositor measures just
+// under 30 (the GPUI app, 2026-11-28: the compositor clocked 29.999/s and
+// presented 29.9994/s with 900 frames in 30 s). A floor at the exact rate
+// needs this much clock tolerance; 0.5% is 0.15 fps at 30.
+const PRESENT_RATE_CLOCK_TOLERANCE = 0.005
 let maxIntervalP95Ms = numberFromEnv('VIDEORC_PERF_MAX_INTERVAL_P95_MS', 120)
 let maxStatusFetchesPerSecond = numberFromEnv('VIDEORC_PERF_MAX_STATUS_FETCHES_SEC', 5)
 // The compact frame-ready lane plus 4 Hz bounded diagnostics measures about
@@ -97,18 +103,25 @@ if (packagedExecutable && !existsSync(packagedExecutable)) {
   throw new Error(`Packaged app executable not found: ${packagedExecutable}`)
 }
 
+// The app's own processes (Electron's main and renderers, or the one GPUI
+// process): process-census appProcessRoleContract, by VIDEORC_APP.
+const appRoles = appProcessRoleContract()
+// The GPUI app has no Electron main-process present pump and no dev proof
+// window (its element thread presents into the CAMetalLayer itself): those
+// checks are Electron's, and on GPUI the report names them as not applying.
+const gpuiApp = appRoles.appRole === 'gpui-app'
+const ELECTRON_ONLY_REASON =
+  'Electron only: the GPUI app has no main-process present pump and no proof window'
 const invariantMemoryThresholds = {
   minSamples: samplingInvariants.minSamples,
   minDurationMs: samplingInvariants.minDurationMs,
   minRoleCount: {
     backend: 1,
-    'electron-main': 1,
-    'electron-renderer': 1
+    ...appRoles.minRoleCount
   },
   maxRoleCount: {
     backend: 1,
-    'electron-main': 1,
-    'electron-renderer': 3,
+    ...appRoles.maxRoleCount,
     'native-preview-helper': 1
   }
 }
@@ -126,7 +139,9 @@ const thresholds = {
     'electron-main': numberFromEnv('VIDEORC_PERF_MAX_MAIN_RSS_MB', 768),
     'electron-renderer': numberFromEnv('VIDEORC_PERF_MAX_RENDERER_RSS_MB', 1024),
     'electron-gpu': numberFromEnv('VIDEORC_PERF_MAX_GPU_RSS_MB', 512),
-    'native-preview-helper': numberFromEnv('VIDEORC_PERF_MAX_HELPER_RSS_MB', 512)
+    'native-preview-helper': numberFromEnv('VIDEORC_PERF_MAX_HELPER_RSS_MB', 512),
+    // The GPUI app is Electron's main and renderer in one process.
+    'gpui-app': numberFromEnv('VIDEORC_PERF_MAX_APP_RSS_MB', 1024)
   },
   maxRoleSlopeMbPerMinute: roleThresholds('SLOPE_MB_MIN'),
   maxRoleSecondHalfSlopeMbPerMinute: roleThresholds('SECOND_HALF_SLOPE_MB_MIN'),
@@ -233,10 +248,12 @@ try {
   console.log('isolated state:', stateRoot)
   console.log('smoke server', JSON.stringify(smoke), 'pgid', launched.process.pid)
 
-  for (const attempt of [
-    ['open-tab', { tab: 'studio', waitFor: '[data-videorc-preview-card]' }],
-    ['open-layout-tab', {}]
-  ]) {
+  for (const attempt of gpuiApp
+    ? [['open-tab', { tab: 'studio' }]]
+    : [
+        ['open-tab', { tab: 'studio', waitFor: '[data-videorc-preview-card]' }],
+        ['open-layout-tab', {}]
+      ]) {
     try {
       await smokeCommandRetry(smoke, attempt[0], attempt[1])
       break
@@ -365,7 +382,9 @@ try {
   if (previewMode === 'docked') {
     statusAfter = await smokeCommand(smoke, 'native-preview-surface-status')
   }
-  mainPumpDiagnostics = await smokeCommand(smoke, 'main-present-pump-diagnostics')
+  mainPumpDiagnostics = gpuiApp
+    ? { notApplicable: ELECTRON_ONLY_REASON }
+    : await smokeCommand(smoke, 'main-present-pump-diagnostics')
   measuredWireBytes = previewMode === 'detached' ? detachedMeasurementWireBytes : wireTap.bytes()
   diagnosticStatusAfter = await wireTap.request('diagnostics.stats')
   wireTap.close()
@@ -385,8 +404,10 @@ try {
     backend,
     `/compositor/status?token=${encodeURIComponent(backend.token)}`
   )
-  proofWindowState = await smokeCommand(smoke, 'proof-window-state')
-  proofFallbackState = await smokeCommand(smoke, 'exercise-native-preview-proof-fallback')
+  if (!gpuiApp) {
+    proofWindowState = await smokeCommand(smoke, 'proof-window-state')
+    proofFallbackState = await smokeCommand(smoke, 'exercise-native-preview-proof-fallback')
+  }
   memorySummary = summarizeProcessMemory(samples, {
     tailWindowMs: Math.min(120000, Math.max(sampleIntervalMs, (sampleSeconds * 1000) / 3))
   })
@@ -608,12 +629,13 @@ const truthFailures = [
     actualBacking: pipeline?.backing,
     teardownClean
   }),
-  ...(pipeline && pipeline.proofAnimationSuspended !== true
+  ...(pipeline && !gpuiApp && pipeline.proofAnimationSuspended !== true
     ? [
         `native presentation left proof animation suspended=${String(pipeline.proofAnimationSuspended)}; expected true`
       ]
     : []),
   ...(pipeline &&
+  !gpuiApp &&
   (pipeline.explicitFallback?.exists !== true ||
     pipeline.explicitFallback?.visible !== true ||
     pipeline.explicitFallback?.animationSuspended !== false ||
@@ -701,10 +723,11 @@ console.log(`Native performance ${mode} PASSED`)
 
 function cadenceFailures({ presentFps, framesPerSecond, intervalP95Ms, statusFetchesPerSecond }) {
   const failures = []
-  if (!Number.isFinite(presentFps) || presentFps < minPresentFps) {
+  const rateFloor = minPresentFps * (1 - PRESENT_RATE_CLOCK_TOLERANCE)
+  if (!Number.isFinite(presentFps) || presentFps < rateFloor) {
     failures.push(`present FPS ${presentFps ?? 'missing'} was below ${minPresentFps}`)
   }
-  if (!Number.isFinite(framesPerSecond) || framesPerSecond < minPresentFps) {
+  if (!Number.isFinite(framesPerSecond) || framesPerSecond < rateFloor) {
     failures.push(
       `measured frame delta rate ${framesPerSecond ?? 'missing'}fps was below ${minPresentFps}`
     )
@@ -1142,7 +1165,8 @@ function roleThresholds(suffix) {
     'electron-main': 'MAIN',
     'electron-renderer': 'RENDERER',
     'electron-gpu': 'GPU',
-    'native-preview-helper': 'HELPER'
+    'native-preview-helper': 'HELPER',
+    ...appProcessRoleContract('gpui').envStems
   }
   return Object.fromEntries(
     Object.entries(mapping)
