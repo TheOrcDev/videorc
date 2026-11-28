@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
 import {
+  appProcessRoleContract,
   classifyProcess,
   collectProcessCensus,
   collectProcessResourceDetails,
@@ -359,7 +360,8 @@ export function summarizeProcessCpu(samples) {
 export function evaluateProcessEnduranceEvidence(
   evidence,
   {
-    requiredRoles = ['backend', 'electron-main', 'electron-renderer'],
+    // Electron: backend, main, renderer; GPUI: backend and the app process.
+    requiredRoles = ['backend', ...Object.keys(appProcessRoleContract().minRoleCount)],
     minimumSamples = 2,
     minimumDurationMs = 0
   } = {}

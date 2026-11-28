@@ -83,7 +83,8 @@ const metrics = [
   'ownedRssMb',
   'backendRssMb',
   // Electron's renderer; the GPUI app draws in its own process, which the
-  // census labels `electron-main` (it names the app process by its name).
+  // census labels `gpui-app` (process-census's role model by VIDEORC_APP;
+  // it counts as owned too).
   ...(gpuiApp ? ['appRssMb'] : ['rendererRssMb'])
 ]
 const rows = metrics.map((metric) => {
@@ -247,7 +248,7 @@ async function measureMemory(root) {
     ownedRssMb: summary.maxOwnedRssKb / 1024,
     backendRssMb: roleMb('backend'),
     rendererRssMb: roleMb('renderer'),
-    appRssMb: roleMb('electron-main')
+    appRssMb: roleMb('gpui-app')
   }
 }
 

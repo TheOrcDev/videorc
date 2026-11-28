@@ -622,8 +622,15 @@ impl Preview {
             .is_some_and(|native| native.floating.is_some());
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let floating_open = false;
+        // Electron's `nativeOwnsPlacement`: the native surface is placed by
+        // the app itself, in the layout pass, never from a renderer's report.
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let native_owns_placement = self.native.is_some();
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let native_owns_placement = false;
         serde_json::json!({
             "mode": self.mode.as_str(),
+            "nativeOwnsPlacement": native_owns_placement,
             "phase": self.phase.as_str(),
             "nativeReady": self.native_ready(),
             "dockedShown": self.docked_shown,
@@ -694,6 +701,13 @@ impl Preview {
         if let Some(native) = self.native.as_ref() {
             let telemetry = native.element.telemetry();
             let status = native.element.status();
+            // The surface bounds last sent the backend: where it is on the
+            // screen (top-left points), its scale, and whether it shows.
+            let sent = native
+                .element
+                .last_bounds()
+                .and_then(|bounds| serde_json::to_value(bounds).ok());
+            let on_screen = |key: &str| sent.as_ref().and_then(|sent| sent.get(key)).cloned();
             #[cfg(target_os = "macos")]
             let transport = serde_json::json!("native-surface");
             #[cfg(target_os = "linux")]
@@ -709,11 +723,18 @@ impl Preview {
                     status.phase.as_str()
                 },
                 "phase": status.phase.as_str(),
+                // The slot in its window's points, with Electron's surface
+                // keys from the bounds sent: `screenX`/`screenY`,
+                // `scaleFactor`, `visible`.
                 "bounds": self.smoke_slot().map(|slot| serde_json::json!({
                     "x": f32::from(slot.origin.x),
                     "y": f32::from(slot.origin.y),
                     "width": f32::from(slot.size.width),
                     "height": f32::from(slot.size.height),
+                    "screenX": on_screen("screenX"),
+                    "screenY": on_screen("screenY"),
+                    "scaleFactor": on_screen("scaleFactor"),
+                    "visible": on_screen("visible"),
                 })),
                 "presentedFrameId": telemetry.presented_frame_id,
                 "presented": telemetry.presented,
@@ -721,6 +742,11 @@ impl Preview {
                 "frameWidth": telemetry.frame_width,
                 "frameHeight": telemetry.frame_height,
                 "presentedSceneRevision": telemetry.presented_scene_revision,
+                // Electron's cadence keys: frames committed per second and
+                // the commit interval's p95/p99 over the telemetry window.
+                "presentFps": telemetry.present_fps(),
+                "intervalP95Ms": telemetry.commit_interval().p95,
+                "intervalP99Ms": telemetry.commit_interval().p99,
                 // Why frames didn't show, counted (pump diagnostics).
                 "skipped": telemetry.skipped,
                 "refused": telemetry.refused,

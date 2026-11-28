@@ -13,6 +13,8 @@ import {
   ownedProcessLedgerPaths,
   parseProcessTable,
   parseWindowsProcessTable,
+  processAppKind,
+  appProcessRoleContract,
   processGroupTreeRows,
   processTreeRows,
   pruneDeadOwnedProcessRecords,
@@ -151,6 +153,41 @@ test('classifyProcess uses the exact argv executable when macOS truncates comm',
     }),
     'native-preview-helper'
   )
+})
+
+test('classifyProcess names the GPUI app gpui-app, never electron-main', () => {
+  const gpuiRows = [
+    { command: '/repo/target/debug/Videorc', args: '/repo/target/debug/Videorc' },
+    { command: '/repo/target/debug/videorc-app', args: '/repo/target/debug/videorc-app' },
+    {
+      command: '/Applications/Videorc.app/Contents/MacOS/Videorc',
+      args: '/Applications/Videorc.app/Contents/MacOS/Videorc'
+    }
+  ]
+  for (const row of gpuiRows) {
+    assert.equal(classifyProcess(row, { app: 'gpui' }), 'gpui-app', row.command)
+  }
+  // Electron's packaged main keeps its role.
+  assert.equal(classifyProcess(gpuiRows[2], { app: 'electron' }), 'electron-main')
+  // The backend is the backend under either app.
+  assert.equal(
+    classifyProcess(
+      { command: '/repo/target/debug/videorc-backend', args: '/repo/target/debug/videorc-backend' },
+      { app: 'gpui' }
+    ),
+    'backend'
+  )
+  assert.equal(processAppKind({ VIDEORC_APP: 'gpui' }), 'gpui')
+  assert.equal(processAppKind({}), 'electron')
+})
+
+test('appProcessRoleContract requires one GPUI app process and no Electron roles', () => {
+  const gpui = appProcessRoleContract('gpui')
+  assert.deepEqual(gpui.minRoleCount, { 'gpui-app': 1 })
+  assert.deepEqual(gpui.maxRoleCount, { 'gpui-app': 1 })
+  const electron = appProcessRoleContract('electron')
+  assert.deepEqual(electron.minRoleCount, { 'electron-main': 1, 'electron-renderer': 1 })
+  assert.equal(electron.maxRoleCount['electron-renderer'], 3)
 })
 
 test('classifyProcess counts electron-vite under the Videorc workspace as tooling', () => {

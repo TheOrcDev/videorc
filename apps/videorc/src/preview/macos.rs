@@ -135,9 +135,13 @@ pub fn geometry_of(window: &Window, slot: Bounds<Pixels>, cx: &App) -> WindowGeo
         .display(cx)
         .map(|display| f64::from(display.bounds().size.height))
         .unwrap_or(0.0);
+    // `bounds` is the window's frame; a title bar above the content (the
+    // Preview window's) is the frame's height the viewport doesn't have.
+    // Without it the floating surface's screen rect sat a title bar too high.
+    let title_bar = (f64::from(bounds.size.height) - f64::from(viewport.height)).max(0.0);
     WindowGeometry {
         screen_x: f64::from(bounds.origin.x) + f64::from(slot.origin.x),
-        screen_y: f64::from(bounds.origin.y) + f64::from(slot.origin.y),
+        screen_y: f64::from(bounds.origin.y) + title_bar + f64::from(slot.origin.y),
         content_width: f64::from(viewport.width),
         content_height: f64::from(viewport.height),
         screen_height,

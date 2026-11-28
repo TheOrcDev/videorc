@@ -74,6 +74,27 @@ test('summarizeProcessMemory tracks peak process tree, owned RSS, and role total
   assert.equal(summary.roles['native-preview-helper'].slopeRssKbPerMinute, 40_000)
 })
 
+test('summarizeProcessMemory counts the GPUI app as owned though no ledger records it', () => {
+  const summary = summarizeProcessMemory([
+    census({
+      sampledAtMs: 0,
+      alive: [10],
+      rows: [row(10, 'backend', 20_000), row(11, 'gpui-app', 300_000)]
+    })
+  ])
+  assert.equal(summary.maxOwnedRssKb, 320_000)
+  assert.equal(summary.roles['gpui-app'].maxCount, 1)
+  // Electron's main stays measured by role only, as before.
+  const electron = summarizeProcessMemory([
+    census({
+      sampledAtMs: 0,
+      alive: [10],
+      rows: [row(10, 'backend', 20_000), row(11, 'electron-main', 300_000)]
+    })
+  ])
+  assert.equal(electron.maxOwnedRssKb, 20_000)
+})
+
 test('evaluateProcessMemoryGate reports breached total, owned, and role thresholds', () => {
   const failures = evaluateProcessMemoryGate(
     {

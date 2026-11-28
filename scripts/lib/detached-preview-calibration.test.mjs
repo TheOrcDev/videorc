@@ -33,6 +33,30 @@ describe('detached preview calibration', () => {
     ])
   })
 
+  it("reads the GPUI app's video rect, not its whole window, and catches a title bar offset", () => {
+    // GPUI: `contentBounds` is the window with its title bar (960x572, no
+    // origin); `videoBounds` is the video under it.
+    const gpui = (patch = {}) =>
+      windowState({
+        contentBounds: { width: 960, height: 572 },
+        videoBounds: bounds({ y: 223 }),
+        ...patch
+      })
+    const aligned = inspectDetachedPreviewCalibrationSample(
+      gpui(),
+      surfaceStatus({ bounds: nativeBounds({ x: 0, y: 0, screenY: 223 }) })
+    )
+    assert.equal(aligned.ready, true, aligned.failures.join('; '))
+    // The surface's rect a title bar too high (#2580's sibling, 2026-11-28).
+    const high = inspectDetachedPreviewCalibrationSample(
+      gpui(),
+      surfaceStatus({ bounds: nativeBounds({ x: 0, y: 0, screenY: 191 }) })
+    )
+    assert.deepEqual(high.failures, [
+      'native surface origin 100,191 did not match preview content 100,223'
+    ])
+  })
+
   it('rejects hidden or non-native surfaces', () => {
     const inspection = inspectDetachedPreviewCalibrationSample(
       windowState({ visible: false }),
