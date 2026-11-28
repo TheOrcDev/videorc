@@ -501,6 +501,7 @@ async function measureSwitch(renderer, { from, to, index }) {
   row.baseline = compactCompositor(baseline)
   row.trace = trace
   if (!row.ok) {
+    if (renderer.dump) row.gpuiDump = await renderer.dump(`switch-${index + 1}-to-${to.key}`)
     row.lastScreenStatus = lastScreen
     row.lastCompositorStatus = compactCompositor(lastCompositor)
     const compactLibrary = (current) => ({
@@ -1036,7 +1037,25 @@ function createGpuiDriver(smoke) {
       if (done) return { ok: true, at: Date.now() }
       await sleep(25)
     }
-    return { ok: false, error: 'the Studio never settled the switch', at: null }
+    const last = await state()
+    const statePath = join(outputDirectory, `gpui-switch-timeout-${Date.now()}.json`)
+    writeFileSync(
+      statePath,
+      JSON.stringify(
+        {
+          waitingFor: switching,
+          last,
+          screen: await request(ws, timeoutMs, 'preview.screen.status')
+        },
+        null,
+        2
+      )
+    )
+    return {
+      ok: false,
+      error: `the Studio never settled the switch (state in ${statePath})`,
+      at: null
+    }
   }
   return {
     evaluate: () => {
@@ -1045,6 +1064,23 @@ function createGpuiDriver(smoke) {
     configureVideo,
     clipsOff,
     state,
+    // A failed switch's evidence: the Studio's whole scene state (every
+    // saved scene's sources) and what the capture shows.
+    dump: async (tag) => {
+      const path = join(outputDirectory, `gpui-${tag}-${Date.now()}.json`)
+      writeFileSync(
+        path,
+        JSON.stringify(
+          {
+            scenes: await command('studio-scenes-state'),
+            screen: await request(ws, timeoutMs, 'preview.screen.status')
+          },
+          null,
+          2
+        )
+      )
+      return path
+    },
     waitFor,
     applyLayout,
     chooseCameraOff,
