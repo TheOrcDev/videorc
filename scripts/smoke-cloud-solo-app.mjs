@@ -16,7 +16,14 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createServer as createTlsServer } from 'node:tls'
 
-import { launchDevApp, prebuildDevBackend, repoRoot, smokeAppEnv } from './lib/app-launcher.mjs'
+import {
+  launchDevApp,
+  prebuildDevBackend,
+  repoRoot,
+  smokeAppEnv,
+  smokeAppIsGpui
+} from './lib/app-launcher.mjs'
+import { requireAppRunLock } from './lib/app-run-lock.mjs'
 import {
   classifyFeedHandshake,
   dropTimings,
@@ -175,8 +182,9 @@ const mediamtxPath = process.env.VIDEORC_SMOKE_MEDIAMTX_PATH ?? 'mediamtx'
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-cloud-solo-${Date.now()}`)
 )
+const gpuiApp = smokeAppIsGpui()
 const stateRoot = join(outputDirectory, 'app-state')
-const appDataDir = join(stateRoot, 'app-data')
+const appDataDir = join(stateRoot, gpuiApp ? 'user-data' : 'app-data')
 const userDataDir = join(stateRoot, 'user-data')
 const nodeRoot = join(outputDirectory, 'node')
 const reportPath = join(outputDirectory, 'cloud-solo-report.json')
@@ -243,6 +251,11 @@ try {
   //     for as long as it compiled. Every launch below builds asynchronously
   //     first (a no-op unless a source changed) and skips that one.
   await prebuildBackendOrThrow(process.env)
+  // Built; from here the run drives the app, and only one such run at a time.
+  await requireAppRunLock({
+    lane: process.env.VIDEORC_LANE || 'cloud-solo',
+    onWait: (owner) => log(`waiting for the app-run lock held by ${owner?.lane ?? 'another run'}`)
+  })
 
   // 2. Ports: every listener is per run, so a running OBS or MediaMTX cannot collide.
   const ports = {
@@ -1645,6 +1658,14 @@ async function launchApp(env, attempt) {
 
 /** The dev backend's prebuild without blocking this process (lane 3 F4). */
 async function prebuildBackendOrThrow(env, onLine = log) {
+  const merged = { ...process.env, ...env }
+  if (
+    merged.VIDEORC_SMOKE_SKIP_PREBUILD === '1' ||
+    (merged.VIDEORC_APP === 'gpui' && merged.VIDEORC_GPUI_APP_BINARY)
+  ) {
+    onLine('[smoke:prebuild] skipped: prebuilt GPUI app or VIDEORC_SMOKE_SKIP_PREBUILD=1')
+    return
+  }
   const failure = await prebuildDevBackend({ env, onLine })
   if (failure) throw new Error(failure)
 }
