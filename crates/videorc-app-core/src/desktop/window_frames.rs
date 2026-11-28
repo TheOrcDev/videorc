@@ -150,6 +150,66 @@ pub fn clamp_frame_to_work_area(frame: Rect, displays: &[Display]) -> Rect {
     }
 }
 
+/// Clamp a window's minimum size to `work_area` so high display scaling (for
+/// example 225% on 1440p, leaving ~600 logical px of work-area height) never
+/// lets the OS minimum-size constraint push a window larger than the screen.
+pub fn clamp_min_size_to_work_area(min_size: (f64, f64), work_area: Rect) -> (f64, f64) {
+    (
+        min_size.0.min(work_area.width).max(1.0),
+        min_size.1.min(work_area.height).max(1.0),
+    )
+}
+
+/// Effective minimum size for a window at `frame`, clamped to the matching
+/// display's work area (or kept as-is when no display is known).
+pub fn min_size_for_frame(frame: Rect, min_size: (f64, f64), displays: &[Display]) -> (f64, f64) {
+    let Some(display) = display_matching(&frame, displays) else {
+        return min_size;
+    };
+    clamp_min_size_to_work_area(min_size, display.work_area)
+}
+
+/// Center a newly opened window inside `work_area` (minus the taskbar/dock),
+/// keeping at least `min_size` whenever the work area fits it and clamping to
+/// `work_area` at every display scale.
+pub fn centered_frame_in_work_area(
+    desired: (f64, f64),
+    min_size: (f64, f64),
+    work_area: Rect,
+) -> Rect {
+    let (min_w, min_h) = clamp_min_size_to_work_area(min_size, work_area);
+    let width = desired.0.max(min_w).min(work_area.width).max(1.0);
+    let height = desired.1.max(min_h).min(work_area.height).max(1.0);
+    Rect {
+        x: work_area.x + ((work_area.width - width) / 2.0).max(0.0),
+        y: work_area.y + ((work_area.height - height) / 2.0).max(0.0),
+        width,
+        height,
+    }
+}
+
+/// Clamp a restored frame to the matching display's work area while preserving
+/// at least `min_size` whenever the work area has room.
+pub fn clamp_restored_frame_to_work_area(
+    frame: Rect,
+    min_size: (f64, f64),
+    displays: &[Display],
+) -> Rect {
+    let Some(display) = display_matching(&frame, displays) else {
+        return frame;
+    };
+    let area = display.work_area;
+    let (min_w, min_h) = clamp_min_size_to_work_area(min_size, area);
+    let width = frame.width.max(min_w).min(area.width).max(1.0);
+    let height = frame.height.max(min_h).min(area.height).max(1.0);
+    Rect {
+        width,
+        height,
+        x: frame.x.max(area.x).min(area.right() - width),
+        y: frame.y.max(area.y).min(area.bottom() - height),
+    }
+}
+
 /// `conformPreviewWindowToAspect`: the floating Preview's content size for
 /// the output's `ratio` (width / height). It keeps the width and derives
 /// the video's height (plus `bar`, the strip above the video inside the
@@ -504,5 +564,63 @@ mod tests {
             "VIDEORC_SMOKE_OUTPUT_DIR",
             ""
         )])));
+    }
+
+    #[test]
+    fn initial_and_restored_frames_clamp_to_work_area_at_high_scale_while_keeping_min_size() {
+        // 3440x1440 at 225% scale: 1528.89 x 640 logical px, minus 40 px taskbar = 600 px tall.
+        let high_scale_work = Rect::new(0.0, 0.0, 1528.0, 600.0);
+        let main_desired = (1180.0, 780.0);
+        let main_min = (960.0, 660.0);
+
+        let initial = centered_frame_in_work_area(main_desired, main_min, high_scale_work);
+        assert_eq!(initial.width, 1180.0);
+        assert_eq!(initial.height, 600.0);
+        assert!(initial.y >= high_scale_work.y);
+        assert!(initial.bottom() <= high_scale_work.bottom());
+        assert_eq!(
+            clamp_min_size_to_work_area(main_min, high_scale_work),
+            (960.0, 600.0)
+        );
+
+        // Normal 100% display keeps the full desired size and minimum size.
+        let normal_work = Rect::new(0.0, 0.0, 1920.0, 1040.0);
+        let normal_initial = centered_frame_in_work_area(main_desired, main_min, normal_work);
+        assert_eq!(normal_initial.width, 1180.0);
+        assert_eq!(normal_initial.height, 780.0);
+        assert_eq!(
+            clamp_min_size_to_work_area(main_min, normal_work),
+            (960.0, 660.0)
+        );
+
+        // Restored frame saved taller than the 225% work area clamps to work area,
+        // and a restored frame smaller than min_size expands up to min_size when it fits.
+        let high_display = [Display {
+            bounds: Rect::new(0.0, 0.0, 1528.0, 640.0),
+            work_area: high_scale_work,
+        }];
+        let restored_tall = clamp_restored_frame_to_work_area(
+            Rect::new(100.0, 20.0, 1180.0, 780.0),
+            main_min,
+            &high_display,
+        );
+        assert_eq!(restored_tall.height, 600.0);
+        assert_eq!(restored_tall.y, 0.0);
+        assert_eq!(
+            min_size_for_frame(restored_tall, main_min, &high_display),
+            (960.0, 600.0)
+        );
+
+        let normal_display = [Display {
+            bounds: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            work_area: normal_work,
+        }];
+        let restored_small = clamp_restored_frame_to_work_area(
+            Rect::new(50.0, 50.0, 400.0, 300.0),
+            main_min,
+            &normal_display,
+        );
+        assert_eq!(restored_small.width, 960.0);
+        assert_eq!(restored_small.height, 660.0);
     }
 }

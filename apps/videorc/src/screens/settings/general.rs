@@ -361,8 +361,7 @@ impl SettingsScreen {
         };
         // macOS sets the windows' appearance; Linux can't, so the kit reads
         // the app's own choice first on every platform (`AppearanceOverride`).
-        cx.set_window_appearance(appearance);
-        cx.set_global(videorc_kit::theme::AppearanceOverride(appearance));
-        cx.refresh_windows();
+        // Windows also updates DWM immersive dark mode on every open title bar.
+        crate::platform::apply_window_appearance(appearance, cx);
     }
 }

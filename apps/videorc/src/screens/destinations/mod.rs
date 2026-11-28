@@ -954,7 +954,7 @@ impl DestinationsPanel {
                             row = row.child(
                                 Button::new(format!("dest-disconnect-{}", dest.id))
                                     .label(page_copy::DISCONNECT)
-                                    .variant(ButtonVariant::Ghost)
+                                    .variant(ButtonVariant::Outline)
                                     .disabled(dest.disabled)
                                     .on_click({
                                         let entity = entity.clone();
@@ -1193,7 +1193,7 @@ impl DestinationsPanel {
                         detail = detail.child(
                             Button::new(format!("dest-restore-key-{}", dest.id))
                                 .label(restore.clone())
-                                .variant(ButtonVariant::Ghost)
+                                .variant(ButtonVariant::Outline)
                                 .disabled(dest.disabled)
                                 .on_click(move |_, _, cx| {
                                     entity.update(cx, |this, _| this.restore_manual_key(id.clone()))

@@ -423,7 +423,7 @@ function StreamCheckRow({
             </span>
             <Button
               size="xs"
-              variant="ghost"
+              variant="outline"
               onClick={() => {
                 void onRetry().catch(() => {})
               }}

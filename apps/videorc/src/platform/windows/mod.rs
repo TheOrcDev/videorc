@@ -60,6 +60,33 @@ fn hwnd(window: &Window) -> OsResult<HWND> {
     Ok(handle.hwnd.get() as HWND)
 }
 
+/// Set Windows' DWM immersive dark-mode attribute on `window`'s caption bar so
+/// Light/Dark/System theme changes keep every native title bar aligned with
+/// Videorc's appearance instead of sticking to Windows' OS theme.
+pub fn set_title_bar_dark_mode(window: &Window, dark: bool) -> OsResult<()> {
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
+    use windows_sys::core::BOOL;
+    let hwnd = hwnd(window)?;
+    let value: BOOL = i32::from(dark);
+    // SAFETY: live HWND from this process's window; `value` is a stack `BOOL`
+    // matching `DWMWA_USE_IMMERSIVE_DARK_MODE`.
+    let hr = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            (&raw const value).cast(),
+            std::mem::size_of::<BOOL>() as u32,
+        )
+    };
+    if hr < 0 {
+        return Err(format!(
+            "DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE, {dark}) failed: 0x{:08x}",
+            hr as u32
+        ));
+    }
+    Ok(())
+}
+
 /// Use native monitor coordinates for remote placement, including mixed-DPI
 /// desktops. GPUI's per-display logical coordinates cannot be passed directly
 /// to SetWindowPos. IDs and enumeration order still come from GPUI.

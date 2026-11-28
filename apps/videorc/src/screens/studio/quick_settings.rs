@@ -562,10 +562,12 @@ impl QuickSettingsSection {
             selected,
             frame,
             t,
-            move |choice, window, cx| {
+            move |choice, _, cx| {
                 let _ = choose_entity.update(cx, |section, cx| {
+                    // Stays open, as in Electron: "What viewers see" shows the
+                    // new pick at once and a second tile can follow.
                     section.choose_background(choice);
-                    section.set_popover_open(false, window, cx);
+                    cx.notify();
                 });
             },
             move |window, cx| {
