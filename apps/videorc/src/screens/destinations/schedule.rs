@@ -1,14 +1,14 @@
 //! Schedule / Edit dialog (`ScheduleStreamDialog`, P860–P876).
 
-use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*};
+use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*, px};
 use serde_json::json;
 use videorc_app_core::livestream::scheduled::{self, Event};
 use videorc_app_core::livestream::scheduled_copy as copy;
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle, DialogSize};
+use videorc_kit::field::Field as KitField;
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::select::Select;
-use videorc_kit::settings_row::{SettingsGroup, SettingsRow};
 use videorc_kit::textarea::{Textarea, TextareaState};
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
@@ -139,59 +139,65 @@ impl DestinationsPanel {
             .map(|a| (a.account_id.clone(), a.account_label.clone()))
             .collect();
 
-        let mut body = SettingsGroup::new().row(
-            SettingsRow::new(
-                "schedule-account",
-                if editor.provider == "x" {
+        // Electron's `ScheduleStreamDialog` is a FieldGroup of plain Fields:
+        // each label above its control. As SettingsRows the inputs took the
+        // dialog's width and squeezed their labels to one letter a line (the
+        // Add command dialog's bug, #2563).
+        let body = div().flex().flex_col().gap(px(16.)).child(
+            KitField::new("schedule-account")
+                .label(if editor.provider == "x" {
                     "Account"
                 } else {
                     "Channel"
-                },
-            )
-            .child({
-                let mut select = Select::new("schedule-account")
-                    .accessibility_label("Channel")
-                    .disabled(editor.event_id.is_some() || accounts.is_empty())
-                    .width(220.0)
-                    .value(Some(SharedString::from(editor.account_id.clone())))
-                    .on_change({
-                        let entity = entity.clone();
-                        move |value: SharedString, _, cx| {
-                            entity.update(cx, |this, cx| {
-                                if let Some(editor) = this.schedule.as_mut() {
-                                    editor.account_id = value.to_string();
-                                }
-                                cx.notify();
-                            });
-                        }
-                    });
-                for (id, account_label) in &accounts {
-                    select = select.option(id.clone(), account_label.clone());
-                }
-                select
-            }),
+                })
+                .child({
+                    let mut select = Select::new("schedule-account")
+                        .accessibility_label("Channel")
+                        .disabled(editor.event_id.is_some() || accounts.is_empty())
+                        .width(220.0)
+                        .value(Some(SharedString::from(editor.account_id.clone())))
+                        .on_change({
+                            let entity = entity.clone();
+                            move |value: SharedString, _, cx| {
+                                entity.update(cx, |this, cx| {
+                                    if let Some(editor) = this.schedule.as_mut() {
+                                        editor.account_id = value.to_string();
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                        });
+                    for (id, account_label) in &accounts {
+                        select = select.option(id.clone(), account_label.clone());
+                    }
+                    select
+                }),
         );
-        body = body
-            .row(
-                SettingsRow::new("schedule-title", "Title").child(
+        let body = body
+            .child(
+                KitField::new("schedule-title").label("Title").child(
                     Input::new("schedule-title-input", &editor.title)
                         .accessibility_label("Title")
                         .disabled(editor.saving),
                 ),
             )
-            .row(
-                SettingsRow::new("schedule-description", "Description").child(
-                    Textarea::new("schedule-description-input", &editor.description)
-                        .accessibility_label("Description")
-                        .disabled(editor.saving),
-                ),
+            .child(
+                KitField::new("schedule-description")
+                    .label("Description")
+                    .child(
+                        Textarea::new("schedule-description-input", &editor.description)
+                            .accessibility_label("Description")
+                            .disabled(editor.saving),
+                    ),
             )
-            .row(
-                SettingsRow::new("schedule-start", "Date and time").child(
-                    Input::new("schedule-start-input", &editor.start)
-                        .accessibility_label("Date and time")
-                        .disabled(editor.saving),
-                ),
+            .child(
+                KitField::new("schedule-start")
+                    .label("Date and time")
+                    .child(
+                        Input::new("schedule-start-input", &editor.start)
+                            .accessibility_label("Date and time")
+                            .disabled(editor.saving),
+                    ),
             );
 
         let mut dialog = Dialog::new("schedule-stream", &editor.dialog, heading)
