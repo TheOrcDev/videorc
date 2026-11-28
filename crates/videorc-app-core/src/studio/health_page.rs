@@ -709,6 +709,19 @@ fn preview_state<'a>(live: Option<&'a str>, surface: Option<&'a str>) -> &'a str
     }
 }
 
+/// On Windows GPUI, until S2.3b lands the Windows preview presenter (D12), no
+/// preview element starts and `native_preview_surface_enabled` is false. That
+/// expected absence is shown neutrally and never counted as a Health problem.
+fn windows_preview_not_available_yet(input: &PreviewInputs) -> bool {
+    input.platform == "win32"
+        && !input.native_preview_surface_enabled
+        && matches!(
+            input.stats.text("previewTransport"),
+            None | Some("unavailable")
+        )
+        && input.live_state() == "unavailable"
+}
+
 /// `previewSpeedCheck`: why the preview isn't smooth, if it isn't.
 pub fn preview_speed_check(input: &PreviewInputs) -> CheckWords {
     let stats = input.stats;
@@ -726,6 +739,9 @@ pub fn preview_speed_check(input: &PreviewInputs) -> CheckWords {
     }
     if check_screen && input.screen_state() == "failed" {
         return words("Screen failed", Tone::Error);
+    }
+    if windows_preview_not_available_yet(input) {
+        return words("Not on Windows yet", Tone::Neutral);
     }
     let transport = stats.text("previewTransport");
     let unavailable = transport == Some("unavailable");
@@ -976,11 +992,18 @@ pub fn health_checks(
         check(
             "preview",
             "Preview",
-            preview_check(
-                input.live_state(),
-                input.camera_state(),
-                input.screen_state(),
-            ),
+            if windows_preview_not_available_yet(input)
+                && input.camera_state() != "permission-needed"
+                && input.screen_state() != "permission-needed"
+            {
+                words("Not on Windows yet", Tone::Neutral)
+            } else {
+                preview_check(
+                    input.live_state(),
+                    input.camera_state(),
+                    input.screen_state(),
+                )
+            },
         ),
         check("preview-speed", "Preview speed", preview_speed_check(input)),
         check(

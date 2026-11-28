@@ -6,7 +6,8 @@
 //! `<audio>` element, and the browser's echo cancellation kept them out of
 //! the host's microphone. Here the backend decodes those tracks
 //! (`NativeAudioStream`, 48 kHz mono), mixes them every 10 ms and plays the
-//! mix through S1.3b's CoreAudio output (`sound_monitor::DeviceOutput`).
+//! mix through S1.3b's device output (`sound_monitor::DeviceOutput`:
+//! CoreAudio on macOS, PipeWire on Linux).
 //! Each mixed chunk is the far end of LiveKit's own libwebrtc
 //! `AudioProcessingModule` (`process_reverse_stream`); every room microphone
 //! frame (its own tap or the session's, `room_media`) passes through the
@@ -133,7 +134,7 @@ pub(crate) async fn run(_state: AppState, room: Arc<Room>, mut done: oneshot::Re
         true, false, true, false,
     )));
     *lock(&APM) = Some(apm.clone());
-    // The played mix, interleaved stereo, read by CoreAudio's thread.
+    // The played mix, interleaved stereo, read by the output device's thread.
     let output_ring: Buffer = Arc::new(StdMutex::new(VecDeque::new()));
     let mut output: Option<crate::sound_monitor::DeviceOutput> = None;
     let mut output_failed = false;

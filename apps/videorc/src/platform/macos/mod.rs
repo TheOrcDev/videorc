@@ -22,6 +22,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use videorc_app_core::desktop::camera_extension::CameraExtensionBinding;
 use videorc_app_core::desktop::permissions::{
     MediaAccessPermission, MediaAccessStatus, MediaPane, PermissionFuture,
+    screen_status_from_preflight,
 };
 
 use super::{OsResult, Platform, ScreenFrame, SmokeWindowLevel};
@@ -55,6 +56,20 @@ pub fn date_style() -> Option<videorc_app_core::format::DateStyle> {
         am: formatter.AMSymbol().to_string(),
         pm: formatter.PMSymbol().to_string(),
     })
+}
+
+/// The app's own note that it has asked for Screen & System Audio Recording
+/// (the bundle's preferences; macOS has no call for "was I asked").
+const SCREEN_ASKED_KEY: &str = "videorcScreenRecordingAsked";
+
+fn screen_asked_before() -> bool {
+    objc2_foundation::NSUserDefaults::standardUserDefaults()
+        .boolForKey(&NSString::from_str(SCREEN_ASKED_KEY))
+}
+
+fn remember_screen_asked() {
+    objc2_foundation::NSUserDefaults::standardUserDefaults()
+        .setBool_forKey(true, &NSString::from_str(SCREEN_ASKED_KEY));
 }
 
 /// `NSFloatingWindowLevel`, what Electron's `setAlwaysOnTop(true)` uses.
@@ -446,15 +461,15 @@ impl Platform for MacOs {
 
     /// `AVCaptureDevice.authorizationStatus` for the camera and the
     /// microphone; `CGPreflightScreenCaptureAccess` for the screen, which
-    /// answers granted or denied only (a never-asked bundle reads denied, as
-    /// Electron's does).
+    /// answers granted or not only, so the app's own note that it has asked
+    /// tells a never-asked bundle (not determined: the request is made)
+    /// from a refused one (denied).
     fn media_access(&self, permission: MediaAccessPermission) -> OsResult<MediaAccessStatus> {
         if permission == MediaAccessPermission::Screen {
-            return Ok(if objc2_core_graphics::CGPreflightScreenCaptureAccess() {
-                MediaAccessStatus::Granted
-            } else {
-                MediaAccessStatus::Denied
-            });
+            return Ok(screen_status_from_preflight(
+                objc2_core_graphics::CGPreflightScreenCaptureAccess(),
+                screen_asked_before(),
+            ));
         }
         let media_type = media_type(permission)
             .ok_or_else(|| format!("AVFoundation has no media type for {}", permission.as_str()))?;
@@ -511,6 +526,9 @@ impl Platform for MacOs {
     /// Audio Recording and shows macOS's prompt. Its answer is not the
     /// grant (that lands in System Settings); the core re-reads the status.
     fn request_screen_access(&self) -> OsResult<()> {
+        // Remembered first: from now on "not granted" means the user said
+        // no, not that nobody asked (`screen_status_from_preflight`).
+        remember_screen_asked();
         let _ = objc2_core_graphics::CGRequestScreenCaptureAccess();
         Ok(())
     }

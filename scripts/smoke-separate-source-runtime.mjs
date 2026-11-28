@@ -24,6 +24,7 @@ import {
   evaluateAudioVideoEvents,
   evaluateEventAlignment,
   evaluateFrameMarkers,
+  readCompositorTiming,
   videoTransitionTimes
 } from './lib/separate-source-runtime-gates.mjs'
 
@@ -270,6 +271,7 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of lifecycle
         console.log(
           `separate-source-runtime: ${[...shedRoles].join(', ')} shed at ${shedEndSeconds.toFixed(3)}s; judged on their own end`
         )
+      const compositorTiming = readCompositorTiming(evidence)
       for (const extension of ['mkv', 'mp4']) {
         const combined = manifest.combinedPath.replace(/\.mkv$/, `.${extension}`)
         await run(process.execPath, [
@@ -536,7 +538,8 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of lifecycle
             fps,
             offsetMs,
             endSeconds: roleEndSeconds + Math.min(0, offsetMs / 1000),
-            measurement: audioEdgeDiagnostics[role][source]
+            measurement: audioEdgeDiagnostics[role][source],
+            compositorTiming
           })
           if (!av.pass) throw new Error(`${extension} ${role}/${source}: ${av.failures.join('; ')}`)
           const envelope = evaluateSourceEnvelope(markers[role], tones[role][source], {

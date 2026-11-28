@@ -41,6 +41,12 @@ import {
 } from './lib/fake-cloud-web.mjs'
 import { evaluateTapAfterLegsEnd, startRtmpTap } from './lib/rtmp-tap.mjs'
 import { roomFixtureDevicesSource } from './lib/room-fixture-devices.mjs'
+import {
+  linuxRoomMicrophoneId,
+  linuxRoomToneArgs,
+  loadLinuxRoomMicrophone,
+  unloadLinuxRoomMicrophone
+} from './lib/room-linux-microphone.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -152,8 +158,19 @@ if (gpuiApp && hostMode !== 'backend') {
   throw new Error('The GPUI talk-show smoke requires the backend host seat.')
 }
 const backendHosts = hostMode === 'backend'
-/** The synthetic microphone (`CAPTION_CONTRACT_TEST_DEVICE_ID`), the DEV catalog's in native microphone mode. */
-const SYNTHETIC_MICROPHONE_ID = 'microphone:coreaudio:4294967295'
+/**
+ * The backend host's microphone. macOS: the synthetic CoreAudio device
+ * (`CAPTION_CONTRACT_TEST_DEVICE_ID`), the DEV catalog's in native microphone
+ * mode. Linux has no such device: the smoke loads a PulseAudio source and plays
+ * the host's tone wav into it (`room-linux-microphone.mjs`).
+ */
+const linuxBackendHost = backendHosts && process.platform === 'linux'
+const SYNTHETIC_MICROPHONE_ID = linuxBackendHost
+  ? linuxRoomMicrophoneId()
+  : 'microphone:coreaudio:4294967295'
+let linuxRoomMicrophoneLoaded = false
+/** The camera the GPUI host's Studio names (`seedHostDevices`). */
+let hostCameraId = 'parity-camera'
 const CONTROL_TONE = 2200
 const PROBE_WIDTH = 320
 const PROBE_HEIGHT = 180
@@ -491,6 +508,13 @@ try {
       ? `the backend hosts the room on its fixtures: #${PEOPLE.host.color} and ${PEOPLE.host.tone} Hz bursts`
       : 'the renderer hosts the room on Chromium fake devices'
   )
+  if (linuxBackendHost) {
+    // The host's tone, as a Pulse source, before the backend lists devices.
+    loadLinuxRoomMicrophone()
+    linuxRoomMicrophoneLoaded = true
+    startChild('host-tone', ffmpegPath, linuxRoomToneArgs(media.host.wav))
+    log('the host microphone is the Pulse source videorc_room_host_mic (the host tone looped)')
+  }
   let launch = await launchApp(appEnv, 1)
   launched = launch.launched
   backend = launch.backend
@@ -592,7 +616,23 @@ try {
     const requestEvents = await waitFor(
       () => (collected.roomRequests.length >= 2 ? collected.roomRequests : null),
       30_000,
-      'the cloud.room.requests events for both guests'
+      'the cloud.room.requests events for both guests',
+      250,
+      () => {
+        // What the desktop's own socket did receive, by event name.
+        const counts = {}
+        for (const text of collected.raw) {
+          const name = (() => {
+            try {
+              return JSON.parse(text).event
+            } catch {
+              return 'unparsed'
+            }
+          })()
+          counts[name] = (counts[name] ?? 0) + 1
+        }
+        return JSON.stringify({ received: counts, requests: collected.roomRequests.length })
+      }
     )
     report.guests.requestEvents = requestEvents.map((event) => event.name)
     const letInAtMs = {}
@@ -1477,13 +1517,30 @@ async function seedHostDevices(smoke) {
       { nativeMicrophone: true },
       { timeoutMs: 15_000 }
     )
+    // The room's picture is the backend's fixture (VIDEORC_ROOM_CAMERA_FIXTURE),
+    // but the Studio still needs a camera it can list to turn the room camera
+    // on: a name the device list lacks is dropped from its view, so on Linux
+    // the host names the first camera the backend lists.
+    hostCameraId = 'parity-camera'
+    if (linuxBackendHost) {
+      const listed = await request(backend, 15_000, 'devices.list', { ffmpegPath })
+      const camera = (listed?.devices ?? []).find(
+        (device) => device.kind === 'camera' && device.status === 'available'
+      )
+      if (!camera) {
+        throw new Error(
+          'The backend lists no available camera; the Linux room smoke needs one (a V4L2 device) for the Studio to turn the room camera on.'
+        )
+      }
+      hostCameraId = camera.id
+    }
     await requestSmokeCommand(
       smoke,
       'studio-capture-configure',
       {
         config: {
           sources: {
-            cameraId: 'parity-camera',
+            cameraId: hostCameraId,
             cameraOff: false,
             microphoneId: SYNTHETIC_MICROPHONE_ID,
             microphoneOff: false
@@ -1510,13 +1567,25 @@ async function seedHostDevices(smoke) {
           typeof rawSavedSettings === 'string' ? JSON.parse(rawSavedSettings) : rawSavedSettings
         const raw = snapshot.entries?.['videorc.captureConfig']
         const config = typeof raw === 'string' ? JSON.parse(raw) : raw
+        if (savedSettings && savedSettings.keepMicrophoneWarm !== false) {
+          // The app writes its own settings once it has settled (the warm
+          // microphone default comes back, seen on Linux), so the write above
+          // can be overwritten: put it again until it stays.
+          await request(backend, 15_000, 'ui.settings.set', {
+            put: {
+              'videorc.settings': JSON.stringify({ ...savedSettings, keepMicrophoneWarm: false })
+            }
+          })
+          return false
+        }
         return (
           savedSettings?.keepMicrophoneWarm === false &&
-          // The store leaves a false Off out, as Electron's check reads it.
-          config?.sources?.cameraId === 'parity-camera' &&
-          config.sources.cameraOff !== true &&
+          config?.sources?.cameraId === hostCameraId &&
+          // The Studio reads a missing off flag as on (`cameraOff` unwrap_or
+          // false); the saved config may omit it rather than write false.
+          !config.sources.cameraOff &&
           config.sources.microphoneId === SYNTHETIC_MICROPHONE_ID &&
-          config.sources.microphoneOff !== true &&
+          !config.sources.microphoneOff &&
           config.audio?.microphoneMuted === false &&
           config.audio.microphoneGainDb === 0 &&
           config.audio.microphoneNoiseSuppression === 'off' &&
@@ -1530,6 +1599,16 @@ async function seedHostDevices(smoke) {
       log(`DIAG saved settings: ${JSON.stringify(lastSaved).slice(0, 4000)}`)
       throw error
     })
+    // What the Studio holds after its own reconcile against the device list:
+    // the room's camera.set follows it, so a missing camera names itself here.
+    const studioState = await requestSmokeCommand(smoke, 'studio-state', {}, { timeoutMs: 15_000 })
+    const listed = await request(backend, 15_000, 'devices.list', { ffmpegPath })
+    const cameras = (listed?.devices ?? [])
+      .filter((device) => device.kind === 'camera')
+      .map((device) => `${device.id} (${device.status ?? '?'})`)
+    log(
+      `Studio sources: camera ${JSON.stringify(studioState?.sources?.cameraId ?? null)}, off ${studioState?.sources?.cameraOff}; devices.list cameras: ${cameras.join(', ') || 'none'}`
+    )
     return
   }
   const evalJs = async (code) =>
@@ -2266,6 +2345,7 @@ async function cleanup() {
   for (const entry of [...children].reverse()) {
     await stopChild(entry)
   }
+  if (linuxRoomMicrophoneLoaded) unloadLinuxRoomMicrophone()
   for (const tap of taps) await tap.close().catch(() => {})
   if (web) await web.close().catch(() => {})
 }

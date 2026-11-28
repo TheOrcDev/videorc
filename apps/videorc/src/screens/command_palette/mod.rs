@@ -347,7 +347,7 @@ impl CommandPalette {
     fn catalogue(&self) -> Vec<Row> {
         let s = self.studio.snapshot();
         let connected = self.studio.is_connected();
-        let view = TransportView::from_snapshot(&s, &StartGates::default(), false);
+        let view = TransportView::from_snapshot(&s, &StartGates::of_snapshot(&s), false);
         let globals = s.settings.studio.global_shortcuts();
         let record_key = shortcut_accelerator("record-toggle");
         // Session: the transport's starts or its stop, in its words, then

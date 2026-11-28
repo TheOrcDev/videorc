@@ -26,7 +26,6 @@ use videorc_app_core::studio::screen_views::{
     talk_show_room_in,
 };
 use videorc_app_core::studio::session::{END_LIVESTREAM_LABEL, StopConfirmation};
-use videorc_app_core::studio::start_blocked_copy;
 use videorc_app_core::studio::transport::{RecordButtonState, TransportView, stop_overrun_copy};
 use videorc_app_core::{BackendClient, StopOrigin, Studio, StudioSnapshot};
 use videorc_kit::icon::{IconName, icon};
@@ -52,9 +51,14 @@ pub struct SessionControls {
 impl SessionControls {
     pub fn of(snapshot: &StudioSnapshot) -> Self {
         Self {
-            // The entitlement, destination and topology gates are inputs the
-            // app doesn't hold yet (S1.6c, #1814); none of them is on.
-            transport: TransportView::from_snapshot(snapshot, &StartGates::default(), false),
+            // The destination gate comes from the saved settings; the
+            // entitlement and topology gates are inputs the app doesn't hold
+            // yet (S1.6c, #1814), and neither is on.
+            transport: TransportView::from_snapshot(
+                snapshot,
+                &StartGates::of_snapshot(snapshot),
+                false,
+            ),
             stop_question: snapshot.session.stop_confirmation.clone(),
         }
     }
@@ -306,14 +310,6 @@ fn space_keys() -> ShortcutKeys {
     ShortcutKeys::keystrokes(SPACE)
 }
 
-/// The blocked row is its jump alone, as one button across the row, with the
-/// reason as the button's tooltip: only with no destination on
-/// (`BlockedReasonLine` in `session-panel.tsx`). Every other reason keeps its
-/// line, with the jump beside it.
-fn jump_is_the_row(reason: &str) -> bool {
-    reason == start_blocked_copy::NO_DESTINATION
-}
-
 impl Transport {
     fn render_default(
         &self,
@@ -419,10 +415,12 @@ impl Transport {
                 view.blocked_reason.clone().filter(|_| !local_active),
                 |section, reason| {
                     let jump = view.blocked_jump;
-                    // With no destination on, the row is the fix itself
-                    // (owner call, 2026-11-27): one "Open Destinations"
-                    // button across the row, the reason on its hover.
-                    if let Some(jump) = jump.filter(|_| jump_is_the_row(&reason)) {
+                    // A reason with a jump is one step from its fix, so the
+                    // row is the step itself (owner calls, 2026-11-27 and
+                    // 11-28): one kit button across the row ("Open
+                    // Destinations", "Open Health"), the reason on its hover
+                    // and as its description. Buttons, not links.
+                    if let Some(jump) = jump {
                         // A block wrapper: the button fills it, as Record
                         // and Go Live fill their columns.
                         return section.child(
@@ -447,18 +445,7 @@ impl Transport {
                             .type_scale(text::META)
                             .text_color(muted)
                             .child(icon(IconName::Info, 14., muted))
-                            .child(div().min_w_0().child(reason))
-                            .when_some(jump, |line, jump| {
-                                line.child(
-                                    Button::new("session-blocked-jump")
-                                        .variant(ButtonVariant::Link)
-                                        .size(ButtonSize::Xs)
-                                        .label(jump.label)
-                                        .on_click(cx.listener(move |_, _, _, cx| {
-                                            cx.emit(OpenPage::of(jump.page))
-                                        })),
-                                )
-                            }),
+                            .child(div().min_w_0().child(reason)),
                     )
                 },
             )
@@ -506,21 +493,6 @@ mod tests {
             blocked_reason: None,
             blocked_jump: None,
             stop_overrun: false,
-        }
-    }
-
-    #[test]
-    fn only_no_destination_turns_the_blocked_row_into_its_jump() {
-        assert!(jump_is_the_row(
-            "Turn on a destination in Destinations before you go live."
-        ));
-        for reason in [
-            start_blocked_copy::DESTINATION_SETUP,
-            start_blocked_copy::NO_OUTPUT,
-            start_blocked_copy::RECORDER_MISSING,
-            "You can stream to up to 5 destinations at once.",
-        ] {
-            assert!(!jump_is_the_row(reason), "{reason}");
         }
     }
 

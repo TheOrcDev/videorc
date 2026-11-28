@@ -441,12 +441,21 @@ pub(crate) async fn run_screen(
                     return None;
                 }
                 let bytes = if frame.bytes.is_empty() {
-                    let surface = frame.source_iosurface.as_ref()?;
-                    crate::screen_privacy::macos::read_bgra_from_iosurface(
-                        surface,
-                        frame.width,
-                        frame.height,
-                    )?
+                    // A zero-copy frame: macOS reads its IOSurface. The other
+                    // platforms' screen frames carry their bytes.
+                    #[cfg(target_os = "macos")]
+                    {
+                        let surface = frame.source_iosurface.as_ref()?;
+                        crate::screen_privacy::macos::read_bgra_from_iosurface(
+                            surface,
+                            frame.width,
+                            frame.height,
+                        )?
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        return None;
+                    }
                 } else {
                     frame.bytes.clone()
                 };

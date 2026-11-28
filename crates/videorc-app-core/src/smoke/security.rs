@@ -624,8 +624,11 @@ pub fn validate_smoke_resource_authorization(
         if path_link.file_type().is_symlink() {
             return Err("Smoke resource cannot be a symbolic link.".to_string());
         }
-        let canonical_root = std::fs::canonicalize(state_directory).map_err(|_| MISSING)?;
-        let canonical_path = std::fs::canonicalize(path).map_err(|_| MISSING)?;
+        let canonical_root =
+            crate::resources::capability::canonicalize_plain_path(Path::new(state_directory))
+                .map_err(|_| MISSING)?;
+        let canonical_path = crate::resources::capability::canonicalize_plain_path(Path::new(path))
+            .map_err(|_| MISSING)?;
         let root_stats = std::fs::metadata(&canonical_root).map_err(|_| MISSING)?;
         let path_stats = std::fs::metadata(&canonical_path).map_err(|_| MISSING)?;
         Ok((canonical_root, canonical_path, root_stats, path_stats))
@@ -1546,16 +1549,16 @@ mod tests {
             grant("input-file", &input),
             Ok(SmokeResourceAuthorization {
                 kind: SmokeResourceKind::InputFile,
-                path: std::fs::canonicalize(&input).unwrap()
+                path: crate::resources::capability::canonicalize_plain_path(&input).unwrap()
             })
         );
         assert_eq!(
             grant("output-directory", &output).map(|grant| grant.path),
-            Ok(std::fs::canonicalize(&output).unwrap())
+            Ok(crate::resources::capability::canonicalize_plain_path(&output).unwrap())
         );
         assert_eq!(
             grant("output-directory", &state).map(|grant| grant.path),
-            Ok(std::fs::canonicalize(&state).unwrap())
+            Ok(crate::resources::capability::canonicalize_plain_path(&state).unwrap())
         );
         assert!(
             grant("input-file", &outside_file)

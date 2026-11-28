@@ -47,7 +47,9 @@ jobs:
 
       - name: Install Linux backend headers
         if: github.event_name == 'workflow_dispatch' && inputs.artifacts
-        run: sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libspa-0.2-dev
+        # libglib2.0-dev: webrtc-sys (LiveKit's libwebrtc, the backend's room on
+        # Linux) reads the glib/gio headers through pkg-config.
+        run: sudo apt-get install -y --no-install-recommends libpipewire-0.3-dev libspa-0.2-dev libglib2.0-dev
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

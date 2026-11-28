@@ -121,21 +121,78 @@ pub fn display_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// `canonicalResourcePath`: refuses an empty or padded path, the Windows
-/// device, UNC and drive-relative forms (on every platform, as main does), a
-/// relative path or one with a `..` hop, then resolves links and checks the
-/// kind (a regular file for `input-file` and `background-asset`, a
-/// directory for `output-directory`). The words are main's.
-pub fn canonical_resource_path(raw_path: &str, kind: ResourceKind) -> Result<PathBuf, String> {
+/// Standard Win32 `MAX_PATH` length; longer verbatim paths keep their `\\?\`
+/// prefix so Windows APIs and child processes do not fail on >260-char paths.
+const MAX_STANDARD_WINDOWS_PATH_LEN: usize = 260;
+
+/// Strip Windows' verbatim prefix (`\\?\`) only when what follows is a plain
+/// drive path (`X:\...`) that fits within `MAX_PATH` (260 chars) and whose
+/// segments will not change meaning under Win32 normalization (no `.`, `..`,
+/// forward slash, or segment ending in `.` or space). Never strips `\\?\UNC\`,
+/// `\\?\Volume{...}\`, `\\?\GLOBALROOT\`, `\\?\PhysicalDrive0`, or
+/// drive-relative `\\?\X:foo`.
+pub fn strip_verbatim_drive_prefix(raw_path: &str) -> &str {
+    let Some(rest) = raw_path.strip_prefix(r"\\?\") else {
+        return raw_path;
+    };
+    let bytes = rest.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' {
+        return raw_path;
+    }
+    if rest.len() > MAX_STANDARD_WINDOWS_PATH_LEN || rest.contains('/') {
+        return raw_path;
+    }
+    if rest[3..].split('\\').any(|segment| {
+        segment == "." || segment == ".." || segment.ends_with('.') || segment.ends_with(' ')
+    }) {
+        return raw_path;
+    }
+    rest
+}
+
+/// Strip a plain Windows verbatim drive prefix (`\\?\X:\...`) from a `PathBuf`.
+pub fn strip_verbatim_drive_prefix_path(path: PathBuf) -> PathBuf {
+    match path.to_str() {
+        Some(text) => {
+            let stripped = strip_verbatim_drive_prefix(text);
+            if stripped.len() == text.len() {
+                path
+            } else {
+                PathBuf::from(stripped)
+            }
+        }
+        None => path,
+    }
+}
+
+/// `std::fs::canonicalize` without Windows' `\\?\` verbatim drive prefix so
+/// ordinary drive paths (`C:\...`) stay accepted across the app and backend.
+pub fn canonicalize_plain_path(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path).map(strip_verbatim_drive_prefix_path)
+}
+
+/// Lexical path check matching `main/resource-capabilities.ts` and the backend
+/// authority. On Windows only (`cfg!(windows)`), accepts plain Windows
+/// verbatim drive paths (`\\?\X:\...`) and returns the normalized ordinary
+/// drive path while refusing device, UNC, and drive-relative forms on every
+/// platform.
+pub fn validate_resource_path_syntax(raw_path: &str) -> Result<&str, String> {
     if raw_path.is_empty() || raw_path.trim() != raw_path || raw_path.contains('\0') {
         return Err("Resource path is invalid.".to_string());
     }
-    let windows = raw_path.replace('/', "\\").to_ascii_lowercase();
-    let bytes = raw_path.as_bytes();
-    let drive_relative = bytes.len() >= 3
+    let effective = if cfg!(windows) {
+        strip_verbatim_drive_prefix(raw_path)
+    } else {
+        raw_path
+    };
+    let windows = effective.replace('/', "\\").to_ascii_lowercase();
+    let bytes = effective.as_bytes();
+    let drive_relative = bytes.len() >= 2
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
-        && !matches!(bytes[2], b'\\' | b'/');
+        && bytes
+            .get(2)
+            .is_none_or(|separator| !matches!(separator, b'\\' | b'/'));
     if windows.starts_with("\\\\?\\")
         || windows.starts_with("\\\\.\\")
         || windows.starts_with("\\??\\")
@@ -145,16 +202,26 @@ pub fn canonical_resource_path(raw_path: &str, kind: ResourceKind) -> Result<Pat
     {
         return Err("Windows device, UNC, and drive-relative paths are not supported.".to_string());
     }
-    let path = Path::new(raw_path);
+    Ok(effective)
+}
+
+/// `canonicalResourcePath`: refuses an empty or padded path, the Windows
+/// device, UNC and drive-relative forms (on every platform, as main does), a
+/// relative path or one with a `..` hop, then resolves links and checks the
+/// kind (a regular file for `input-file` and `background-asset`, a
+/// directory for `output-directory`). The words are main's.
+pub fn canonical_resource_path(raw_path: &str, kind: ResourceKind) -> Result<PathBuf, String> {
+    let effective = validate_resource_path_syntax(raw_path)?;
+    let path = Path::new(effective);
     if !path.is_absolute()
-        || raw_path.split(['/', '\\']).any(|part| part == "..")
+        || effective.split(['/', '\\']).any(|part| part == "..")
         || path
             .components()
             .any(|part| matches!(part, Component::ParentDir))
     {
         return Err("Resource path must be absolute and traversal-free.".to_string());
     }
-    let canonical = std::fs::canonicalize(path)
+    let canonical = canonicalize_plain_path(path)
         .map_err(|_| "Resource path does not exist or could not be resolved.".to_string())?;
     let metadata = std::fs::metadata(&canonical)
         .map_err(|_| "Resource path metadata could not be read.".to_string())?;
@@ -313,8 +380,108 @@ mod tests {
         let canonical =
             canonical_resource_path(folder.to_str().unwrap(), ResourceKind::OutputDirectory)
                 .expect("a folder");
-        assert_eq!(canonical, std::fs::canonicalize(&folder).unwrap());
+        assert_eq!(canonical, canonicalize_plain_path(&folder).unwrap());
+        assert!(!canonical.to_string_lossy().starts_with(r"\\?\"));
+        canonical_resource_path(canonical.to_str().unwrap(), ResourceKind::OutputDirectory)
+            .expect("its own answer is accepted again");
         assert_eq!(display_name(&canonical), "Recordings");
+    }
+
+    #[test]
+    fn windows_verbatim_drive_paths_normalize_while_device_and_unc_stay_refused() {
+        assert_eq!(
+            strip_verbatim_drive_prefix(r"\\?\C:\Users\alice\clip.mp4"),
+            r"C:\Users\alice\clip.mp4"
+        );
+        assert_eq!(
+            strip_verbatim_drive_prefix(
+                r"\\?\F:\videorc\apps\desktop\resources\sounds\starter\airhorn.wav"
+            ),
+            r"F:\videorc\apps\desktop\resources\sounds\starter\airhorn.wav"
+        );
+        assert_eq!(
+            strip_verbatim_drive_prefix_path(PathBuf::from(r"\\?\F:\videorc")),
+            PathBuf::from(r"F:\videorc")
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            validate_resource_path_syntax(r"\\?\C:\Users\alice\clip.mp4"),
+            Ok(r"C:\Users\alice\clip.mp4")
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            validate_resource_path_syntax(r"\\?\C:\Windows\System32\cmd.exe").unwrap_err(),
+            "Windows device, UNC, and drive-relative paths are not supported."
+        );
+
+        let long_path = format!(r"\\?\C:\{}\clip.mp4", "a".repeat(260));
+        assert_eq!(strip_verbatim_drive_prefix(&long_path), long_path);
+        assert_eq!(
+            strip_verbatim_drive_prefix(r"\\?\C:\clips\take "),
+            r"\\?\C:\clips\take "
+        );
+        assert_eq!(
+            validate_resource_path_syntax(r"\\?\C:\clips\take ").unwrap_err(),
+            "Resource path is invalid."
+        );
+
+        for refused in [
+            r"\\server\share\file.mp4",
+            r"\\?\UNC\server\share\file.mp4",
+            r"\\?\unc\server\share\file.mp4",
+            r"\\?\UnC\server\share\file.mp4",
+            r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\file.mp4",
+            r"\\?\volume{12345678-1234-1234-1234-123456789abc}\file.mp4",
+            r"\\?\GLOBALROOT\Device\Harddisk0\file",
+            r"\\?\globalroot\Device\Harddisk0\file",
+            r"\\?\PhysicalDrive0",
+            r"\\?\C:relative\file.mp4",
+            r"\\?\c:relative\file.mp4",
+            r"\\?\C:",
+            r"\\?\",
+            r"\\?\\\?\C:\x",
+            r"\\?\1:\x",
+            r"\\?\C:\a\.\b.mp4",
+            r"\\?\C:\clips\take.mp4.",
+            r"\\?\C:\clips \take.mp4",
+            r"\\?/C:\x",
+            r"\\?\C:/x",
+            r"/\?\C:\x",
+            r"\\.\PhysicalDrive0",
+            r"\\.\C:\Users\alice\clip.mp4",
+            r"\??\C:\Windows\System32",
+            r"\Device\HarddiskVolume1\file",
+            r"\DEVICE\HarddiskVolume1\file",
+            r"//?/C:/Users/alice/clip.mp4",
+            r"C:",
+            long_path.as_str(),
+        ] {
+            assert_eq!(
+                validate_resource_path_syntax(refused).unwrap_err(),
+                "Windows device, UNC, and drive-relative paths are not supported.",
+                "{refused}"
+            );
+        }
+
+        // Two-hop traversal through canonical_resource_path is refused on every platform.
+        for traversal in [r"\\?\C:\a\..\..\Windows", r"\\?\C:\a/../x"] {
+            assert!(
+                canonical_resource_path(traversal, ResourceKind::InputFile).is_err(),
+                "accepted traversal {traversal}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_verbatim_tempdir_resolves_to_plain_drive_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plain = canonicalize_plain_path(dir.path()).expect("plain canonical");
+        let verbatim = format!(r"\\?\{}", plain.display());
+        let resolved =
+            canonical_resource_path(&verbatim, ResourceKind::OutputDirectory).expect("resolved");
+        assert_eq!(resolved, plain);
+        assert!(!resolved.to_string_lossy().starts_with(r"\\?\"));
     }
 
     #[test]

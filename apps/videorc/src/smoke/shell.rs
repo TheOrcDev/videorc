@@ -107,12 +107,11 @@ impl ShellSmoke for ShellWindows {
             None => None,
         };
         // The window's appearance on macOS; the kit's own override everywhere,
-        // which is the only switch on Linux (`AppearanceOverride`).
-        cx.set_window_appearance(appearance);
-        cx.set_global(videorc_kit::theme::AppearanceOverride(appearance));
+        // which is the only switch on Linux (`AppearanceOverride`), plus
+        // Windows' DWM title bar attribute.
         cx.set_global(IncreaseContrast(forced.increase_contrast.unwrap_or(false)));
         cx.set_global(ReduceMotion(forced.reduce_motion.unwrap_or(false)));
-        cx.refresh_windows();
+        crate::platform::apply_window_appearance(appearance, cx);
         Ok(json!({
             "theme": forced.dark.map(|dark| if dark { "dark" } else { "light" }),
             "increaseContrast": forced.increase_contrast,

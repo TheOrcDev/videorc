@@ -179,7 +179,9 @@ function evaluatePredicate(tokens, index, cfg) {
     return [cfg[head] === expected, index + 3]
   }
   if (cfg.flags.includes(head)) return [true, index + 1]
-  if (['unix', 'test', 'debug_assertions', 'windows', 'miri'].includes(head)) {
+  // `backend_room` is set by the backend's build.rs for macOS, Linux and Windows
+  // builds with the `windows-room` feature: false for the default Windows build.
+  if (['unix', 'test', 'debug_assertions', 'windows', 'miri', 'backend_room'].includes(head)) {
     return [false, index + 1]
   }
   throw new Error(`Unknown cfg flag: ${head}`)
