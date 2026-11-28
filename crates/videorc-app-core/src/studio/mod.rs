@@ -64,6 +64,13 @@
 //! its state to the snapshot, its events to [`STUDIO_EVENTS`] and its reads
 //! to the bootstrap. Nothing here knows the UI framework.
 
+pub mod agent;
+mod agent_go_live;
+mod agent_prepare;
+mod agent_scene;
+mod agent_settings;
+pub mod agent_surface;
+mod agent_tools;
 pub mod audio_actions;
 pub mod audio_levels;
 pub mod audio_mixer;
@@ -242,7 +249,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 52] = [
+pub const STUDIO_EVENTS: [&str; 54] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -319,6 +326,9 @@ pub const STUDIO_EVENTS: [&str; 52] = [
     crate::accounts::methods::CHANGED_EVENT,
     // The plan changed (Record's and Go Live's entitlement gates).
     crate::captions::methods::ENTITLEMENTS_EVENT,
+    // Plan 209 S6: agents enabled/disabled state and activity (`rename_recording`).
+    crate::client::names::AGENTS_STATUS,
+    crate::client::names::AGENTS_ACTIVITY,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -1033,10 +1043,22 @@ pub struct Studio<B: StudioBackend> {
     takeover_pending: Mutex<takeover_mute::TakeoverPending>,
     /// The takeover changed or wants reading; the driver commits it.
     takeover_kick: Notify,
+    /// Serializes direct takeover actions (`remote_takeover_*`) with the
+    /// background `screens.active.changed` mute driver so a delayed event
+    /// never undoes a manual mute made after `screens.clear`.
+    takeover_commit: tokio::sync::Mutex<()>,
     /// Chat on stream's driver memory (`chat_overlay`).
     chat_overlay: Mutex<chat_overlay::ChatOverlayState>,
     /// The overlay layout changed; chat on stream looks again.
     chat_overlay_kick: Notify,
+    /// The Studio's agent-intent link, surface publisher, and FIFO lane (`agent`).
+    agent: Mutex<agent::AgentLinkState>,
+    /// The agent surface changed; the driver publishes it.
+    agent_publish_kick: Notify,
+    /// An agent intent waits on the FIFO agents lane; the driver runs it.
+    agent_intent_kick: Notify,
+    /// A new connection wants `agent.intent.listen` and `agents.status`.
+    agent_connect_kick: Notify,
 }
 
 impl<B: StudioBackend> Studio<B> {
@@ -1156,8 +1178,13 @@ impl<B: StudioBackend> Studio<B> {
             remote_lists_kick: Notify::new(),
             takeover_pending: Mutex::new(takeover_mute::TakeoverPending::default()),
             takeover_kick: Notify::new(),
+            takeover_commit: tokio::sync::Mutex::new(()),
             chat_overlay: Mutex::new(chat_overlay::ChatOverlayState::default()),
             chat_overlay_kick: Notify::new(),
+            agent: Mutex::new(agent::AgentLinkState::default()),
+            agent_publish_kick: Notify::new(),
+            agent_intent_kick: Notify::new(),
+            agent_connect_kick: Notify::new(),
         }
     }
 
@@ -1217,6 +1244,9 @@ impl<B: StudioBackend> Studio<B> {
             () = self.read_remote_lists_when_kicked() => {}
             () = self.drive_takeover_mute() => {}
             () = self.drive_chat_overlay() => {}
+            () = self.connect_agent_link_when_kicked() => {}
+            () = self.publish_agent_surface_when_kicked() => {}
+            () = self.run_agent_intents_when_kicked() => {}
         }
     }
 
@@ -1321,6 +1351,7 @@ impl<B: StudioBackend> Studio<B> {
                 // The new backend holds no remote surface: the bootstrap's
                 // publish sends it again.
                 self.remote_lock().forget_connection();
+                self.agent_lock().forget_connection();
                 self.forget_chat_overlay_connection();
                 self.publish();
                 self.bootstrap(generation).await;
@@ -1330,6 +1361,9 @@ impl<B: StudioBackend> Studio<B> {
                 // The remotes' lists on this backend, read once beside the
                 // events (`remote_lists`).
                 self.kick_remote_lists(false);
+                // Plan 209 S6: register this Studio socket as the agent-intent
+                // listener (`agent.intent.listen`) and read `agents.status`.
+                self.kick_agent_connect();
                 // S1.6b part 5d: a session that runs on this connection.
                 self.follow_live_audio().await;
                 // The talk show's room an earlier connection held: back in
@@ -1439,6 +1473,7 @@ impl<B: StudioBackend> Studio<B> {
                     inner.sources.forget_devices();
                 }
                 self.remote_lock().forget_connection();
+                self.agent_lock().forget_connection();
                 self.forget_chat_overlay_connection();
                 self.publish();
                 // S1.6b part 5d: the engine is away: the live sync ends.
@@ -1525,6 +1560,9 @@ impl<B: StudioBackend> Studio<B> {
                 let _ = self.handle_dashboard_event(&event, &payload);
                 // Destinations' account-bound sections read afresh.
                 self.handle_account_event(&event).await;
+                if self.handle_agent_event(&event, &payload) {
+                    return;
+                }
                 if self.handle_performance_event(&event, &payload)
                     || self.handle_live_chat_event(&event, &payload)
                     || self.handle_moderation_event(&event, &payload)
@@ -3041,6 +3079,12 @@ impl<B: StudioBackend> Studio<B> {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn agent_lock(&self) -> MutexGuard<'_, agent::AgentLinkState> {
+        self.agent
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner
             .lock()
@@ -3133,6 +3177,8 @@ impl<B: StudioBackend> Studio<B> {
         }
         // The remotes' keys follow every change (`remote`).
         self.note_remote_surface(&snapshot);
+        // Plan 209 S6: the allowlisted agent projection follows every change.
+        self.note_agent_surface(&snapshot);
         self.snapshot.send_replace(snapshot);
         self.post(scene_notices);
     }

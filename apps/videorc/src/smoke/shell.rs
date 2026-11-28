@@ -97,23 +97,44 @@ impl ShellSmoke for ShellWindows {
             reduce_motion: apply(before.reduce_motion, request.reduce_motion),
         };
         self.forced.set(forced);
-        // Dark/light goes through the same window appearance the Settings
-        // theme picker uses; theme::current then follows window.appearance().
-        // The app does not read Increase Contrast or Reduce Motion from the
-        // system yet (S2.6), so giving one back means off.
-        let appearance = match forced.dark {
-            Some(true) => Some(WindowAppearance::Dark),
-            Some(false) => Some(WindowAppearance::Light),
-            None => None,
-        };
-        // The window's appearance on macOS; the kit's own override everywhere,
-        // which is the only switch on Linux (`AppearanceOverride`), plus
-        // Windows' DWM title bar attribute.
-        cx.set_global(IncreaseContrast(forced.increase_contrast.unwrap_or(false)));
-        cx.set_global(ReduceMotion(forced.reduce_motion.unwrap_or(false)));
-        crate::platform::apply_window_appearance(appearance, cx);
+        if request.dark.is_some()
+            || request.increase_contrast.is_some()
+            || request.reduce_motion.is_some()
+        {
+            // Dark/light goes through the same window appearance the Settings
+            // theme picker uses; theme::current then follows window.appearance().
+            // The app does not read Increase Contrast or Reduce Motion from the
+            // system yet (S2.6), so giving one back means off.
+            let appearance = match forced.dark {
+                Some(true) => Some(WindowAppearance::Dark),
+                Some(false) => Some(WindowAppearance::Light),
+                None => None,
+            };
+            // The window's appearance on macOS; the kit's own override everywhere,
+            // which is the only switch on Linux (`AppearanceOverride`), plus
+            // Windows' DWM title bar attribute.
+            cx.set_global(IncreaseContrast(forced.increase_contrast.unwrap_or(false)));
+            cx.set_global(ReduceMotion(forced.reduce_motion.unwrap_or(false)));
+            if request.dark.is_some() {
+                crate::platform::apply_window_appearance(appearance, cx);
+            }
+        }
+        let window_theme = self
+            .main
+            .update(cx, |_, window, cx| {
+                let effective = cx
+                    .try_global::<videorc_kit::theme::AppearanceOverride>()
+                    .and_then(|override_| override_.0)
+                    .unwrap_or_else(|| window.appearance());
+                match effective {
+                    WindowAppearance::Light | WindowAppearance::VibrantLight => "light",
+                    WindowAppearance::Dark | WindowAppearance::VibrantDark => "dark",
+                }
+            })
+            .ok();
         Ok(json!({
             "theme": forced.dark.map(|dark| if dark { "dark" } else { "light" }),
+            "windowTheme": window_theme,
             "increaseContrast": forced.increase_contrast,
             "reduceMotion": forced.reduce_motion,
         }))

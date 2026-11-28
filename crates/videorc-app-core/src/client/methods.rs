@@ -181,6 +181,26 @@ method!(
     RemoteSurfacePublish, "remote.surface.publish", Value => Value
 );
 method!(
+    /// Plan 209 S6: marks this renderer socket as the Studio's agent-intent
+    /// listener so `get_status` reports `studioOpen: true` and relayed
+    /// `agent.intent` events reach it. Connection-scoped.
+    AgentIntentListen, "agent.intent.listen", () => Value
+);
+method!(
+    /// Plan 209 S6: the ack of a relayed `agent.intent` (`{intentId, ok,
+    /// message?, result?}`).
+    AgentIntentAck, "agent.intent.ack", AgentIntentAckParams => Value
+);
+method!(
+    /// Plan 209 S6: the allowlisted Studio surface for agents (`{surface}`),
+    /// published only while Agents is on or Sidekick may act.
+    AgentSurfacePublish, "agent.surface.publish", Value => Value
+);
+method!(
+    /// Plan 209: the agents' status (`{enabled, agents, ...}`).
+    AgentsStatusGet, "agents.status", () => Value
+);
+method!(
     /// The live microphone and System audio update for a running session
     /// (`audio.processing.update`); `applied` says whether the session took
     /// it.
@@ -217,6 +237,19 @@ pub struct RemoteIntentAckParams {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// `agent.intent.ack`'s params: the ticket id, outcome, optional plain
+/// message, and optional structured result (`AgentIntentOutcome`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentIntentAckParams {
+    pub intent_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
 }
 
 /// `events.setIncluded` / `events.setExcluded` params.

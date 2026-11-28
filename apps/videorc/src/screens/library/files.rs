@@ -4,7 +4,8 @@ use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{Mutex, watch};
 use videorc_app_core::library::{LibraryFiles, TrashOutcome};
@@ -99,7 +100,7 @@ impl LibraryFiles for Files {
                     }
                     match std::fs::symlink_metadata(path) {
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                        Ok(meta) if meta.is_file() => trash(path).is_err(),
+                        Ok(meta) if meta.is_file() => trash_or_smoke(path).is_err(),
                         _ => true,
                     }
                 })
@@ -138,6 +139,51 @@ fn strings(value: Option<&Value>) -> Result<Vec<String>, String> {
         })
         .collect()
 }
+static SMOKE_TRASH_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Smoke runs only (plan 209 S16, Electron's `main/trash-paths.ts`
+/// `smokeTrashDirectory`): a stand-in for the system Trash inside the run's
+/// state directory (`VIDEORC_SMOKE_TRASH_DIR`), active only when unpackaged
+/// and `VIDEORC_SMOKE_COMMAND_SERVER=1` with an absolute path.
+pub(crate) fn smoke_trash_directory(
+    value: Option<&str>,
+    packaged: bool,
+    smoke_command_server: bool,
+) -> Option<PathBuf> {
+    if packaged || !smoke_command_server {
+        return None;
+    }
+    let trimmed = value?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(trimmed);
+    path.is_absolute().then_some(path)
+}
+
+fn trash_or_smoke(path: &Path) -> Result<(), String> {
+    let packaged = crate::smoke::shell::packaged();
+    let smoke_server = std::env::var("VIDEORC_SMOKE_COMMAND_SERVER").as_deref() == Ok("1");
+    let raw = std::env::var("VIDEORC_SMOKE_TRASH_DIR").ok();
+    if let Some(dir) = smoke_trash_directory(raw.as_deref(), packaged, smoke_server) {
+        std::fs::create_dir_all(&dir)
+            .map_err(|_| "Couldn't move the recording to the Trash.".to_string())?;
+        let seq = SMOKE_TRASH_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("recording");
+        let dest = dir.join(format!("{now_ms}-{seq}-{name}"));
+        return std::fs::rename(path, &dest)
+            .map_err(|_| "Couldn't move the recording to the Trash.".to_string());
+    }
+    trash(path)
+}
+
 #[cfg(target_os = "macos")]
 fn trash(path: &Path) -> Result<(), String> {
     use objc2_foundation::{NSFileManager, NSString, NSURL};
@@ -170,4 +216,24 @@ fn trash(path: &Path) -> Result<(), String> {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn trash(_: &Path) -> Result<(), String> {
     Err("Moving recordings to the Trash isn't available on this platform yet.".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::smoke_trash_directory;
+
+    #[test]
+    fn smoke_trash_directory_requires_unpackaged_smoke_server_and_absolute_path() {
+        let abs = if cfg!(windows) {
+            r"C:\smoke-trash"
+        } else {
+            "/tmp/videorc-smoke-trash"
+        };
+        assert!(smoke_trash_directory(Some(abs), false, true).is_some());
+        assert!(smoke_trash_directory(Some(abs), true, true).is_none());
+        assert!(smoke_trash_directory(Some(abs), false, false).is_none());
+        assert!(smoke_trash_directory(Some("relative/trash"), false, true).is_none());
+        assert!(smoke_trash_directory(Some("  "), false, true).is_none());
+        assert!(smoke_trash_directory(None, false, true).is_none());
+    }
 }

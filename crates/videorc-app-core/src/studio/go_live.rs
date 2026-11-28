@@ -100,6 +100,10 @@ impl<B: StudioBackend> Studio<B> {
         });
     }
 
+    pub(super) fn edit_go_live_state(&self, edit: impl FnOnce(&mut GoLiveState)) {
+        self.edit_go_live(edit);
+    }
+
     /// `refuseStart`: Go Live asked while it cannot run. No destination
     /// ready gets the one fix (Open Destinations); anything else its reason.
     fn refuse_go_live(&self, reason: String) {
@@ -135,14 +139,14 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     /// What this Go Live sends: the saved destinations minus the left-out.
-    fn sent_streaming(&self, excluded: &[String]) -> Value {
+    pub(super) fn sent_streaming(&self, excluded: &[String]) -> Value {
         let capture = self.snapshot().settings.capture_doc;
         lifecycle::streaming_without_targets(&capture["streaming"], excluded)
     }
 
     /// The output check settled for what this Go Live sends; the reason it
     /// can't go live, if any (`streamOutputTopologyBlockReason`).
-    async fn settle_output_check(&self, sent: &Value) -> Option<String> {
+    pub(super) async fn settle_output_check(&self, sent: &Value) -> Option<String> {
         let mut capture = self.snapshot().settings.capture_doc;
         capture["streaming"] = sent.clone();
         let params = plan::probe_params(&capture, false, false)?;
@@ -166,7 +170,7 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     /// `streamTargets.confirmation.validate` for what this Go Live sends.
-    async fn validate_go_live(&self, sent: &Value) -> Result<Preflight, RpcError> {
+    pub(super) async fn validate_go_live(&self, sent: &Value) -> Result<Preflight, RpcError> {
         let params = json!({
             "scheduledEventIds": lifecycle::scheduled_event_ids(sent),
             "streaming": sent,
@@ -180,7 +184,7 @@ impl<B: StudioBackend> Studio<B> {
 
     /// `runGoLivePreflight`: the output check, the details saved and
     /// validated, every destination judged.
-    async fn go_live_preflight(&self, excluded: &[String]) -> Result<Preflight, String> {
+    pub(super) async fn go_live_preflight(&self, excluded: &[String]) -> Result<Preflight, String> {
         let sent = self.sent_streaming(excluded);
         if let Some(reason) = self.settle_output_check(&sent).await {
             return Err(reason);
@@ -516,7 +520,7 @@ impl<B: StudioBackend> Studio<B> {
     }
 
     /// `prepareOauthTargetsForGoLive`.
-    async fn prepare_targets(
+    pub(super) async fn prepare_targets(
         &self,
         preflight: &Preflight,
         excluded: &[String],
@@ -782,7 +786,12 @@ impl<B: StudioBackend> Studio<B> {
     /// (`activatePreparedYouTubeBroadcasts`), X's are published.
     /// `run` is the lifecycle run the activations belong to: once a stop, a
     /// hand-off or the show's end moved it on, nothing more is activated.
-    async fn activate_platforms(&self, mut streaming: Value, session_id: Option<String>, run: u64) {
+    pub(super) async fn activate_platforms(
+        &self,
+        mut streaming: Value,
+        session_id: Option<String>,
+        run: u64,
+    ) {
         let talk_show = self.talk_show_room_open();
         for id in lifecycle::youtube_activation_targets(&streaming) {
             if self.platform.run() != run {

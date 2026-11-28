@@ -214,6 +214,11 @@ impl<B: StudioBackend> Studio<B> {
         self.ask_app(AppRemoteAction::WindowFront(window)).await
     }
 
+    /// Brings an app window to the front (shared with `agent_tools::open_window`).
+    pub(super) async fn ask_app_window(&self, window: RemoteWindow) -> IntentOutcome {
+        self.ask_app(AppRemoteAction::WindowFront(window)).await
+    }
+
     /// `streamManagerFrontOrClose`: the Screen key held.
     pub(super) async fn remote_stream_manager_front_or_close(&self) -> IntentOutcome {
         self.ask_app(AppRemoteAction::StreamManagerFrontOrClose)
