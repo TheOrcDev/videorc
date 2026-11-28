@@ -67,7 +67,7 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
+import { launchDevApp, repoRoot, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import {
   AgentBridge,
   agentBridgeBinary,
@@ -91,8 +91,9 @@ const createdOutput = !process.env.VIDEORC_SMOKE_OUTPUT_DIR
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? mkdtempSync(join(tmpdir(), 'videorc-agent-mcp-'))
 )
+const gpuiApp = smokeAppIsGpui()
 const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-agent-mcp-user-data-'))
-const appDataDir = join(outputDirectory, 'app-data')
+const appDataDir = gpuiApp ? userDataDir : join(outputDirectory, 'app-data')
 const fixturesDir = join(outputDirectory, 'fixtures')
 const discoveryPath = join(appDataDir, 'agents.json')
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
@@ -392,6 +393,11 @@ try {
   // settle, as smoke:scene-presets does, before the next Arrange call.
   const waitForSceneSettled = async (label) =>
     waitUntil(`the Studio to settle after ${label}`, async () => {
+      if (gpuiApp) {
+        const state = await requestSmokeCommand(smoke, 'studio-scenes-state', {}, { timeoutMs })
+        const value = { pendingSceneId: state?.pendingSceneId ?? null }
+        return { done: value.pendingSceneId === null, value }
+      }
       const state = await evalRenderer('return window.__videorcSmokeScenePresets?.state() ?? null')
       const value = {
         pendingId: state?.pendingId ?? null,
@@ -471,11 +477,42 @@ try {
 
   // The Record path needs a profile every tier records (smoke:record-latency);
   // the scene stays the default (Screen + camera) so switch_scene has work.
-  await requestSmokeCommand(
-    smoke,
-    'eval-js',
-    {
-      code: `
+  const seedVideo = {
+    preset: 'tutorial-1080p30',
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    bitrateKbps: 6000
+  }
+  if (gpuiApp) {
+    // studio-capture-configure merges directly into the loaded capture config
+    // without reloading through normalizeStreamingSettings, so include the
+    // normalized fields (kick's serverUrl, mode, enabledTargetIds).
+    const gpuiStreaming = {
+      ...streaming,
+      mode: 'multi',
+      enabledTargetIds: ['custom', 'kick'],
+      targets: streaming.targets.map((target) => ({ serverUrl: '', ...target }))
+    }
+    await requestSmokeCommand(
+      smoke,
+      'studio-capture-configure',
+      {
+        config: {
+          video: seedVideo,
+          recordEnabled: true,
+          streamEnabled: false,
+          streaming: gpuiStreaming
+        }
+      },
+      { timeoutMs }
+    )
+  } else {
+    await requestSmokeCommand(
+      smoke,
+      'eval-js',
+      {
+        code: `
         const settings = await ${UI_SETTINGS_READY_JS};
         const key = 'videorc.captureConfig';
         let current = {};
@@ -484,12 +521,13 @@ try {
         ${reloadKeepingSeedJs({ forgetWorkingScene: false })}
         return true;
       `,
-      video: { preset: 'tutorial-1080p30', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 },
-      streaming
-    },
-    { timeoutMs }
-  )
-  await sleep(2500)
+        video: seedVideo,
+        streaming
+      },
+      { timeoutMs }
+    )
+    await sleep(2500)
+  }
   const compositorBefore = await request(renderer, timeoutMs, 'compositor.status')
   await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 500 }, { timeoutMs })
   await waitUntil('the synthetic source on the compositor', async () => {
@@ -699,21 +737,34 @@ try {
   )
 
   // 4. Studio round trips against backend-confirmed state.
-  const sceneLibraryV2 = await evalRenderer(
-    `return JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2'))`
-  )
-  const screenOnlyId = sceneLibraryV2.scenes.find(
+  const readSceneLibraryV2 = async () => {
+    if (gpuiApp) {
+      const state = await requestSmokeCommand(smoke, 'studio-scenes-state', {}, { timeoutMs })
+      return { scenes: state?.library ?? [] }
+    }
+    return evalRenderer(
+      `return JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2'))`
+    )
+  }
+  const editSceneV2 = async (scene) => {
+    if (gpuiApp) {
+      const res = await requestSmokeCommand(smoke, 'studio-scene-edit', { scene }, { timeoutMs })
+      return res?.edited === true
+    }
+    return (
+      (await evalRenderer(`return await window.__videorcSmokeScenePresets.edit(params.scene);`, {
+        scene
+      })) === true
+    )
+  }
+  const sceneLibraryV2 = await readSceneLibraryV2()
+  const screenOnlyScene = sceneLibraryV2.scenes.find(
     (scene) => scene.layouts.horizontal.layoutPreset === 'screen-only'
-  ).id
+  )
+  const screenOnlyId = screenOnlyScene.id
   // Scene-owned fixture: switching restores this scene's own source rather
   // than a transient synthetic toggle left on the previous scene.
-  if (
-    (await evalRenderer(`
-    const scene = JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2')).scenes.find((entry) => entry.id === ${JSON.stringify(screenOnlyId)});
-    scene.shows = {kind: 'test-pattern'};
-    return await window.__videorcSmokeScenePresets.edit(scene);
-  `)) !== true
-  )
+  if (!(await editSceneV2({ ...screenOnlyScene, shows: { kind: 'test-pattern' } })))
     fail('could not prepare the synthetic Screen only scene')
   const switched = await callOk(bridge, 'switch_scene', { sceneId: 'screen-only' })
   if (switched.structuredContent?.scene?.id !== screenOnlyId) {
@@ -721,14 +772,19 @@ try {
   }
   const byId = await callOk(bridge, 'switch_scene', { sceneId: screenOnlyId })
   if (byId.structuredContent?.scene?.id !== screenOnlyId) fail('listed scene id did not switch')
-  const sideId = sceneLibraryV2.scenes.find(
+  const latestLibrary = await readSceneLibraryV2()
+  const sideScene = latestLibrary.scenes.find(
     (scene) => scene.layouts.horizontal.layoutPreset === 'side-by-side'
-  )?.id
-  if (!sideId) fail('the fresh library must contain a Side by side scene')
+  )
+  if (!sideScene?.id) fail('the fresh library must contain a Side by side scene')
   if (
-    (await evalRenderer(
-      `const scene = JSON.parse(window.__videorcUiSettings?.getItem('videorc.scenes.v2')).scenes.find((scene) => scene.id === ${JSON.stringify(sideId)}); scene.layouts.horizontal.layoutPreset = 'screen-only'; return window.__videorcSmokeScenePresets.edit(scene)`
-    )) !== true
+    !(await editSceneV2({
+      ...sideScene,
+      layouts: {
+        ...sideScene.layouts,
+        horizontal: { ...sideScene.layouts.horizontal, layoutPreset: 'screen-only' }
+      }
+    }))
   )
     fail('could not prepare the missing-layout refusal')
   const missingLayout = await call(bridge, 'switch_scene', { sceneId: 'side-by-side' })
@@ -942,10 +998,21 @@ try {
   log('step 6: read_chat returns the fakes under viewerText/viewerName, the injection line as data')
 
   // ---- PR B (plan 209 S16): a step per tool, against the same Studio. ----
-  // The Studio's own words for the refusals below, read from its modules
-  // (the dev app's renderer is served by Vite), so the smoke never keeps a
-  // second copy of a sentence.
-  const copy = await evalRenderer(`
+  // The Studio's own words for the refusals below.
+  const copy = gpuiApp
+    ? {
+        goLive: {
+          allowPartialHint: 'Pass allowPartial: true to go live on the ready ones.'
+        },
+        buddy: {
+          loading: 'Loading your Sidekick settings… Try again in a moment.',
+          premium: 'Sidekick requires Videorc Premium.',
+          consent:
+            "Cloud AI isn't allowed, so Sidekick can't read chat or hear you. Allow it under Cloud AI.",
+          autoGone: 'Auto is gone: Sidekick never posts in chat on its own. Use talk: bubble.'
+        }
+      }
+    : await evalRenderer(`
     const headless = await import('/src/lib/go-live-headless.ts')
     const buddy = await import('/src/lib/studio-actions/buddy.ts')
     return { goLive: headless.HEADLESS_GO_LIVE_COPY, buddy: buddy.BUDDY_TOOL_COPY }
@@ -956,7 +1023,9 @@ try {
   // What the Studio window shows from here on: the Go Live dialog (it must
   // never open for an agent), every toast, and every notification behind the
   // bell (the D11 notices, since plan 250).
-  await evalRenderer(`
+  const gpuiSeen = { goLiveDialog: false, toasts: [] }
+  if (!gpuiApp) {
+    await evalRenderer(`
     if (!window.__videorcAgentSmoke) {
       const seen = { goLiveDialog: false, toasts: [] }
       const scan = () => {
@@ -976,10 +1045,27 @@ try {
     }
     return true
   `)
+  }
   // A notification changes no DOM while the list is closed, so the observer
   // above would miss it: read the list on every ask too.
-  const studioSeen = () =>
-    evalRenderer(`
+  const studioSeen = async () => {
+    if (gpuiApp) {
+      const [goLive, notes] = await Promise.all([
+        requestSmokeCommand(smoke, 'studio-go-live', { action: 'state' }, { timeoutMs }),
+        requestSmokeCommand(smoke, 'notifications-state', {}, { timeoutMs })
+      ])
+      if (goLive?.open) gpuiSeen.goLiveDialog = true
+      for (const toast of notes?.toasts ?? []) {
+        const text = String(toast?.text ?? '').trim()
+        if (text && !gpuiSeen.toasts.includes(text)) gpuiSeen.toasts.push(text)
+      }
+      for (const entry of notes?.entries ?? []) {
+        const text = String(entry?.title ?? '').trim()
+        if (text && !gpuiSeen.toasts.includes(text)) gpuiSeen.toasts.push(text)
+      }
+      return gpuiSeen
+    }
+    return evalRenderer(`
       const seen = window.__videorcAgentSmoke
       for (const entry of window.__videorcSmokeNotifications?.().entries ?? []) {
         const text = String(entry.title ?? '').trim()
@@ -987,6 +1073,7 @@ try {
       }
       return seen
     `)
+  }
   const waitForNotice = async (sentence) => {
     await waitUntil(`the notice "${sentence}" on agents.activity`, async () => ({
       done: noticeSeen(sentence),
@@ -1146,10 +1233,19 @@ try {
   // Live captions switch arms the next session (get_status' `captions.on`
   // says whether they run now), so the switch is read where the Studio
   // saves it.
-  const captionsSwitch = () =>
-    evalRenderer(
+  const captionsSwitch = async () => {
+    if (gpuiApp) {
+      const snap = await request(renderer, timeoutMs, 'ui.settings.get', {
+        keys: ['videorc.captureConfig']
+      })
+      const raw = snap?.entries?.['videorc.captureConfig']
+      const parsed = typeof raw === 'string' ? JSON.parse(raw) : (raw ?? {})
+      return parsed?.captions?.enabled ?? null
+    }
+    return evalRenderer(
       `return JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}')?.captions?.enabled ?? null`
     )
+  }
   const captionsOn = await call(bridge, 'set_captions', { on: true })
   if (captionsOn.isError) {
     skip('step B3 (set_captions)', `captions can't run in the dev app: "${resultText(captionsOn)}"`)
@@ -1243,8 +1339,64 @@ try {
   const stripBefore = (await request(renderer, timeoutMs, 'banners.list')).find(
     (entry) => entry.id === stripId
   )
-  const snaps = await evalRenderer(
-    `
+  const computeGpuiSnaps = (banner) => {
+    const r6 = (v) => Math.round(v * 1_000_000) / 1_000_000
+    const clampOverlay = (r) => {
+      const w = Math.min(1, Math.max(0.02, r.w))
+      const h = Math.min(1, Math.max(0.02, r.h))
+      return {
+        x: r6(Math.min(1 - w, Math.max(0, r.x))),
+        y: r6(Math.min(1 - h, Math.max(0, r.y))),
+        w: r6(w),
+        h: r6(h)
+      }
+    }
+    const placeOrigin = (place, vertical, w, h) => {
+      const side = vertical ? (0.04 * 16) / 9 : (0.04 * 9) / 16
+      const top = vertical ? 0.08 : 0.04
+      const bottom = vertical ? 0.22 : 0.04
+      const x = place.endsWith('-left')
+        ? side
+        : place.endsWith('-right')
+          ? 1 - side - w
+          : (1 - w) / 2
+      const y = place.startsWith('top-')
+        ? top
+        : place.startsWith('bottom-')
+          ? 1 - bottom - h
+          : top + (1 - top - bottom - h) / 2
+      return { x, y }
+    }
+    const fitBanner = (rect, aspect) => {
+      const imgAspect = Math.max(1, banner.width) / Math.max(1, banner.height)
+      let w = rect.w
+      let h = rect.h
+      if (imgAspect * rect.h <= rect.w * aspect) w = (imgAspect * rect.h) / aspect
+      else h = (rect.w * aspect) / imgAspect
+      const cx = rect.x + rect.w / 2
+      const x = cx < 0.48 ? rect.x : cx > 0.52 ? rect.x + rect.w - w : rect.x + (rect.w - w) / 2
+      const y = rect.y + rect.h / 2 >= 0.5 ? rect.y + rect.h - h : rect.y
+      return clampOverlay({ x, y, w, h })
+    }
+    const out = { buddy: {}, banner: {}, drawn: {} }
+    for (const side of ['horizontal', 'vertical']) {
+      const vertical = side === 'vertical'
+      const aspect = vertical ? 9 / 16 : 16 / 9
+      const bw = vertical ? 0.32 : 0.18
+      const bh = vertical ? (0.32 * 9) / 16 : (0.18 * 16) / 9
+      const bo = placeOrigin('top-left', vertical, bw, bh)
+      out.buddy[side] = { x: r6(Math.max(0, bo.x)), y: r6(Math.max(0, bo.y)), w: r6(bw), h: r6(bh) }
+      const fit = fitBanner(banner[side], aspect)
+      const so = placeOrigin('bottom-left', vertical, fit.w, fit.h)
+      out.banner[side] = clampOverlay({ x: so.x, y: so.y, w: fit.w, h: fit.h })
+      out.drawn[side] = fitBanner(out.banner[side], aspect)
+    }
+    return out
+  }
+  const snaps = gpuiApp
+    ? computeGpuiSnaps(stripBefore)
+    : await evalRenderer(
+        `
     const layout = await import('/src/lib/overlay-layout.ts')
     const place = await import('/src/lib/banner-place.ts')
     const out = { buddy: {}, banner: {}, drawn: {} }
@@ -1256,8 +1408,8 @@ try {
     }
     return out
   `,
-    { banner: stripBefore }
-  )
+        { banner: stripBefore }
+      )
   const buddyMove = await callOk(bridge, 'move_on_scene', { item: 'buddy', place: 'top-left' })
   const stripMove = await callOk(bridge, 'move_on_scene', {
     item: `banner:${stripId}`,
@@ -1664,15 +1816,21 @@ try {
       AGENT_POLL
     )
     if (theme !== 'system') {
-      await waitUntil(`the Studio in the ${theme} theme`, async () => ({
-        done: await evalRenderer(
-          `return document.documentElement.classList.contains(params.theme)`,
-          {
-            theme
-          }
-        ),
-        value: theme
-      }))
+      await waitUntil(`the Studio in the ${theme} theme`, async () => {
+        if (gpuiApp) {
+          const appearance = await requestSmokeCommand(smoke, 'ui-appearance', {}, { timeoutMs })
+          return { done: appearance?.windowTheme === theme, value: appearance }
+        }
+        return {
+          done: await evalRenderer(
+            `return document.documentElement.classList.contains(params.theme)`,
+            {
+              theme
+            }
+          ),
+          value: theme
+        }
+      })
     }
   }
   const notCurated = await call(bridge, 'update_settings', { bitrateKbps: 9000 })
