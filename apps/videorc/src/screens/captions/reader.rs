@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, AppContext, Bounds, Context, Entity, Global, Pixels, ScrollHandle, Subscription, Window,
-    WindowBounds, WindowHandle, div, prelude::*, px, size,
+    WindowBounds, WindowHandle, div, prelude::*, px,
 };
 use serde_json::{Map, Value};
 use videorc_app_core::captions::{self as c, Tone};
@@ -228,11 +228,14 @@ pub fn show(cx: &mut App) {
         let open = cx.global::<Open>();
         (open.frame.clone(), open.app_id)
     };
-    let bounds = frame
-        .opening(cx)
-        .unwrap_or_else(|| Bounds::centered(None, size(px(DEFAULT_WIDTH), px(DEFAULT_HEIGHT)), cx));
+    let (bounds, min_size) = crate::app::frames::clamp_opening_bounds(
+        frame.opening(cx),
+        (f64::from(DEFAULT_WIDTH), f64::from(DEFAULT_HEIGHT)),
+        (f64::from(MIN_WIDTH), f64::from(MIN_HEIGHT)),
+        cx,
+    );
     let mut options = window::options(c::READER_NAME, bounds);
-    options.window_min_size = Some(size(px(MIN_WIDTH), px(MIN_HEIGHT)));
+    options.window_min_size = Some(min_size);
     options.app_id = Some(app_id.into());
     let opened = cx.open_window(options, move |window, cx| {
         cx.new(|cx| CaptionsReader::new(frame, feed, window, cx))

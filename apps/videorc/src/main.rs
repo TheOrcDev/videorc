@@ -58,7 +58,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use gpui::{App, AppContext, Bounds, WindowOptions, px, size};
+use gpui::{App, AppContext, WindowOptions};
 use videorc_app_core::StopOrigin;
 use videorc_app_core::desktop::deep_link::{DeepLinks, LinkSource};
 use videorc_app_core::desktop::exit_guard::AppExitKind;
@@ -730,12 +730,14 @@ fn main() -> Result<()> {
             )
         });
         // Electron's main window (P043, P1553): 1180×780 every launch (its
-        // frame is never saved), at least 960×660.
-        let window_bounds = Bounds::centered(None, size(px(1180.), px(780.)), cx);
+        // frame is never saved), at least 960×660, clamped to the display's
+        // work area (minus the taskbar) at every scale.
+        let (window_bounds, window_min_size) =
+            app::frames::initial_bounds_and_min_size((1180.0, 780.0), (960.0, 660.0), cx);
         let opened = cx.open_window(
             WindowOptions {
                 app_id: Some(APP_ID.into()),
-                window_min_size: Some(size(px(960.), px(660.))),
+                window_min_size: Some(window_min_size),
                 ..videorc_kit::window::options(nav::window_title(PageId::Studio), window_bounds)
             },
             |window, cx| {
