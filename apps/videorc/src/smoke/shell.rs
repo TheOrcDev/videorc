@@ -301,16 +301,34 @@ impl ShellSmoke for ShellWindows {
         };
         state["open"] = json!(shown);
         state["visible"] = json!(shown);
-        let bounds = preview
-            .read(cx)
-            .floating_window()
-            .and_then(|handle| handle.update(cx, |_, window, _| window.bounds().size).ok());
-        state["contentBounds"] = match bounds {
-            Some(size) => json!({
-                "width": f32::from(size.width),
-                "height": f32::from(size.height),
+        let frame = preview.read(cx).floating_window().and_then(|handle| {
+            handle
+                .update(cx, |_, window, _| (window.bounds(), window.viewport_size()))
+                .ok()
+        });
+        state["contentBounds"] = match frame {
+            Some((bounds, _)) => json!({
+                "width": f32::from(bounds.size.width),
+                "height": f32::from(bounds.size.height),
             }),
             None => Value::Null,
+        };
+        // The video's rect on the screen while it floats (top-left points),
+        // from the window's own frame: its origin, the title bar above the
+        // content, and the slot laid out in the content. The detached
+        // performance calibration checks the surface's bounds against it.
+        let slot = preview.read(cx).smoke_slot();
+        state["videoBounds"] = match (floating, frame, slot) {
+            (true, Some((bounds, viewport)), Some(slot)) => {
+                let title_bar = f32::from(bounds.size.height) - f32::from(viewport.height);
+                json!({
+                    "x": f32::from(bounds.origin.x) + f32::from(slot.origin.x),
+                    "y": f32::from(bounds.origin.y) + title_bar + f32::from(slot.origin.y),
+                    "width": f32::from(slot.size.width),
+                    "height": f32::from(slot.size.height),
+                })
+            }
+            _ => Value::Null,
         };
         Ok(state)
     }
