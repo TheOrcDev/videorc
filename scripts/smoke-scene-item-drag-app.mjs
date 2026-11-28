@@ -27,7 +27,7 @@ import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { platform, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import {
   createFreeformMouseSequence,
   freeformLiveSurfaceReady
@@ -143,6 +143,22 @@ const png = spawnSync(
   { encoding: 'utf8' }
 )
 assert.equal(png.status, 0, `ffmpeg could not make the banner fixture: ${png.stderr}`)
+
+// The GPUI app (VIDEORC_APP=gpui): the same drags and gate through
+// `scene-stage-state` and `scene-stage-gesture` (scene-item-drag-gpui.mjs).
+if (smokeAppIsGpui()) {
+  const { runSceneItemDragGpui } = await import('./lib/scene-item-drag-gpui.mjs')
+  const code = await runSceneItemDragGpui({
+    outputDirectory,
+    stripPath,
+    timeoutMs,
+    report,
+    matchBudgetMs: MATCH_BUDGET_MS,
+    restBudgetMs: REST_BUDGET_MS
+  })
+  writeFileSync(join(outputDirectory, 'report.json'), JSON.stringify(report, null, 2))
+  process.exit(code)
+}
 
 let devtoolsUrl
 let cdp
