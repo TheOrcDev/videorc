@@ -1175,7 +1175,7 @@ impl Render for StreamManager {
                         .child(
                             Button::new("back-to-live")
                                 .label("Back to live")
-                                .variant(ButtonVariant::Ghost)
+                                .variant(ButtonVariant::Outline)
                                 .on_click(move |_, _, cx| {
                                     entity.update(cx, |sm, cx| sm.back_to_live(cx));
                                 }),

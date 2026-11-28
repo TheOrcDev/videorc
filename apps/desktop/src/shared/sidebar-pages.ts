@@ -4,7 +4,7 @@
 // this module, so the order and the key map cannot drift between them.
 //
 // The keys follow one rule: the digits ⌘1–⌘9, then ⌘0, run down the rows in
-// order, skipping a row that has a fixed key in PAGE_FIXED_KEYS and any digit
+// visible order (Q187), skipping hidden Guests and a row that has a fixed key in PAGE_FIXED_KEYS and any digit
 // a fixed key already takes, until the digits run out. Swapping the layout is
 // a change to SIDEBAR_LAYOUT and PAGE_FIXED_KEYS only. For example, the Assets
 // group right after Setup, with ⌘1–⌘9 and ⌘0 over the first ten rows and
@@ -130,22 +130,63 @@ export function assignPageKeys(
   layout: readonly SidebarZoneLayout[],
   fixedKeys: Readonly<Partial<Record<SidebarPageId, PageKey>>>
 ): PageKeyEntry[] {
-  const fixed = Object.values(fixedKeys)
-  const digits = DIGIT_RUN.filter((digit) => !fixed.includes(digit))
-  return layout
-    .flatMap((zone) => zone.pages)
-    .flatMap((page): PageKeyEntry[] => {
-      const key = fixedKeys[page] ?? digits.shift()
-      return key ? [{ key, page }] : []
-    })
+  return pageKeys(true, layout, fixedKeys)
 }
 
-/** Every page with a key, in sidebar order. A page missing here has none. */
-export const PAGE_KEYS: readonly PageKeyEntry[] = assignPageKeys(SIDEBAR_LAYOUT, PAGE_FIXED_KEYS)
+/** Assign digits only after filtering the visible rows. Fixed keys never move. */
+export function pageKeys(
+  guestsShown: boolean,
+  layout: readonly SidebarZoneLayout[] = SIDEBAR_LAYOUT,
+  fixedKeys: Readonly<Partial<Record<SidebarPageId, PageKey>>> = PAGE_FIXED_KEYS
+): PageKeyEntry[] {
+  const fixed = Object.values(fixedKeys)
+  const digits = DIGIT_RUN.filter((digit) => !fixed.includes(digit))
+  const entries: PageKeyEntry[] = []
+  for (const { pages } of layout) {
+    for (const page of pages) {
+      if (!guestsShown && page === 'guests') continue
+      const key = fixedKeys[page] ?? digits.shift()
+      if (key) entries.push({ key, page })
+    }
+  }
+  return entries
+}
+
+interface SidebarCloudStatus {
+  allowance?: { enabled?: boolean; talkShows?: boolean } | null
+  room?: { phase: string } | null
+}
+
+/** Talk-show availability, shared by main and renderer. An open room stays controllable. */
+export function guestsVisible(status: SidebarCloudStatus | null | undefined): boolean {
+  return Boolean(
+    (status?.allowance?.enabled && status.allowance.talkShows) ||
+    (status?.room && status.room.phase !== 'closed')
+  )
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object'
+}
+
+/** Main receives raw backend payloads; renderer CloudStatus is already validated. */
+export function guestsVisibleFromPayload(status: unknown): boolean {
+  if (!isRecord(status)) return false
+  const { allowance, room } = status
+  return guestsVisible({
+    allowance: isRecord(allowance)
+      ? { enabled: allowance.enabled === true, talkShows: allowance.talkShows === true }
+      : null,
+    room: isRecord(room) && typeof room.phase === 'string' ? { phase: room.phase } : null
+  })
+}
+
+/** All possible page keys, for the IPC schema; runtime consumers use pageKeys. */
+export const PAGE_KEYS: readonly PageKeyEntry[] = /* @__PURE__ */ pageKeys(true)
 
 /** The key of a page, if it has one. */
-export function pageKeyFor(page: string): PageKey | undefined {
-  return PAGE_KEYS.find((entry) => entry.page === page)?.key
+export function pageKeyFor(page: string, guestsShown = true): PageKey | undefined {
+  return pageKeys(guestsShown).find((entry) => entry.page === page)?.key
 }
 
 /** A page key as an Electron accelerator: ⌘ and the key, ⇧⌘ and a letter. */
@@ -159,11 +200,14 @@ export function pageKeyAccelerator(key: PageKey): string {
  * main window and the aux windows answer the same chords. ⇧ belongs to the
  * letters alone: ⇧⌘1 or ⇧⌘, open nothing, and neither does a plain ⌘-letter.
  */
-export function pageKeyForInput(input: {
-  key: string
-  shift: boolean
-  alt: boolean
-}): PageKey | null {
+export function pageKeyForInput(
+  input: {
+    key: string
+    shift: boolean
+    alt: boolean
+  },
+  guestsShown = true
+): PageKey | null {
   if (input.alt) return null
   const key = input.shift
     ? /^[a-z]$/i.test(input.key)
@@ -172,5 +216,5 @@ export function pageKeyForInput(input: {
     : /^[0-9,]$/.test(input.key)
       ? input.key
       : null
-  return PAGE_KEYS.find((entry) => entry.key === key)?.key ?? null
+  return pageKeys(guestsShown).find((entry) => entry.key === key)?.key ?? null
 }

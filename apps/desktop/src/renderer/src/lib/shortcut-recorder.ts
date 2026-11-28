@@ -10,7 +10,7 @@ import {
   type AcceleratorKeyInput,
   type AcceleratorModifier
 } from '../../../shared/accelerator'
-import { SHORTCUTS, type ShortcutEntry } from './shortcuts'
+import { shortcutsFor, type ShortcutEntry } from './shortcuts'
 
 export type ShortcutRecorderStep =
   | { type: 'held'; modifiers: AcceleratorModifier[] }
@@ -33,12 +33,13 @@ export function acceleratorInlineLabel(accelerator: string, platform: string | u
  */
 export function appShortcutOwner(
   accelerator: string,
-  platform: string | undefined
+  platform: string | undefined,
+  guestsShown = true
 ): ShortcutEntry | null {
   const wanted = normalizeAccelerator(accelerator, platform)
   if (!wanted) return null
   return (
-    SHORTCUTS.find((entry) =>
+    shortcutsFor(guestsShown).find((entry) =>
       entry.accelerators.some((key) => normalizeAccelerator(key, platform) === wanted)
     ) ?? null
   )
@@ -83,7 +84,8 @@ export function shortcutRecorderStep(
   input: AcceleratorKeyInput,
   platform: string | undefined,
   /** The caller's own refusal, e.g. "Already used by Screen + camera." */
-  validate: (accelerator: string) => string | null
+  validate: (accelerator: string) => string | null,
+  guestsShown = true
 ): ShortcutRecorderStep {
   const result = acceleratorFromKeyInput(input, platform)
   switch (result.kind) {
@@ -110,11 +112,19 @@ export function shortcutRecorderStep(
           message: `${acceleratorInlineLabel(result.accelerator, platform)} is a system shortcut in every app. Pick another.`
         }
       }
-      const owner = appShortcutOwner(result.accelerator, platform)
+      const owner = appShortcutOwner(result.accelerator, platform, guestsShown)
       if (owner) {
         return {
           type: 'reject',
           message: `${acceleratorInlineLabel(result.accelerator, platform)} is Videorc's shortcut for “${owner.label}”. Pick another.`
+        }
+      }
+      // Reserve the full page-key vocabulary: a global key saved while
+      // Guests is hidden must not steal Sidekick's key when it reappears.
+      if (appShortcutOwner(result.accelerator, platform, true)) {
+        return {
+          type: 'reject',
+          message: `${acceleratorInlineLabel(result.accelerator, platform)} is reserved for page navigation. Pick another.`
         }
       }
       const refusal = validate(result.accelerator)

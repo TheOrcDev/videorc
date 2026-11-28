@@ -741,7 +741,7 @@ impl Render for ChatSection {
         let ghost_ink = hsla(t.foreground);
         // The full chat is the Stream Manager's; this is its door.
         let open = Button::new("studio-chat-open-stream-manager")
-            .variant(ButtonVariant::Ghost)
+            .variant(ButtonVariant::Outline)
             .label(copy::OPEN_STREAM_MANAGER)
             .accessibility_label(copy::OPEN_STREAM_MANAGER)
             .on_click(|_, _, cx| crate::screens::stream_manager::window::show(cx));

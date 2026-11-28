@@ -100,3 +100,12 @@ describe('navigationShortcutTab', () => {
     }
   })
 })
+
+it('resolves forwarded digits from current visibility, in either direction', () => {
+  for (const shown of [false, true, false]) {
+    expect(navigationShortcutTab('7', false, shown)).toBe(shown ? 'guests' : 'avatar')
+    expect(navigationShortcutTab('8', false, shown)).toBe(shown ? 'avatar' : 'ai')
+    expect(navigationShortcutTab('9', false, shown)).toBe(shown ? 'ai' : null)
+    expect(navigationShortcutTab('7', true, shown)).toBeNull()
+  }
+})

@@ -255,7 +255,7 @@ export function LibraryCloudRecordings({
               <Button
                 disabled={!online || busy}
                 size="xs"
-                variant="ghost"
+                variant="outline"
                 onClick={() => void refresh(false)}
               >
                 <RefreshIcon data-icon="inline-start" />

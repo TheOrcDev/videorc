@@ -509,11 +509,13 @@ impl SoundPlayer {
     }
 
     /// `sounds.press`: the pad's mapping for keys, remotes and `/sound`.
-    /// Play/stop and Loop stop a playing sound and start a stopped one; Play
-    /// once and While held restart.
+    /// A playing sound stops on a second press and a stopped one starts, in
+    /// every mode but While held (owner, 2026-11-27: a second tap "shouldn't
+    /// repeat it, it should stop it"; the app's pads already do this). A
+    /// remote has no release, so While held keeps restarting.
     pub(crate) async fn press(&self, state: &AppState, sound_id: &str) -> Result<SoundPressResult> {
         let sound = state.database.sound_by_id(sound_id)?;
-        if matches!(sound.mode, SoundMode::Toggle | SoundMode::Loop) {
+        if sound.mode != SoundMode::Hold {
             let pending = self.lock().pending.remove(sound_id).is_some();
             let playing: Vec<u64> = self
                 .lock()
@@ -745,6 +747,20 @@ mod tests {
         assert!(!pressed.on_air);
         assert_eq!(player.playback().voices.len(), 1);
         let pressed = player.press(&state, &toggle.id).await.unwrap();
+        assert!(pressed.voice_id.is_some());
+
+        // Play once: a second press stops the playing sound (a remote's
+        // second tap), a third starts it again.
+        let pressed = player.press(&state, &once.id).await.unwrap();
+        assert_eq!(pressed.voice_id, None);
+        assert!(
+            player
+                .playback()
+                .voices
+                .iter()
+                .all(|voice| voice.sound_id != once.id)
+        );
+        let pressed = player.press(&state, &once.id).await.unwrap();
         assert!(pressed.voice_id.is_some());
 
         // Loop: outlives its duration until stopped.

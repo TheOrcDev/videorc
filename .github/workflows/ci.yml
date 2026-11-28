@@ -76,9 +76,10 @@ jobs:
     # failures — only a cold or contended compile. Run 45832014444 compiled
     # successfully in 51 min, then hit the old 75 min job ceiling during
     # passing tests after Plan 260 and both clippy passes took another 19 min.
-    # Allow those gates plus the existing 55 min compile, 15 min test and
-    # 15 min camera-extension step budgets; keep each step limit unchanged.
-    timeout-minutes: 110
+    # Allow those gates plus the 90 min compile, 15 min test and 15 min
+    # camera-extension step budgets: run 46028817304 (main e6999334c) spent
+    # 18 min before Compile tests, so 150 leaves room for the post steps.
+    timeout-minutes: 150
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -179,7 +180,9 @@ jobs:
         # hit, while the same crate's Linux compile held at 9 min. Busy
         # stacked-branch runners later hit the old 45-minute step timeout
         # (#1756, #1771, #1839) with no failing tests — raise with the job.
-        timeout-minutes: 55
+        # 2026-11-27: main and #2440 hit the 55 min limit still compiling
+        # (run 46028817304, no test failures) as Plan 260 grew the workspace.
+        timeout-minutes: 90
         run: cargo test -p videorc-backend --no-run
 
       - name: Test
@@ -206,7 +209,9 @@ jobs:
     needs: scope
     if: ${{ needs.scope.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.scope.outputs.macos_sentinel == 'true' && needs.scope.outputs.electron_tests == 'true' }}
     runs-on: macos-15
-    timeout-minutes: 20
+    # 2026-11-27: the backend build alone hit its 15 min step limit on busy
+    # runners (#2477, #2525 runs); 30 min build + boot/sentinel fits in 40.
+    timeout-minutes: 40
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -251,7 +256,7 @@ jobs:
         # The sentinel launches the dev app through `cargo run`. Build the
         # exact binary first so its 120-second readiness budget measures app
         # startup rather than a cold Rust binary link on the macOS runner.
-        timeout-minutes: 15
+        timeout-minutes: 30
         run: cargo build -p videorc-backend --bin videorc-backend
 
       - name: Install dependencies

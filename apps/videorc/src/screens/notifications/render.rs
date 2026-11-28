@@ -44,7 +44,7 @@ impl Centre {
             header = header.child(
                 Button::new("clear-all")
                     .label("Clear all")
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.hub.update(cx, |hub, cx| hub.clear(None, cx))
@@ -182,7 +182,7 @@ impl Centre {
                     .variant(if index == 0 {
                         ButtonVariant::Default
                     } else {
-                        ButtonVariant::Ghost
+                        ButtonVariant::Outline
                     })
                     .disabled(!available || busy)
                     .map(|button| {

@@ -10,6 +10,7 @@ import { SceneList } from './scene-list'
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown>, editScene: vi.fn() }))
 vi.mock('@/hooks/use-studio', () => ({
+  useStudioCloud: () => ({ cloudStatus: null }),
   useStudioCore: () => mocked.core,
   useStudioAudio: () => ({ audioMeter: null })
 }))

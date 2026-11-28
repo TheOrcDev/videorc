@@ -27,7 +27,7 @@ import {
   SIDEBAR_LAYOUT,
   SIDEBAR_PAGE_LABELS,
   pageKeyAccelerator,
-  pageKeyFor,
+  pageKeys,
   type PageKey,
   type SidebarZoneId
 } from '../../../shared/sidebar-pages'
@@ -125,18 +125,17 @@ export type SidebarZone = {
 export const SIDEBAR_ZONES: readonly SidebarZone[] = SIDEBAR_LAYOUT
 
 // Page shortcuts, derived there: ⌘1–⌘9 down the nine rows above the Assets
-// group (Guests ⌘7 whether or not its row shows), ⇧⌘G Images, ⇧⌘S Sounds,
+// group after visibility filtering, ⇧⌘G Images, ⇧⌘S Sounds,
 // ⌘0 Library, ⌘, Settings. Health has NO key: it stays reachable via ⌘K, the
 // status bar and the account menu. Main forwards the key and AppShell maps it
 // here.
-export const WORKSPACE_SHORTCUTS: readonly { key: PageKey; tab: WorkspaceTab }[] = PAGE_KEYS.map(
-  ({ key, page }) => ({ key, tab: page })
-)
+export const WORKSPACE_SHORTCUTS: readonly { key: PageKey; tab: WorkspaceTab }[] =
+  /* @__PURE__ */ PAGE_KEYS.map(({ key, page }) => ({ key, tab: page }))
 
 /** A page's shortcut as an Electron accelerator (`CmdOrCtrl+7`, `CmdOrCtrl+Shift+G`), if it has one. */
-export function pageShortcutFor(tab: WorkspaceTab): string | undefined {
-  const key = pageKeyFor(tab)
-  return key ? pageKeyAccelerator(key) : undefined
+export function pageShortcutFor(tab: WorkspaceTab, guestsShown = true): string | undefined {
+  const entry = pageKeys(guestsShown).find(({ page }) => page === tab)
+  return entry && pageKeyAccelerator(entry.key)
 }
 
 /** Every page the sidebar shows, top to bottom (Health has no row). */

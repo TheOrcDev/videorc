@@ -8,6 +8,7 @@ import { sceneKeyDescription, useSceneDialogs, type SceneDialogRequest } from '.
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
 vi.mock('@/hooks/use-studio', () => ({
+  useStudioCloud: () => ({ cloudStatus: null }),
   useStudioCore: () => mocked.core,
   useStudioAudio: () => ({ audioMeter: null })
 }))

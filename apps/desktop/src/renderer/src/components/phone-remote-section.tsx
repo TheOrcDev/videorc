@@ -162,7 +162,7 @@ function PairingDialog({
 
           {revealed && !expired ? (
             <Button
-              variant="ghost"
+              variant="outline"
               onClick={() => void copyLink(pairing.url, "Couldn't copy the pairing link.")}
             >
               <CopyIcon data-icon="inline-start" />

@@ -20,7 +20,7 @@ import { avatarPlacementView } from '@/lib/avatar-tab-view'
 import { buddyDisplayName } from '@/lib/buddy-auto-chat-view'
 import { closeBuddyPetCreator, useBuddyPetCreatorOpen } from '@/lib/buddy-pet-creator-nav'
 import { buddyPictureUrl } from '@/lib/buddy-picture'
-import { shortcutAccelerator } from '@/lib/shortcuts'
+import { pageShortcutFor } from '@/components/workspace-nav'
 import { cn } from '@/lib/utils'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
@@ -131,7 +131,7 @@ function AvatarStatus(): ReactElement {
           <SceneIcon data-icon="inline-start" />
           Place on Scene
           <ShortcutKeys
-            accelerator={shortcutAccelerator('nav-layouts')}
+            accelerator={pageShortcutFor('layouts')!}
             className="ml-0.5"
             platform={runtimeInfo?.platform}
           />

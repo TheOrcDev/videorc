@@ -1,4 +1,3 @@
-import type { CloudStatus } from '@/lib/backend'
 import { STORAGE_KEYS } from '@/lib/capture'
 import { openWorkspaceTab } from '@/lib/workspace-navigation'
 
@@ -19,13 +18,7 @@ export const LIVESTREAM_VIEWS = [
   { id: 'discord', label: 'Discord' }
 ] as const
 
-/** The Guests page shows (plan 224 D16): launch flags fail closed, but an open room stays controllable. */
-export function guestsVisible(status: CloudStatus | null): boolean {
-  return Boolean(
-    (status?.allowance?.enabled && status.allowance.talkShows) ||
-    (status?.room && status.room.phase !== 'closed')
-  )
-}
+export { guestsVisible } from '../../../shared/sidebar-pages'
 
 export type LivestreamViewId = (typeof LIVESTREAM_VIEWS)[number]['id']
 

@@ -20,11 +20,7 @@
 
 import { Menu, type MenuItemConstructorOptions } from 'electron'
 
-import {
-  APP_MENU_PAGE_GROUPS,
-  APP_MENU_WINDOWS,
-  type AppMenuWindowId
-} from '../shared/app-menu-items'
+import { appMenuPageGroups, APP_MENU_WINDOWS, type AppMenuWindowId } from '../shared/app-menu-items'
 import { pageKeyAccelerator, type PageKey } from '../shared/sidebar-pages'
 
 export interface AppMenuActions {
@@ -42,6 +38,7 @@ export interface AppMenuOptions {
   /** A window a developer kill switch turned off (VIDEORC_*_WINDOW=0) leaves the menu. */
   windowsEnabled: Readonly<Record<AppMenuWindowId, boolean>>
   actions: AppMenuActions
+  guestsShown?: boolean
 }
 
 const separator = (): MenuItemConstructorOptions => ({ type: 'separator' })
@@ -68,7 +65,7 @@ export function appMenuTemplate(options: AppMenuOptions): MenuItemConstructorOpt
       : [{ label: 'View', submenu: [...development, { role: 'togglefullscreen' }] }]
   }
 
-  const pages = APP_MENU_PAGE_GROUPS.flatMap((group, index) => [
+  const pages = appMenuPageGroups(options.guestsShown ?? true).flatMap((group, index) => [
     ...(index > 0 ? [separator()] : []),
     ...group.map(
       (page): MenuItemConstructorOptions => ({

@@ -184,7 +184,7 @@ export function NotificationCenter({
             data-notification-clear-all=""
             size="xs"
             type="button"
-            variant="ghost"
+            variant="outline"
             onClick={() => source.clearAll()}
           >
             Clear all

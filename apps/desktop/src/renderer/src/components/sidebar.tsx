@@ -250,9 +250,6 @@ function SidebarUpdateChip({
  * The Guests row shows only with talk shows (plan 224 D16), the same rule as
  * ⌘K. Its own component, so only it follows the cloud's status.
  */
-function GuestsRow({ children }: { children: ReactElement }): ReactElement | null {
-  return guestsVisible(useStudioCloud().cloudStatus) ? children : null
-}
 
 export function Sidebar({
   active,
@@ -295,6 +292,7 @@ export function Sidebar({
   // Chips reveal while the command modifier is held — the shortcut layer
   // surfaces exactly when the user reaches for it (videorc-design keeps the
   // app keyboard-first; this keeps it quiet too).
+  const guestsShown = guestsVisible(useStudioCloud().cloudStatus)
   const shortcutVisible = useModifierHeld(platform)
   // The cascade is an inline delay, so no CSS variant can drop it for us.
   const reducedMotion = useReducedMotion()
@@ -312,7 +310,7 @@ export function Sidebar({
         // The panels keep their pre-rail trigger ids (`streaming` for
         // Destinations), so smokes and automation keep working.
         triggerId={panel?.legacyTabId ?? tab}
-        shortcut={pageShortcutFor(tab)}
+        shortcut={pageShortcutFor(tab, guestsShown)}
         shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(tab)}
         platform={platform}
         shortcutVisible={shortcutVisible}
@@ -374,7 +372,7 @@ export function Sidebar({
           icon={studio.icon}
           label={studio.label}
           isActive={active === 'studio'}
-          shortcut={pageShortcutFor('studio')}
+          shortcut={pageShortcutFor('studio', guestsShown)}
           platform={platform}
           shortcutVisible={shortcutVisible}
           trailing={
@@ -390,9 +388,7 @@ export function Sidebar({
             {zone.label ? (
               <SectionLabel className="px-2.5 pb-1 leading-none">{zone.label}</SectionLabel>
             ) : null}
-            {zone.pages.map((tab) =>
-              tab === 'guests' ? <GuestsRow key={tab}>{pageRow(tab)}</GuestsRow> : pageRow(tab)
-            )}
+            {zone.pages.map((tab) => (tab === 'guests' && !guestsShown ? null : pageRow(tab)))}
           </div>
         ))}
 

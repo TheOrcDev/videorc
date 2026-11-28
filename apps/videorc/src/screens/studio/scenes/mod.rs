@@ -1510,7 +1510,7 @@ impl ScenesSection {
                 // Plan 215 D4: the same Edit scene as the Scene page's and
                 // ⌘K's. The Scene page turns its editor on as it lands.
                 Button::new("scene-edit")
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .label(copy::EDIT_SCENE)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenPage::of(PageId::Layouts)))),
             )
