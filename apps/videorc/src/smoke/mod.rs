@@ -91,6 +91,12 @@ pub trait ShellSmoke: 'static {
     fn preview(&self, command: &str, cx: &mut App) -> Result<Value, String>;
     /// The preview, once the main window started it (`preview-surface-sample`).
     fn preview_entity(&self) -> Option<gpui::Entity<crate::preview::Preview>>;
+    /// `scene-stage-state`: the Scene canvas editor's stage (its canvas in
+    /// window points, each item and source in canvas fractions, the
+    /// selection, the phase and a gesture's ghost).
+    fn scene_stage(&self, cx: &mut App) -> Result<Value, String>;
+    /// `scene-stage-select`: a stage item's chip clicked, by its stage id.
+    fn scene_select(&self, stage_id: &str, cx: &mut App) -> Result<Value, String>;
 }
 
 /// The preview's commands on the GPUI app. The preview draws in the main
@@ -192,6 +198,9 @@ impl SmokeCommandHandler for ShellCommands {
             || command == "open-tab"
             || command == "main-window-id"
             || command == "studio-reveal-vertical-stream"
+            || command == "scene-stage-state"
+            || command == "scene-stage-gesture"
+            || command == "scene-stage-select"
             || PREVIEW_COMMANDS.contains(&command)
     }
 
@@ -255,6 +264,33 @@ impl SmokeCommandHandler for ShellCommands {
             }
             if command == "main-window-id" {
                 return self.ui.run(main_window_id).await?;
+            }
+            if command == "scene-stage-gesture" {
+                let (action, at) = stage_gesture_params(&params)?;
+                return self
+                    .ui
+                    .run(move |cx| stage_gesture(action, at, cx))
+                    .await?;
+            }
+            if command == "scene-stage-select" {
+                if params.keys().any(|key| key != "id") {
+                    return Err("scene-stage-select takes the stage id only (id).".into());
+                }
+                let id = params
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or("scene-stage-select needs id (a stage id).")?
+                    .to_string();
+                return self
+                    .ui
+                    .run(move |cx| shell(cx)?.scene_select(&id, cx))
+                    .await?;
+            }
+            if command == "scene-stage-state" {
+                if !params.is_empty() {
+                    return Err("scene-stage-state takes no parameters.".into());
+                }
+                return self.ui.run(|cx| shell(cx)?.scene_stage(cx)).await?;
             }
             if command == "studio-reveal-vertical-stream" {
                 return self
@@ -387,6 +423,72 @@ pub(crate) fn shell(cx: &App) -> Result<Rc<dyn ShellSmoke>, String> {
         .ok_or_else(|| MAIN_WINDOW_NOT_READY.to_string())
 }
 
+/// `scene-stage-gesture`'s steps: Electron's scene-item-drag smoke sends
+/// trusted pointer events one at a time over CDP and reads the stage and the
+/// backend between them; this is the same, through the main window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StageGestureAction {
+    Press,
+    Move,
+    Release,
+}
+
+/// `{action: "press" | "move" | "release", x, y}`, main-window points.
+fn stage_gesture_params(
+    params: &serde_json::Map<String, Value>,
+) -> Result<(StageGestureAction, (f64, f64)), String> {
+    if let Some(key) = params
+        .keys()
+        .find(|key| !matches!(key.as_str(), "action" | "x" | "y"))
+    {
+        return Err(format!("scene-stage-gesture takes action, x and y, not {key:?}."));
+    }
+    let action = match params.get("action").and_then(Value::as_str) {
+        Some("press") => StageGestureAction::Press,
+        Some("move") => StageGestureAction::Move,
+        Some("release") => StageGestureAction::Release,
+        _ => return Err("scene-stage-gesture's action is press, move or release.".into()),
+    };
+    let number = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| format!("scene-stage-gesture needs {key} in main-window points."))
+    };
+    Ok((action, (number("x")?, number("y")?)))
+}
+
+/// One pointer step on the main window, between two frames: the one it hits
+/// against and the one it paints (the stage's ghost and its draft follow
+/// that frame, as a real pointer's do).
+fn stage_gesture(
+    action: StageGestureAction,
+    at: (f64, f64),
+    cx: &mut App,
+) -> Result<Value, String> {
+    let handle = shell(cx)?
+        .window(UiWindow::Main, cx)
+        .ok_or(MAIN_WINDOW_NOT_READY)?;
+    let modifiers = gpui::Modifiers::none();
+    handle
+        .update(cx, |_, window, cx| {
+            // Hit-testing reads the last frame's hitboxes: draw the page as it
+            // is now first (a scroll or a selection may not have painted yet).
+            window.refresh();
+            window.draw(cx).clear(cx);
+            match action {
+                StageGestureAction::Press => driver::pointer_press(at, modifiers, window, cx),
+                StageGestureAction::Move => driver::pointer_move(at, modifiers, window, cx),
+                StageGestureAction::Release => driver::pointer_release(at, modifiers, window, cx),
+            }
+            window.refresh();
+            window.draw(cx).clear(cx);
+        })
+        .map_err(|_| MAIN_WINDOW_NOT_READY.to_string())?;
+    Ok(serde_json::json!({ "action": format!("{action:?}").to_lowercase(), "x": at.0, "y": at.1 }))
+}
+
 type Job = Box<dyn FnOnce(&mut App) + Send>;
 
 /// A handle the server's tasks use to run work on GPUI's foreground.
@@ -497,12 +599,39 @@ pub fn start(cx: &mut App, start: SmokeStart) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenTab, SmokeDialog};
+    use super::{OpenTab, SmokeDialog, StageGestureAction, stage_gesture_params};
     use serde_json::{Map, Value, json};
     use videorc_app_core::first_run::{Goal, Step};
 
     fn params(value: Value) -> Map<String, Value> {
         value.as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn a_stage_gesture_is_one_pointer_step_in_window_points() {
+        assert_eq!(
+            stage_gesture_params(&params(json!({ "action": "press", "x": 10.5, "y": 20 }))),
+            Ok((StageGestureAction::Press, (10.5, 20.0)))
+        );
+        assert_eq!(
+            stage_gesture_params(&params(json!({ "action": "release", "x": 0, "y": 0 }))),
+            Ok((StageGestureAction::Release, (0.0, 0.0)))
+        );
+        assert!(
+            stage_gesture_params(&params(json!({ "action": "tap", "x": 1, "y": 2 })))
+                .unwrap_err()
+                .contains("press, move or release")
+        );
+        assert!(
+            stage_gesture_params(&params(json!({ "action": "move", "x": 1 })))
+                .unwrap_err()
+                .contains("needs y")
+        );
+        assert!(
+            stage_gesture_params(&params(json!({ "action": "move", "x": 1, "y": 2, "steps": 3 })))
+                .unwrap_err()
+                .contains("\"steps\"")
+        );
     }
 
     #[test]

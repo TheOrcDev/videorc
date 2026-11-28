@@ -713,6 +713,22 @@ impl Shell {
             .update(cx, |studio, cx| studio.reveal_audio(window, cx));
     }
 
+    /// `scene-stage-state`: the Scene page's canvas editor as its next render
+    /// shows it ([`crate::screens::scene::ScenePage::smoke_stage_state`]).
+    pub fn smoke_scene_stage(&mut self, cx: &mut Context<Self>) -> serde_json::Value {
+        self.scene.update(cx, |scene, cx| scene.smoke_stage_state(cx))
+    }
+
+    /// `scene-stage-select`: the Scene page's chip for `stage_id`, clicked.
+    pub fn smoke_scene_select(
+        &mut self,
+        stage_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, String> {
+        self.scene
+            .update(cx, |scene, cx| scene.smoke_select_stage(stage_id, cx))
+    }
+
     /// Gallery Vertical stream: Studio with the bottom-row Vertical stream
     /// panel scrolled into view (after `gallery-seed-vertical-stream`).
     pub fn reveal_studio_vertical_stream(&mut self, window: &mut Window, cx: &mut Context<Self>) {

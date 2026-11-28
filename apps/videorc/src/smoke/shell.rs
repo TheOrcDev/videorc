@@ -187,6 +187,18 @@ impl ShellSmoke for ShellWindows {
         self.preview.borrow().clone()
     }
 
+    fn scene_select(&self, stage_id: &str, cx: &mut App) -> Result<Value, String> {
+        self.main
+            .update(cx, |shell, _, cx| shell.smoke_scene_select(stage_id, cx))
+            .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())?
+    }
+
+    fn scene_stage(&self, cx: &mut App) -> Result<Value, String> {
+        self.main
+            .update(cx, |shell, _, cx| shell.smoke_scene_stage(cx))
+            .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())
+    }
+
     fn preview(&self, command: &str, cx: &mut App) -> Result<Value, String> {
         let preview = self
             .preview
