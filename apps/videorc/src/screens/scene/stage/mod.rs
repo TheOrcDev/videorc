@@ -34,6 +34,7 @@ use videorc_app_core::editor::inspector::{
 };
 use videorc_app_core::editor::stage::{
     CameraCorner, CommitTicket, DraftChannel, DraftSend, DraftWanted, GestureKind, GestureStart,
+    hold_params,
     Ghost, HandleId, HitTarget, KeyChord, Modifiers as StageModifiers, OVERLAY_ITEMS, PictureInput,
     PixelSize, PresetCameraLayout, SelectionHit, Settled, StageCrop, StageEdits, StageGesture,
     StageHit, StageItemBadge, StageMapping, StageRect, background_stage_margin,
@@ -453,6 +454,53 @@ fn item_badge(on_stream: bool, in_recording: bool) -> (Option<StageItemBadge>, b
 }
 
 impl ScenePage {
+    /// `scene-stage-state` (the scene-item-drag smoke's oracle, the DOM's
+    /// ghost rects on Electron): the canvas box in window points, each thing
+    /// on the stage as it shows now (a dragged one at its ghost) in canvas
+    /// fractions, the selection, the phase and the gesture's ghost. Built as
+    /// the next render builds it.
+    pub(crate) fn smoke_stage_state(&mut self, cx: &mut Context<Self>) -> Value {
+        let view = self.stage_view(cx);
+        let canvas = self.stage.canvas_box().map(|(_, canvas)| {
+            json!({
+                "x": f32::from(canvas.origin.x),
+                "y": f32::from(canvas.origin.y),
+                "width": f32::from(canvas.size.width),
+                "height": f32::from(canvas.size.height),
+            })
+        });
+        let entries: Vec<Value> = view
+            .entries
+            .iter()
+            .map(|entry| {
+                json!({
+                    "id": entry.id,
+                    "label": entry.label,
+                    "rect": entry.rect.json(),
+                    "item": entry.item(),
+                    "off": entry.off,
+                    "editable": entry.editable,
+                    "picture": entry.picture.is_some(),
+                })
+            })
+            .collect();
+        let ghost = self.stage.gesture.as_ref().map(|active| {
+            json!({
+                "id": active.motion.source_id,
+                "rect": active.ghost.rect.json(),
+                "moved": active.moved,
+            })
+        });
+        json!({
+            "canvas": canvas,
+            "phase": self.stage.phase().as_str(),
+            "live": self.stage.live,
+            "selected": view.selected,
+            "entries": entries,
+            "ghost": ghost,
+        })
+    }
+
     /// The stage from the latest snapshot and the page's state; it also
     /// settles what the scene shows (a landed commit, a corner drop) and
     /// drops a gesture whose scene changed under it.
@@ -729,6 +777,24 @@ impl ScenePage {
         if self.stage.gesture.is_some() {
             self.drop_gesture(cx);
             cx.notify();
+        }
+    }
+
+    /// Electron's idle selection hold (`channel.hold`, scene-stage.tsx
+    /// 658-726): on the live canvas, at rest, the selection holds a
+    /// chrome-only draft (its chrome hidden: GPUI draws its own) so the
+    /// backend keeps it on the live picture, the Avatar's pet included,
+    /// which the idle preview otherwise never draws. A gesture, or a release
+    /// whose save hasn't landed, keeps its own draft; off the live canvas, or
+    /// with nothing selected, nothing is held.
+    fn sync_selection_hold(&mut self, view: &StageView, cx: &mut Context<Self>) {
+        if self.stage.phase() != StagePhase::Idle {
+            return;
+        }
+        let wanted = selection_hold(self.stage.live, view.selected.as_deref());
+        if *self.stage.channel.wanted() != wanted {
+            self.stage.channel.want(wanted);
+            self.pump_drafts(cx);
         }
     }
 
@@ -1383,6 +1449,15 @@ impl ScenePage {
     }
 }
 
+/// What the draft wire holds at rest: the selection's chrome-only hold on
+/// the live canvas, else nothing.
+fn selection_hold(live: bool, selected: Option<&str>) -> DraftWanted {
+    match selected.filter(|_| live) {
+        Some(id) => DraftWanted::Hold(hold_params(id)),
+        None => DraftWanted::None,
+    }
+}
+
 /// A banner's place for one orientation.
 fn banner_place(banner: &Banner, vertical: bool) -> StageRect {
     let place = if vertical {
@@ -1410,5 +1485,28 @@ fn draft_of(active: &Active) -> Value {
             active.motion.crop,
         ),
         _ => draft_params(&active.motion.source_id, active.ghost.rect, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Electron holds the selection on the live canvas only (the floating
+    /// preview shows no selection at rest), and nothing with no selection.
+    #[test]
+    fn the_live_canvas_holds_the_selection_at_rest() {
+        assert_eq!(
+            selection_hold(true, Some("overlay:buddy")),
+            DraftWanted::Hold(hold_params("overlay:buddy"))
+        );
+        assert_eq!(selection_hold(false, Some("overlay:buddy")), DraftWanted::None);
+        assert_eq!(selection_hold(true, None), DraftWanted::None);
+        // The hold names the item and draws no chrome (GPUI draws its own).
+        let DraftWanted::Hold(params) = selection_hold(true, Some("banner:b")) else {
+            panic!("a hold");
+        };
+        assert_eq!(params["sourceId"], "banner:b");
+        assert!(params.get("transform").is_none());
     }
 }

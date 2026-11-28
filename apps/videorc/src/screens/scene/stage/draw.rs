@@ -119,6 +119,7 @@ impl ScenePage {
         self.stage.live = live;
         let focus = self.ensure_stage_focus(window, cx);
         let view = self.stage_view(cx);
+        self.sync_selection_hold(&view, cx);
         self.stage.facts = view.facts(self.stage.snap);
         let t = theme::resolve(None, window, cx);
         let pixels = self.stage.canvas_pixels();
