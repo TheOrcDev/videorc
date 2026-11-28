@@ -699,13 +699,6 @@ impl<B: StudioBackend> Studio<B> {
         }
     }
 
-    /// `loadScene` with the capture config (`reloadSceneFromCaptureConfig`):
-    /// the capture config's scene with the working background is committed
-    /// (`scene.load_from_capture_config`, `applyCommittedScene`), and the
-    /// working setup it confirms is saved (`persistWorkingVisual`); a reload
-    /// a key or switch overtook saves nothing. Nothing is asked while the
-    /// backend is away. S1.6b part 5e: the Clips ring's reload and the scene
-    /// editor's reload after an idle pick share it.
     /// `reloadSceneFromCaptureConfig` where no preview element commits the
     /// scene (Windows until plan 260 S2.3b). On macOS and Linux the preview
     /// feed commits the Studio's scene; without it the backend held no
@@ -716,6 +709,13 @@ impl<B: StudioBackend> Studio<B> {
         self.load_scene_from_capture_config().await
     }
 
+    /// `loadScene` with the capture config (`reloadSceneFromCaptureConfig`):
+    /// the capture config's scene with the working background is committed
+    /// (`scene.load_from_capture_config`, `applyCommittedScene`), and the
+    /// working setup it confirms is saved (`persistWorkingVisual`); a reload
+    /// a key or switch overtook saves nothing. Nothing is asked while the
+    /// backend is away. S1.6b part 5e: the Clips ring's reload and the scene
+    /// editor's reload after an idle pick share it.
     pub(super) async fn load_scene_from_capture_config(
         &self,
     ) -> Result<(), crate::client::RpcError> {
