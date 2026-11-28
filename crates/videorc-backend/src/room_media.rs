@@ -582,6 +582,17 @@ pub(crate) async fn run_camera(
         (fixture, fixture.bgra())
     });
     let mut fixture_sequence = 0u64;
+    // Why nothing is published, said once per change (every wait below is a
+    // `continue`, so a missing camera in the room names its reason in the log).
+    let mut waiting_for: &'static str = "";
+    let mut note = |reason: &'static str| {
+        if waiting_for != reason {
+            waiting_for = reason;
+            if !reason.is_empty() {
+                tracing::info!("The backend's room camera is not published: {reason}");
+            }
+        }
+    };
     loop {
         update_media(&state, &show_id, |media| media.camera = published.is_some());
         tokio::select! {
@@ -595,6 +606,7 @@ pub(crate) async fn run_camera(
         }
         if !camera().is_some_and(|settings| settings.valid()) {
             unpublish_camera(&room, &mut published).await;
+            note("the Studio has not turned a room camera on (cloud.room.camera.set)");
             continue;
         }
         // The app's scene layout (the key and look the compositor applies to
@@ -616,6 +628,7 @@ pub(crate) async fn run_camera(
         };
         if background_is_effect(&layout) {
             unpublish_camera(&room, &mut published).await;
+            note("the scene's background is an effect, which the room camera does not draw");
             continue;
         }
         let taken = if let Some((fixture, bytes)) = fixture.as_ref() {
@@ -628,11 +641,13 @@ pub(crate) async fn run_camera(
             ))
         } else {
             if crate::preview_camera::camera_lent_to_talk_show(&state).await {
+                note("the camera is lent to the talk show");
                 continue;
             }
             let Some(frame_source) =
                 crate::preview_camera::preview_camera_frame_source(&state).await
             else {
+                note("the preview camera is not running");
                 continue;
             };
             let generation = frame_source.generation();
@@ -649,6 +664,7 @@ pub(crate) async fn run_camera(
         };
         last = Some(key);
         let Some(size) = camera_size(width, height) else {
+            note("the camera's picture size is not one the room publishes");
             continue;
         };
         let behind = match room_background {
@@ -690,8 +706,10 @@ pub(crate) async fn run_camera(
         })
         .await
         else {
+            note("the camera frame could not be drawn for the room");
             continue;
         };
+        note("");
         if published.as_ref().is_some_and(|camera| camera.size != size) {
             unpublish_camera(&room, &mut published).await;
         }

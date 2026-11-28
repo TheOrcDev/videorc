@@ -483,7 +483,14 @@ describe('SessionTransport reason line (plan 174 S3.2)', () => {
 
   // Owner call, 2026-11-27: with no destination on, the row is one "Open
   // Destinations" button, and the reason is its hover and its description.
-  const renderBlocked = (reason: string, setActive: (tab: string) => void): void =>
+  const renderBlocked = (
+    reason: string,
+    setActive: (tab: string) => void,
+    jump: { label: string; to: 'live' | 'diagnostics' } | null = {
+      label: OPEN_DESTINATIONS_LABEL,
+      to: 'live'
+    }
+  ): void =>
     act(() =>
       root.render(
         createElement(
@@ -508,7 +515,7 @@ describe('SessionTransport reason line (plan 174 S3.2)', () => {
               recordBlockedReason: null,
               liveStreamBlockedReason: reason,
               blockedReason: reason,
-              blockedJump: { label: OPEN_DESTINATIONS_LABEL, to: 'live' },
+              blockedJump: jump,
               onRecord: noop,
               onLiveStream: noop,
               onStop: noop
@@ -553,17 +560,39 @@ describe('SessionTransport reason line (plan 174 S3.2)', () => {
     expect(setActive).toHaveBeenCalledExactlyOnceWith('live')
   })
 
-  it('keeps the reason line and its jump for every other reason', () => {
-    const setActive = vi.fn()
-    const reason = 'You can stream to up to 5 destinations at once.'
-    renderBlocked(reason, setActive)
+  it('is a button for every other reason that has a jump: a plan limit, a missing recorder', () => {
+    const cases = [
+      {
+        reason: 'You can stream to up to 5 destinations at once.',
+        jump: { label: OPEN_DESTINATIONS_LABEL, to: 'live' as const }
+      },
+      {
+        reason: START_BLOCKED_COPY.recorderMissing,
+        jump: { label: 'Open Health', to: 'diagnostics' as const }
+      }
+    ]
+    for (const { reason, jump } of cases) {
+      const setActive = vi.fn()
+      renderBlocked(reason, setActive, jump)
+      const row = container.querySelector('[data-slot="session-blocked-reason"]')
+      const buttons = row?.querySelectorAll('button') ?? []
+      expect(buttons).toHaveLength(1)
+      expect(buttons[0].textContent).toBe(jump.label)
+      // No info line and no text link: the reason is the button's description.
+      expect(row?.querySelector('svg')).toBeNull()
+      expect(row?.querySelector('span:not([hidden])')).toBeNull()
+      const description = document.getElementById(buttons[0].getAttribute('aria-describedby') ?? '')
+      expect(description?.textContent).toBe(reason)
+      act(() => buttons[0].click())
+      expect(setActive).toHaveBeenCalledExactlyOnceWith(jump.to)
+    }
+  })
+
+  it('keeps a quiet reason line for a reason with no jump', () => {
+    renderBlocked(START_BLOCKED_COPY.noOutput, vi.fn(), null)
     const row = container.querySelector('[data-slot="session-blocked-reason"]')
-    expect(row?.textContent).toContain(reason)
-    const jump = row?.querySelector('button')
-    expect(jump?.textContent).toBe('Open Destinations')
-    expect(jump?.dataset.slot).toBeUndefined()
-    act(() => jump?.click())
-    expect(setActive).toHaveBeenCalledExactlyOnceWith('live')
+    expect(row?.textContent).toBe(START_BLOCKED_COPY.noOutput)
+    expect(row?.querySelector('button')).toBeNull()
   })
 })
 

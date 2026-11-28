@@ -106,47 +106,48 @@ mod room_clock;
 mod room_frame_bridge;
 // Plan 249 S13b: the processed camera role's native producer.
 mod room_camera_source;
-// Plan 260 S1.8: the talk show's room from the backend (macOS first).
-#[cfg(target_os = "macos")]
+// Plan 260 S1.8: the talk show's room from the backend (the `backend_room`
+// platforms, `build.rs`).
+#[cfg(backend_room)]
 mod room_assets;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_aux;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_avatar;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_avatar_build;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 #[allow(
     dead_code,
     reason = "plan 260 S1.8b: the presentation publishers (graphics, avatar, scene, HTML layers) read the receipts in its next parts"
 )]
 mod room_capability;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_content;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_graphics;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_guest_speech;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_host;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_html;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_latency;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_media;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_overlays;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_playout;
 mod room_program_camera;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_remote;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_routing;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_scene;
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 mod room_screen;
 mod room_system_audio;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
@@ -158,6 +159,7 @@ mod incident_tone;
 mod kick;
 mod kick_chat;
 mod linux_desktop_check;
+mod linux_pipewire_shim;
 #[cfg(any(test, target_os = "linux"))]
 mod linux_pipewire_stream;
 mod linux_portal_capture;
@@ -766,9 +768,9 @@ async fn run_backend(device_changes: tokio::sync::watch::Receiver<u64>) -> Resul
     tokio::spawn(banner_timers::run_banner_timers(state.clone()));
     // Plan 232: which HTML overlays main renders, and where each stands.
     tokio::spawn(html_overlay::run_html_overlay_targets(state.clone()));
-    // Plan 260 S1.8a: the backend holds the talk show's host seat (dev
-    // switch, macOS).
-    #[cfg(target_os = "macos")]
+    // Plan 260 S1.8a: the backend holds the talk show's host seat (its
+    // switch, on the `backend_room` platforms).
+    #[cfg(backend_room)]
     room_host::start(state.clone());
     // Plan 214 D4: Videorc Camera comes back on when it was on.
     virtual_camera_service::start_from_settings(&state).await;
@@ -1822,7 +1824,7 @@ async fn room_remote_bmp_handler(
     if http_backend_role(&state, &query.token).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(backend_room)]
     {
         let Some(frame) = room_remote::latest(&query.identity, &query.source) else {
             return html_overlay::html_overlay_preview_response(
@@ -1859,7 +1861,7 @@ async fn room_remote_bmp_handler(
             bmp: axum::body::Bytes::from(bmp),
         })
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(backend_room))]
     {
         let _ = (
             &query.identity,
@@ -14150,7 +14152,7 @@ async fn handle_text_message_with_role(
         // the backend's room to deliver while it holds the host seat.
         "cloud.room.avatar.set" => {
             match serde_json::from_value::<cloud_talk::CloudRoomAvatarSetParams>(command.params) {
-                #[cfg(target_os = "macos")]
+                #[cfg(backend_room)]
                 Ok(params) if room_host::holds_seat() => {
                     room_content::set_avatar(params);
                     ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
@@ -14177,7 +14179,7 @@ async fn handle_text_message_with_role(
                         "The microphone settings are out of range.",
                     )
                 }
-                #[cfg(target_os = "macos")]
+                #[cfg(backend_room)]
                 Ok(params) if room_host::holds_seat() => {
                     room_media::set_microphone(params.microphone);
                     ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
@@ -14200,7 +14202,7 @@ async fn handle_text_message_with_role(
                 {
                     ServerResponse::error(command.id, "invalid-params", "The camera id is invalid.")
                 }
-                #[cfg(target_os = "macos")]
+                #[cfg(backend_room)]
                 Ok(params) if room_host::holds_seat() => {
                     room_media::set_camera(params.camera);
                     ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
@@ -14218,9 +14220,9 @@ async fn handle_text_message_with_role(
             // before the backend's join has started (no token race). Electron
             // keeps its renderer room unless asked (`VIDEORC_ROOM_HOST`, or the
             // debug switch): the owner's switch-on waits for S1.8e.
-            #[cfg(target_os = "macos")]
+            #[cfg(backend_room)]
             let backend = room_host::holds_seat() || room_host::enabled();
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(backend_room))]
             let backend = false;
             ServerResponse::ok(command.id, serde_json::json!({ "backend": backend }))
         }
@@ -14240,7 +14242,7 @@ async fn handle_text_message_with_role(
                         "The screen source id is invalid.",
                     )
                 }
-                #[cfg(target_os = "macos")]
+                #[cfg(backend_room)]
                 Ok(params) if room_host::holds_seat() => {
                     room_screen::set_screen(params.screen);
                     ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
@@ -14261,7 +14263,7 @@ async fn handle_text_message_with_role(
             else {
                 return ServerResponse::error(command.id, "invalid-params", "Send enabled.");
             };
-            #[cfg(target_os = "macos")]
+            #[cfg(backend_room)]
             {
                 if room_host::holds_seat() {
                     room_remote::set_monitor(enabled);
@@ -14288,7 +14290,7 @@ async fn handle_text_message_with_role(
             else {
                 return ServerResponse::error(command.id, "invalid-params", "Send enabled.");
             };
-            #[cfg(target_os = "macos")]
+            #[cfg(backend_room)]
             {
                 if room_host::holds_seat() {
                     room_html::set_enabled(enabled);
@@ -14307,7 +14309,7 @@ async fn handle_text_message_with_role(
                     "invalid-params",
                     "The system audio gain is out of range.",
                 ),
-                #[cfg(target_os = "macos")]
+                #[cfg(backend_room)]
                 Ok(params) if room_host::holds_seat() => {
                     room_aux::set_aux(params);
                     ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
@@ -14327,7 +14329,7 @@ async fn handle_text_message_with_role(
                     "invalid-params",
                     "The program gains are out of range.",
                 ),
-                #[cfg(target_os = "macos")]
+                #[cfg(backend_room)]
                 Ok(settings) if room_host::holds_seat() => {
                     room_routing::set_routing(settings);
                     ServerResponse::ok(command.id, serde_json::json!({ "held": true }))
@@ -14344,7 +14346,7 @@ async fn handle_text_message_with_role(
             let Some(message) = command.params.get("message").cloned() else {
                 return ServerResponse::error(command.id, "invalid-params", "Send the message.");
             };
-            #[cfg(target_os = "macos")]
+            #[cfg(backend_room)]
             {
                 if room_host::holds_seat() {
                     return match room_avatar::send_motion(&message).await {
@@ -14368,7 +14370,7 @@ async fn handle_text_message_with_role(
         }
         "cloud.room.scene.commit" => {
             match serde_json::from_value::<cloud_talk::CloudRoomSceneCommitParams>(command.params) {
-                #[cfg(target_os = "macos")]
+                #[cfg(backend_room)]
                 Ok(params) if room_host::holds_seat() => {
                     // The commit's generation (the scene entry's revision),
                     // and its standing result when nothing changed.
@@ -14391,7 +14393,7 @@ async fn handle_text_message_with_role(
         // Plan 260 S1.8b: the room's presentation switches (Graphics first),
         // for the topics the backend sends while it holds the host seat.
         "cloud.room.presentation.set" => {
-            #[cfg(target_os = "macos")]
+            #[cfg(backend_room)]
             {
                 if room_host::holds_seat() {
                     if let Some(enabled) = command
@@ -14464,7 +14466,7 @@ async fn handle_text_message_with_role(
                         );
                         let guest_id = params.guest_id.clone();
                         // The deny's permissions update goes out first.
-                        #[cfg(target_os = "macos")]
+                        #[cfg(backend_room)]
                         {
                             if removes {
                                 let applied = room_routing::deny(&guest_id);
@@ -14487,7 +14489,7 @@ async fn handle_text_message_with_role(
                                 // Only an explicit refusal lifts the deny:
                                 // after a timeout or a server error the
                                 // removal may have happened.
-                                #[cfg(target_os = "macos")]
+                                #[cfg(backend_room)]
                                 {
                                     if removes && cloud_talk::guest_action_refused(&error) {
                                         room_routing::undeny(&guest_id);
@@ -19647,9 +19649,9 @@ fn cloud_hooks(state: &AppState) -> cloud_show::CloudHooks {
                         // processed frames; nothing is lent to the browser.
                         // Plan 260 S1.8c: the same while the backend's room is
                         // on (its dev switch): the backend publishes the camera.
-                        #[cfg(target_os = "macos")]
+                        #[cfg(backend_room)]
                         let backend_room = room_host::enabled();
-                        #[cfg(not(target_os = "macos"))]
+                        #[cfg(not(backend_room))]
                         let backend_room = false;
                         if backend_room || room_camera_source::enabled(state.smoke_rpc_enabled) {
                             room_camera_source::set_kept_for_room(true);
@@ -19807,13 +19809,14 @@ fn cloud_talk_error_code(error: &anyhow::Error, default: &'static str) -> &'stat
 /// Plan 260 S1.8a: does the backend's own room hold the talk show's host
 /// seat? A match guard inside an RPC arm, never on the arm itself: the
 /// websocket inventory reads only plain top-level arms.
-#[cfg(target_os = "macos")]
+#[cfg(backend_room)]
 fn backend_holds_room_seat() -> bool {
     room_host::holds_seat()
 }
 
-/// The backend's room is macOS only (plan 260 S1.8).
-#[cfg(not(target_os = "macos"))]
+/// No backend room on this platform (plan 260 S1.8; `backend_room` in
+/// `build.rs`).
+#[cfg(not(backend_room))]
 fn backend_holds_room_seat() -> bool {
     false
 }

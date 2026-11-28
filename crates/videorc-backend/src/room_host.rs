@@ -17,8 +17,15 @@
 //! the `cloud.room.overlay` hand-off), S1.8c the host's media, S1.8d the subscriptions (the plan's S1.8
 //! cut).
 //!
-//! macOS only for now: the SDK is a macOS dependency until the native
-//! Windows and Linux builds pass (S0.8).
+//! On the platforms `build.rs` marks `backend_room` (macOS and Linux; the
+//! SDK is a dependency of the same list). Windows is owed: its native
+//! webrtc-sys build has not passed yet (S0.8). Off macOS the room's media
+//! comes from the paths the backend already has: the compositor's camera role
+//! and the preview's screen frames (CPU bytes), the room microphone tap, and
+//! `sound_monitor::DeviceOutput` for the guests (PipeWire on Linux). Two
+//! parts stay macOS only: the room's own second screen capture (c4b,
+//! `preview_screen::RoomScreenCapture`) and the aux track's own-app-excluded
+//! system audio (`room_system_audio::open`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};

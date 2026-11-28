@@ -69,10 +69,13 @@ uuid = { version = "1.19", features = ["v4"] }
 # point nowhere on a user's machine).
 webpki-root-certs = "1"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-# Plan 260 S1.8 (D9): the talk show's room from the backend. macOS first:
-# the native Windows and Linux builds of webrtc-sys are owed (S0.8).
+# Plan 260 S1.8 (D9): the talk show's room from the backend, on the platforms
+# `build.rs` gives `backend_room` (keep the two lists the same). Windows is
+# owed: its native webrtc-sys build has not passed yet (S0.8).
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 livekit = { version = "=0.12.0", default-features = false, features = ["tokio", "rustls-tls-native-roots"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.1"
 coreaudio = { package = "coreaudio-rs", version = "0.14.2" }
 dispatch2 = "0.3.1"
