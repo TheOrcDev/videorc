@@ -1292,3 +1292,37 @@ impl Render for StudioPage {
             .child(body)
     }
 }
+
+impl StudioPage {
+    /// `room-switch-set` (the cloud-parity smokes): the open room's sounds
+    /// through the Soundboard row's toggle; its scenes opt-in, graphics,
+    /// avatar and the avatar for guests through the room host, as their
+    /// controls switch them.
+    pub(crate) fn smoke_room_switch(
+        &mut self,
+        switch: &str,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, String> {
+        match switch {
+            "sounds" => self.soundboard.update(cx, |soundboard, cx| {
+                soundboard.smoke_set_room_sounds(enabled, cx)
+            }),
+            "scenes" => Ok(self.talk_show_host.update(cx, |host, cx| {
+                host.set_scenes_enabled(enabled, cx);
+                serde_json::json!({ "enabled": host.scenes_enabled() })
+            })),
+            "graphics" | "avatar" => Ok(self.talk_show_host.update(cx, |host, cx| {
+                let graphics = (switch == "graphics").then_some(enabled);
+                let avatar = (switch == "avatar").then_some(enabled);
+                host.set_room_presentation(graphics, avatar, cx);
+                serde_json::json!({ "enabled": enabled })
+            })),
+            "avatarGuests" => Ok(self.talk_show_host.update(cx, |host, cx| {
+                host.set_avatar_guests(enabled, cx);
+                serde_json::json!({ "enabled": enabled })
+            })),
+            other => Err(format!("No room switch is called {other:?}.")),
+        }
+    }
+}

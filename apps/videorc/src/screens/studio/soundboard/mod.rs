@@ -382,6 +382,25 @@ impl SoundboardSection {
         }
     }
 
+    /// `room-switch-set {switch: "sounds"}` (the cloud-parity smokes; Electron's `roomSounds`):
+    /// room sounds on or off through the row's own toggle. Refused by name
+    /// while no room is open (the row isn't there).
+    pub(crate) fn smoke_set_room_sounds(
+        &mut self,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<serde_json::Value, String> {
+        let Some(aux) = self.room_aux.as_ref() else {
+            return Err(
+                "room-switch-set sounds: no room is open, so there are no room sounds.".into(),
+            );
+        };
+        if aux.enabled != enabled {
+            self.toggle_room_sounds(cx);
+        }
+        Ok(serde_json::json!({ "enabled": enabled }))
+    }
+
     pub(crate) fn toggle_room_sounds(&mut self, cx: &mut Context<Self>) {
         let Some(aux) = self.room_aux.as_mut() else {
             return;

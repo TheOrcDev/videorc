@@ -61,8 +61,10 @@ pub const STUDIO_SMOKE_COMMANDS: &[&str] = &[
     "scheduled-state",
     "scheduled-mutate",
     "studio-go-live",
+    "studio-microphone-mute",
     "select-camera-device",
     "select-camera-shape",
+    "select-microphone-device",
     "select-layout-preset",
     "select-screen-device",
     "preview-surface-scene-state",
@@ -147,6 +149,10 @@ pub fn state_json(snapshot: &StudioSnapshot) -> Value {
         "stopPending": session.stop_pending,
         "startFailure": session.start_failure.as_ref().map(|failure| format!("{failure:?}")),
         "testPattern": test_pattern(snapshot),
+        // The microphone's mute as its controls show it (Electron's
+        // `outputFacts().microphoneMuted`, which the cloud-parity controls
+        // case waits on after each lane).
+        "microphoneMuted": snapshot.settings.capture.audio.microphone_muted,
         "lastError": snapshot.last_error,
         // The Clips ring as the Output page reads it, so a smoke whose ring
         // never settles can say why (a block or a wait).
@@ -684,6 +690,57 @@ impl StudioSmoke {
         Ok(json!({ "cameraId": device.id }))
     }
 
+    /// The microphone switched the way its picker switches it, live in a
+    /// session (Electron's `roomMicrophoneSelect`: `switchSourceDeviceLive`).
+    /// `{microphoneId?}` picks that one, else the first; `{off: true}` picks
+    /// none.
+    async fn select_microphone(&self, params: Map<String, Value>) -> Result<Value, String> {
+        let wait = Duration::from_millis(millis(&params, "timeoutMs", 10_000));
+        let settle = Duration::from_millis(millis(&params, "settleMs", 600));
+        if params.get("off").and_then(Value::as_bool) == Some(true) {
+            self.studio
+                .select_source_device(SourceKind::Microphone, None)
+                .await?;
+            tokio::time::sleep(settle).await;
+            return Ok(json!({ "microphoneId": null }));
+        }
+        let wanted = text_param(&params, "microphoneId").map(str::to_string);
+        let device = self
+            .wait_for_device(wait, "No microphone available to select", |devices| {
+                pick_device(
+                    devices,
+                    &[DeviceKind::Microphone],
+                    wanted.as_deref(),
+                    |_| true,
+                )
+                .cloned()
+            })
+            .await
+            .map_err(|_| "No microphone available to select.".to_string())?;
+        self.studio
+            .select_source_device(SourceKind::Microphone, Some(&device.id))
+            .await?;
+        tokio::time::sleep(settle).await;
+        Ok(json!({ "microphoneId": device.id }))
+    }
+
+    /// The microphone row's mute (Electron's `microphone('mute' |
+    /// 'unmute')`: `requestRemoteMicrophoneMute`). `{muted: bool}`; answers
+    /// whether it landed, refusing by name when it didn't.
+    async fn microphone_mute(&self, params: Map<String, Value>) -> Result<Value, String> {
+        let muted = params
+            .get("muted")
+            .and_then(Value::as_bool)
+            .ok_or("studio-microphone-mute needs muted (true or false).")?;
+        if !self.studio.request_microphone_mute(muted).await {
+            return Err(format!(
+                "The microphone {} did not land (the session refused it, or its state is unknown).",
+                if muted { "mute" } else { "unmute" }
+            ));
+        }
+        Ok(json!({ "muted": muted }))
+    }
+
     async fn select_camera_shape(&self, params: Map<String, Value>) -> Result<Value, String> {
         let shape = text_param(&params, "shape").unwrap_or("circle").to_string();
         let settle = Duration::from_millis(millis(&params, "settleMs", DEFAULT_SETTLE_MS));
@@ -957,6 +1014,18 @@ impl StudioSmoke {
         let action = text_param(&params, "action")
             .ok_or("studio-shortcut needs an action.")?
             .to_string();
+        // The microphone's global key (`apps/videorc/src/app/hotkeys.rs`
+        // `"mic-toggle"`, Electron's `shortcut('mic-toggle')`): the same
+        // toggle the key runs.
+        if action == "mic-toggle" {
+            let studio = self.studio.clone();
+            tokio::spawn(async move {
+                studio
+                    .set_microphone_muted(crate::studio::MicrophoneMode::Toggle)
+                    .await;
+            });
+            return Ok(json!({ "action": action }));
+        }
         let snapshot = self.studio.snapshot();
         let ids: Vec<&str> = snapshot
             .scenes
@@ -1067,6 +1136,8 @@ impl SmokeCommandHandler for StudioSmoke {
                 "studio-performance-check" => self.performance_check(params),
                 "select-screen-device" => self.select_screen(params).await,
                 "select-camera-device" => self.select_camera(params).await,
+                "select-microphone-device" => self.select_microphone(params).await,
+                "studio-microphone-mute" => self.microphone_mute(params).await,
                 "select-camera-shape" => self.select_camera_shape(params).await,
                 "select-layout-preset" => self.select_layout_preset(params).await,
                 "studio-scenes-state" => Ok(scenes_json(&self.studio.snapshot())),

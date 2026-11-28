@@ -171,6 +171,13 @@ pub const ELECTRON_SMOKE_COMMAND_NAMES: &[&str] = &[
 /// surface) instead.
 pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     "notifications-state",
+    // The cloud-parity seams Electron reaches through the renderer
+    // (`__videorcSmokeScenePresets`): the microphone's mute and live pick,
+    // and the open room's switches (sounds, scenes, graphics, avatar, the
+    // avatar for guests).
+    "studio-microphone-mute",
+    "select-microphone-device",
+    "room-switch-set",
     // The first-run setup's state and its backdrop's presented frames, what
     // Electron's smoke reads off the `[data-first-run-*]` attributes.
     "first-run-state",

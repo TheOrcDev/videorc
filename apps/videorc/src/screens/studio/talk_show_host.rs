@@ -1011,10 +1011,6 @@ impl TalkShowRoomHost {
     /// The Guests page's room switches: the static graphics and the avatar
     /// on the room's program (`cloud.room.presentation.set`), sent while the
     /// room is open and again after a refusal.
-    #[allow(
-        dead_code,
-        reason = "Room parity API retained for remaining Show stage controls"
-    )]
     pub fn set_room_presentation(
         &mut self,
         graphics: Option<bool>,
@@ -1032,10 +1028,6 @@ impl TalkShowRoomHost {
     }
 
     /// The host's opt-in to show the avatar to guest pages.
-    #[allow(
-        dead_code,
-        reason = "Room parity API retained for remaining Show stage controls"
-    )]
     pub fn set_avatar_guests(&mut self, guests: bool, cx: &mut Context<Self>) {
         self.avatar_guests = guests;
         self.sync_room(cx);
