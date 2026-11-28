@@ -70,7 +70,7 @@ impl DestinationsPanel {
                     row.child(
                         Button::new("thumbnail-remove")
                             .label(page_copy::REMOVE_THUMBNAIL)
-                            .variant(ButtonVariant::Ghost)
+                            .variant(ButtonVariant::Outline)
                             .disabled(disabled)
                             .on_click({
                                 let entity = entity.clone();

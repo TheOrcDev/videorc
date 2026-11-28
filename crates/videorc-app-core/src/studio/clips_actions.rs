@@ -863,6 +863,18 @@ impl<B: StudioBackend> Studio<B> {
     /// params, as before plan 199. With no ring holding frames and nothing
     /// recording, the toast says which switch to turn on and nothing is
     /// sent; a failed request says "Couldn't save the clip".
+    /// Whether a clip can be saved now ([`clips::clip_has_target`]): the
+    /// Stream Manager shows its Clip buttons only then (`stream-manager.tsx`
+    /// `clipAvailable`).
+    pub fn clip_available_now(&self) -> bool {
+        let guard = self.lock();
+        clips::clip_has_target(
+            guard.clips.ring.replay().state,
+            &guard.session.status().state,
+            false,
+        )
+    }
+
     pub async fn mark_clip(&self, seconds: Option<u32>) -> Option<ClipMarkedEvent> {
         let (connected, nothing) = {
             let mut guard = self.lock();

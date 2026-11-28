@@ -344,7 +344,12 @@ fn valid_capability_id(value: &str) -> bool {
 
 pub fn canonicalize_resource_path(raw_path: &str, kind: ResourceCapabilityKind) -> Result<PathBuf> {
     validate_path_syntax(raw_path)?;
-    let path = Path::new(raw_path);
+    let effective = if cfg!(windows) {
+        strip_verbatim_drive_prefix(raw_path)
+    } else {
+        raw_path
+    };
+    let path = Path::new(effective);
     if !path.is_absolute() {
         bail!("Resource path must be absolute.");
     }
@@ -363,6 +368,7 @@ fn canonicalize_existing_resource_path(
     kind: ResourceCapabilityKind,
 ) -> Result<PathBuf> {
     let canonical = std::fs::canonicalize(path)
+        .map(strip_verbatim_drive_prefix_path)
         .with_context(|| "Resource path does not exist or could not be resolved.")?;
     let metadata = std::fs::metadata(&canonical)
         .with_context(|| "Resource path metadata could not be read.")?;
@@ -474,9 +480,54 @@ pub fn redact_managed_screen_paths(value: &mut serde_json::Value) {
     }
 }
 
+/// Standard Win32 `MAX_PATH` length; longer verbatim paths keep their `\\?\`
+/// prefix so Windows APIs and child processes do not fail on >260-char paths.
+const MAX_STANDARD_WINDOWS_PATH_LEN: usize = 260;
+
+/// Strip Windows' verbatim prefix (`\\?\`) only when what follows is a plain
+/// drive path (`X:\...`) that fits within `MAX_PATH` (260 chars) and whose
+/// segments will not change meaning under Win32 normalization (no `.`, `..`,
+/// forward slash, or segment ending in `.` or space). Never strips `\\?\UNC\`,
+/// `\\?\Volume{...}\`, `\\?\GLOBALROOT\`, `\\?\PhysicalDrive0`, or
+/// drive-relative `\\?\X:foo`.
+pub fn strip_verbatim_drive_prefix(raw_path: &str) -> &str {
+    let Some(rest) = raw_path.strip_prefix(r"\\?\") else {
+        return raw_path;
+    };
+    let bytes = rest.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' {
+        return raw_path;
+    }
+    if rest.len() > MAX_STANDARD_WINDOWS_PATH_LEN || rest.contains('/') {
+        return raw_path;
+    }
+    if rest[3..].split('\\').any(|segment| {
+        segment == "." || segment == ".." || segment.ends_with('.') || segment.ends_with(' ')
+    }) {
+        return raw_path;
+    }
+    rest
+}
+
+fn strip_verbatim_drive_prefix_path(path: PathBuf) -> PathBuf {
+    match path.to_str() {
+        Some(text) => {
+            let stripped = strip_verbatim_drive_prefix(text);
+            if stripped.len() == text.len() {
+                path
+            } else {
+                PathBuf::from(stripped)
+            }
+        }
+        None => path,
+    }
+}
+
 /// Cross-platform lexical rejection. These Windows namespaces are dangerous
 /// even when a forged value is tested on Unix, so the policy is deterministic
-/// across build hosts and cross-compilation.
+/// across build hosts and cross-compilation. On Windows only (`cfg!(windows)`),
+/// plain Windows verbatim drive paths (`\\?\X:\...`, returned by
+/// `std::fs::canonicalize`) are normalized to ordinary drive paths (`X:\...`).
 pub fn validate_path_syntax(raw_path: &str) -> Result<()> {
     if raw_path.is_empty() || raw_path.trim() != raw_path || raw_path.contains('\0') {
         bail!("Resource path is empty, padded, or contains NUL.");
@@ -487,7 +538,12 @@ pub fn validate_path_syntax(raw_path: &str) -> Result<()> {
     {
         bail!("Resource path may not contain parent traversal.");
     }
-    let normalized = raw_path.replace('/', "\\");
+    let effective = if cfg!(windows) {
+        strip_verbatim_drive_prefix(raw_path)
+    } else {
+        raw_path
+    };
+    let normalized = effective.replace('/', "\\");
     let lower = normalized.to_ascii_lowercase();
     if lower.starts_with("\\\\?\\")
         || lower.starts_with("\\\\.\\")
@@ -497,7 +553,7 @@ pub fn validate_path_syntax(raw_path: &str) -> Result<()> {
     {
         bail!("Windows device and UNC paths are not accepted as renderer resources.");
     }
-    let bytes = raw_path.as_bytes();
+    let bytes = effective.as_bytes();
     if bytes.len() >= 2
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
@@ -511,11 +567,13 @@ pub fn validate_path_syntax(raw_path: &str) -> Result<()> {
 }
 
 pub fn canonical_path_is_within(path: &Path, roots: &[PathBuf]) -> bool {
-    let Ok(canonical_path) = std::fs::canonicalize(path) else {
+    let Ok(canonical_path) = std::fs::canonicalize(path).map(strip_verbatim_drive_prefix_path)
+    else {
         return false;
     };
     roots.iter().any(|root| {
         std::fs::canonicalize(root)
+            .map(strip_verbatim_drive_prefix_path)
             .ok()
             .is_some_and(|canonical_root| canonical_path.starts_with(canonical_root))
     })
@@ -612,7 +670,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             authority.resolve_managed_thumbnail(&id).unwrap(),
-            std::fs::canonicalize(&path).unwrap()
+            strip_verbatim_drive_prefix_path(std::fs::canonicalize(&path).unwrap())
         );
         let capability = authority
             .issue(issue_params(&path, ResourceCapabilityKind::InputFile))
@@ -673,7 +731,7 @@ mod tests {
             authority
                 .consume(&issued.capability_id, ResourceCapabilityKind::InputFile)
                 .unwrap(),
-            std::fs::canonicalize(&file).unwrap()
+            strip_verbatim_drive_prefix_path(std::fs::canonicalize(&file).unwrap())
         );
         assert!(
             authority
@@ -694,7 +752,7 @@ mod tests {
             authority
                 .resolve_managed_background("background_01")
                 .unwrap(),
-            std::fs::canonicalize(file).unwrap()
+            strip_verbatim_drive_prefix_path(std::fs::canonicalize(file).unwrap())
         );
         assert!(
             authority
@@ -869,14 +927,122 @@ mod tests {
         for forged in [
             "/tmp/../etc/passwd",
             r"\\server\share\file.mp4",
-            r"\\?\C:\Windows\System32\cmd.exe",
+            r"\\?\UNC\server\share\file.mp4",
+            r"\\?\unc\server\share\file.mp4",
+            r"\\?\UnC\server\share\file.mp4",
+            r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\file.mp4",
+            r"\\?\volume{12345678-1234-1234-1234-123456789abc}\file.mp4",
+            r"\\?\GLOBALROOT\Device\Harddisk0\file",
+            r"\\?\globalroot\Device\Harddisk0\file",
+            r"\\?\PhysicalDrive0",
+            r"\\?\C:relative\file.mp4",
+            r"\\?\c:relative\file.mp4",
+            r"\\?\C:",
+            r"\\?\",
+            r"\\?\\\?\C:\x",
+            r"\\?\1:\x",
+            r"\\?\C:\Windows\..\System32\cmd.exe",
+            r"\\?\C:\a\..\..\Windows",
+            r"\\?\C:\a/../x",
+            r"\\?\C:\a\.\b.mp4",
+            r"\\?\C:\clips\take.mp4.",
+            r"\\?\C:\clips \take.mp4",
+            r"\\?\C:\clips\take ",
+            r"//?/C:/Users/alice/clip.mp4",
+            r"\\?/C:\x",
+            r"\\?\C:/x",
+            r"/\?\C:\x",
             r"\\.\PhysicalDrive0",
+            r"\\.\C:\Users\alice\clip.mp4",
             r"\??\C:\Windows\System32",
             r"\Device\HarddiskVolume1\file",
+            r"\DEVICE\HarddiskVolume1\file",
             r"C:relative\file.mp4",
+            r"C:",
         ] {
             assert!(validate_path_syntax(forged).is_err(), "accepted {forged}");
         }
+        #[cfg(not(windows))]
+        assert!(
+            validate_path_syntax(r"\\?\C:\Windows\System32\cmd.exe").is_err(),
+            "Unix hosts must keep refusing verbatim Windows paths"
+        );
+    }
+
+    #[test]
+    fn strip_verbatim_drive_prefix_handles_plain_and_hardened_edge_cases() {
+        for (raw, expected) in [
+            (r"\\?\C:\Users\alice\clip.mp4", r"C:\Users\alice\clip.mp4"),
+            (
+                r"\\?\f:\videorc\apps\desktop\resources\sounds\starter\airhorn.wav",
+                r"f:\videorc\apps\desktop\resources\sounds\starter\airhorn.wav",
+            ),
+            (r"C:\Users\alice\clip.mp4", r"C:\Users\alice\clip.mp4"),
+        ] {
+            assert_eq!(strip_verbatim_drive_prefix(raw), expected);
+            #[cfg(windows)]
+            assert!(validate_path_syntax(raw).is_ok(), "rejected {raw}");
+        }
+        // P3 hardening: never strip segments that Win32 would reinterpret, or >260-char paths.
+        let long_path = format!(r"\\?\C:\{}\clip.mp4", "a".repeat(260));
+        for keep_verbatim in [
+            r"\\?\UNC\server\share\file.mp4",
+            r"\\?\C:\a\.\b.mp4",
+            r"\\?\C:\a\..\b.mp4",
+            r"\\?\C:\clips\take.mp4.",
+            r"\\?\C:\clips \take.mp4",
+            r"\\?\C:\clips\take ",
+            r"\\?\C:\a/b.mp4",
+            r"\\?\C:/x",
+            r"\\?/C:\x",
+            r"\\?\C:",
+            r"\\?\",
+            r"\\?\\\?\C:\x",
+            r"\\?\1:\x",
+            long_path.as_str(),
+        ] {
+            assert_eq!(
+                strip_verbatim_drive_prefix(keep_verbatim),
+                keep_verbatim,
+                "unexpectedly stripped {keep_verbatim}"
+            );
+        }
+        assert_eq!(
+            strip_verbatim_drive_prefix_path(PathBuf::from(r"\\?\F:\videorc\assets\bg.webp")),
+            PathBuf::from(r"F:\videorc\assets\bg.webp")
+        );
+        assert_eq!(
+            strip_verbatim_drive_prefix_path(PathBuf::from(r"\\?\UNC\server\share\file.mp4")),
+            PathBuf::from(r"\\?\UNC\server\share\file.mp4")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_verbatim_drive_paths_issue_consume_and_check_within_roots() {
+        let authority = ResourceAuthority::default();
+        let (_dir, file) = temp_file();
+        let plain_file = strip_verbatim_drive_prefix_path(std::fs::canonicalize(&file).unwrap());
+        let verbatim_file = format!(r"\\?\{}", plain_file.display());
+        let issued = authority
+            .issue(IssueResourceCapabilityParams {
+                path: verbatim_file,
+                kind: ResourceCapabilityKind::InputFile,
+                ttl_ms: None,
+                use_count: None,
+            })
+            .expect("issue accepts plain Windows verbatim drive path");
+        assert_eq!(
+            authority
+                .consume(&issued.capability_id, ResourceCapabilityKind::InputFile)
+                .expect("consume resolves verbatim-issued capability"),
+            plain_file
+        );
+
+        let root_dir = file.parent().unwrap();
+        let plain_root = strip_verbatim_drive_prefix_path(std::fs::canonicalize(root_dir).unwrap());
+        let verbatim_root = PathBuf::from(format!(r"\\?\{}", plain_root.display()));
+        assert!(canonical_path_is_within(&plain_file, &[verbatim_root]));
     }
 
     #[test]

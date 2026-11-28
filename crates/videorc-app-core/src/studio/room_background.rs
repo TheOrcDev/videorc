@@ -89,10 +89,11 @@ pub fn resolve_managed_background_file(file_name: &str, roots: &[PathBuf]) -> Op
         if meta.file_type().is_symlink() || !meta.is_file() {
             continue;
         }
-        let Ok(canonical_root) = std::fs::canonicalize(root) else {
+        let Ok(canonical_root) = crate::resources::capability::canonicalize_plain_path(root) else {
             continue;
         };
-        let Ok(canonical_file) = std::fs::canonicalize(&candidate) else {
+        let Ok(canonical_file) = crate::resources::capability::canonicalize_plain_path(&candidate)
+        else {
             continue;
         };
         if canonical_file.starts_with(&canonical_root) {
@@ -474,7 +475,7 @@ mod tests {
         let roots = vec![root.path().to_path_buf()];
         // The resolver answers the canonical path (macOS: /var is
         // /private/var), so compare against the file's canonical path.
-        let canonical = std::fs::canonicalize(&file).unwrap();
+        let canonical = crate::resources::capability::canonicalize_plain_path(&file).unwrap();
         assert_eq!(
             resolve_managed_background_file("beach.webp", &roots).as_deref(),
             Some(canonical.as_path())
