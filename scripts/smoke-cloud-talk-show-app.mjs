@@ -815,6 +815,19 @@ try {
     4,
     'Every layout composes to the receiver (tile probes) with the on-stage tones in the mix',
     async () => {
+      // `VIDEORC_CLOUD_TALK_OWN_CAMERA=1` (GPUI, a debug backend with
+      // `VIDEORC_FIXTURE_CAMERA`): the Studio's camera is the fixture camera,
+      // so its preview runs and the host's own tile has a picture to draw.
+      if (process.env.VIDEORC_CLOUD_TALK_OWN_CAMERA === '1' && gpuiApp) {
+        const hex = Buffer.from('videorc-fixture-camera').toString('hex')
+        await requestSmokeCommand(
+          launch.smoke,
+          'select-camera-device',
+          { cameraId: `camera:avfoundation-native:${hex}`, settleMs: 1_500 },
+          { timeoutMs: 20_000 }
+        )
+        await sleep(3_000)
+      }
       for (const [index, phase] of phases.entries()) {
         const setAtMs = Date.now()
         if (phase.stage) {

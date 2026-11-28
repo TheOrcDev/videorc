@@ -183,6 +183,9 @@ pub struct TalkShowRoomHost {
     /// backend hosts the room, so the host's tile has no published track to
     /// draw. There only while the room is open and the host's camera is on.
     own_camera: Option<(FrameCursor, Arc<RenderImage>)>,
+    /// The own camera poll's last outcome, logged when it changes (a tile
+    /// that stays empty names its cause once).
+    own_camera_outcome: String,
     /// The feeds last asked for, logged when the set changes.
     logged_wanted: Vec<(String, RemoteSource)>,
     /// R4: the Program monitor takes the runner's return, and Listen.
@@ -377,10 +380,14 @@ impl TalkShowRoomHost {
                         .map(|poll| viewer_poll(poll, mirror))
                 });
                 // A failed poll is asked again on the next tick.
-                if let Ok(Ok(poll)) = job.await
-                    && this
-                        .update(cx, |host, cx| host.take_own_camera_poll(poll, cx))
-                        .is_err()
+                let poll = match job.await {
+                    Ok(Ok(poll)) => Ok(poll),
+                    Ok(Err(error)) => Err(format!("poll failed: {error:#}")),
+                    Err(error) => Err(format!("poll task failed: {error}")),
+                };
+                if this
+                    .update(cx, |host, cx| host.take_own_camera_poll(poll, cx))
+                    .is_err()
                 {
                     return;
                 }
@@ -425,6 +432,7 @@ impl TalkShowRoomHost {
             frames: HashMap::new(),
             poll_outcomes: HashMap::new(),
             own_camera: None,
+            own_camera_outcome: String::new(),
             logged_wanted: Vec::new(),
             monitor: false,
             listening: false,
@@ -617,21 +625,31 @@ impl TalkShowRoomHost {
         Some((after, mirror))
     }
 
-    fn take_own_camera_poll(&mut self, poll: ViewerPoll, cx: &mut Context<Self>) {
+    fn take_own_camera_poll(&mut self, poll: Result<ViewerPoll, String>, cx: &mut Context<Self>) {
+        let outcome = match &poll {
+            Ok(ViewerPoll::Frame(..)) => "frames".to_string(),
+            Ok(ViewerPoll::Empty) => "no picture (the camera preview has no frame)".to_string(),
+            Ok(ViewerPoll::Unchanged) => String::new(),
+            Err(why) => why.clone(),
+        };
+        if !outcome.is_empty() && self.own_camera_outcome != outcome {
+            eprintln!("[videorc-app] host own camera tile: {outcome}");
+            self.own_camera_outcome = outcome;
+        }
         match poll {
-            ViewerPoll::Frame(cursor, image) => {
+            Ok(ViewerPoll::Frame(cursor, image)) => {
                 if let Some((_, before)) = self.own_camera.replace((cursor, image)) {
                     cx.drop_image(before, None);
                 }
                 cx.notify();
             }
-            ViewerPoll::Empty => {
+            Ok(ViewerPoll::Empty) => {
                 if let Some((_, before)) = self.own_camera.take() {
                     cx.drop_image(before, None);
                     cx.notify();
                 }
             }
-            ViewerPoll::Unchanged => {}
+            Ok(ViewerPoll::Unchanged) | Err(_) => {}
         }
     }
 
