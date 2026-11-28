@@ -120,9 +120,14 @@ impl StartGates {
     /// on at all, and the destinations cap). The Windows envelope and the
     /// output-topology verdict stay off: see `entitlement_gates`.
     pub fn of_snapshot(snapshot: &StudioSnapshot) -> Self {
+        Self::of_snapshot_at(snapshot, Utc::now())
+    }
+
+    /// [`Self::of_snapshot`] at `now` (the plan's expiry is read against it).
+    pub fn of_snapshot_at(snapshot: &StudioSnapshot, now: DateTime<Utc>) -> Self {
         Self {
             destination_not_ready: destination_not_ready(snapshot),
-            ..entitlement_gates(snapshot)
+            ..entitlement_gates(snapshot, now)
         }
     }
 
@@ -135,8 +140,33 @@ impl StartGates {
     }
 }
 
-/// The entitlement gates, over the plan the Studio holds (`None` gates as
-/// Basic, like Electron's `entitlements: null`):
+/// A plan the app may hold the user to. The entitlement gates FAIL OPEN: only
+/// a plan that is known, and known to be current, can block a start. Unknown
+/// is every other state:
+/// - no plan read yet, or a read that failed or wasn't a plan (the Studio then
+///   holds none);
+/// - the backend's local default (`LocalDefault`): signed out, the cloud
+///   unreachable, the signed token expired or unverifiable, or never hydrated;
+/// - a plan past its `expiresAt` (or one whose expiry can't be read).
+///
+/// What is known: an account's plan (`Creem`, `Manual`, `SignedCache`,
+/// `FutureLicense`) and a developer build's own override (`EnvOverride`).
+pub fn plan_is_known(plan: &videorc_protocol::EntitlementsSnapshot, now: DateTime<Utc>) -> bool {
+    use videorc_protocol::EntitlementSource;
+
+    if plan.source == EntitlementSource::LocalDefault {
+        return false;
+    }
+    match plan.expires_at.as_deref() {
+        None => true,
+        Some(expires) => DateTime::parse_from_rfc3339(expires)
+            .is_ok_and(|expires| expires.with_timezone(&Utc) > now),
+    }
+}
+
+/// The entitlement gates, over the plan the Studio holds, and only when
+/// [`plan_is_known`] (otherwise every gate is off: a start the app can't
+/// prove over its limit is left to the backend, which enforces the plan):
 /// - `recording_profile`: `videoProfileEntitlementGate({ kind: 'recording' })`
 ///   over the saved video;
 /// - `streaming_profile`: `resolvedStreamingProfileEntitlementGate`, the
@@ -151,14 +181,21 @@ impl StartGates {
 /// itself settles the topology check when it is pressed and says the same
 /// words (`go_live.rs`); Electron's pre-block needs the background probe
 /// the GPUI app does not run.
-fn entitlement_gates(snapshot: &StudioSnapshot) -> StartGates {
+fn entitlement_gates(snapshot: &StudioSnapshot, now: DateTime<Utc>) -> StartGates {
     use crate::account::entitlements::{
         ProfileKind, entitlement_disabled_reason, go_live_entitlement_gate,
         video_profile_entitlement_gate,
     };
     use videorc_protocol::FeatureId;
 
-    let entitlements = snapshot.entitlements.as_ref();
+    let Some(plan) = snapshot
+        .entitlements
+        .as_ref()
+        .filter(|plan| plan_is_known(plan, now))
+    else {
+        return StartGates::default();
+    };
+    let entitlements = Some(plan);
     let capture = &snapshot.settings.capture;
     let enabled_ids = capture
         .streaming

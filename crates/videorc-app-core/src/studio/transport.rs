@@ -668,6 +668,10 @@ mod tests {
         // What the GPUI app builds for its transport: the cap from the plan
         // the Studio holds (`SessionControls::of`).
         let mut snapshot = ready_snapshot();
+        // A known plan (an account's), as the backend answers it.
+        let mut plan = crate::account::entitlements::default_basic_entitlements();
+        plan.source = videorc_protocol::EntitlementSource::SignedCache;
+        snapshot.entitlements = Some(plan);
         let six = (0..6)
             .map(|n| destination(&format!("custom-{n}"), "Custom RTMP", true))
             .collect();

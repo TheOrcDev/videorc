@@ -325,17 +325,20 @@ fn the_gates_block_in_the_renderers_order() {
 
 // ── The entitlement gates (`StartGates::of_snapshot`) ─────────────────────
 
-/// The plan the backend says: Basic's, with `edit` laid over it.
+/// A KNOWN plan (an account's: signed cache, no expiry), Basic's shape, with
+/// `edit` laid over it. The gates fail open on any plan that isn't known, so
+/// every gate test starts from this.
 fn plan(edit: impl FnOnce(&mut videorc_protocol::EntitlementsSnapshot)) -> StudioSnapshot {
     let mut snapshot = idle();
     let mut entitlements = crate::account::entitlements::default_basic_entitlements();
+    entitlements.source = videorc_protocol::EntitlementSource::SignedCache;
     edit(&mut entitlements);
     snapshot.entitlements = Some(entitlements);
     snapshot
 }
 
 fn gates_of(snapshot: &StudioSnapshot) -> StartGates {
-    StartGates::of_snapshot(snapshot)
+    StartGates::of_snapshot_at(snapshot, now())
 }
 
 #[test]
@@ -423,8 +426,8 @@ fn the_livestreaming_gate_follows_the_plans_capability() {
 
 #[test]
 fn the_go_live_gate_follows_the_destinations_cap() {
-    // Six destinations on, each ready; the plan's cap is five.
-    let mut snapshot = idle();
+    // Six destinations on, each ready; the known plan's cap is five.
+    let mut snapshot = plan(|_| {});
     let six: Vec<_> = (0..6)
         .map(|n| destination(&format!("custom-{n}"), "Custom RTMP", true))
         .collect();
@@ -448,12 +451,108 @@ fn the_go_live_gate_follows_the_destinations_cap() {
     );
     assert_eq!(record_blocked_reason(&snapshot, &gates), None);
     // A plan that allows six leaves it open.
-    snapshot.entitlements = Some({
-        let mut entitlements = crate::account::entitlements::default_basic_entitlements();
-        entitlements.limits.streaming.max_destinations = 6;
-        entitlements
-    });
+    snapshot
+        .entitlements
+        .as_mut()
+        .expect("a plan")
+        .limits
+        .streaming
+        .max_destinations = 6;
     assert_eq!(gates_of(&snapshot).go_live, None);
+}
+
+/// A snapshot that is over EVERY entitlement limit: six destinations on, an
+/// 8K recording, a plan with no livestreaming, and tight limits. A known plan
+/// blocks all of it; an unknown one must block none of it.
+fn over_every_limit(
+    edit: impl FnOnce(&mut videorc_protocol::EntitlementsSnapshot),
+) -> StudioSnapshot {
+    let mut snapshot = plan(|e| {
+        e.limits.recording.max_width = 1280;
+        e.limits.recording.max_height = 720;
+        e.limits.streaming.max_width = 1280;
+        e.limits.streaming.max_height = 720;
+        for capability in &mut e.capabilities {
+            if capability.feature_id == videorc_protocol::FeatureId::Livestreaming {
+                capability.state = videorc_protocol::EntitlementState::Disabled;
+                capability.reason = Some("Livestreaming is part of Videorc Premium.".to_string());
+            }
+        }
+        edit(e);
+    });
+    let six: Vec<_> = (0..6)
+        .map(|n| destination(&format!("custom-{n}"), "Custom RTMP", true))
+        .collect();
+    set_destinations(&mut snapshot, six);
+    snapshot
+}
+
+fn blocks_nothing(snapshot: &StudioSnapshot) {
+    let gates = gates_of(snapshot);
+    assert_eq!(gates.recording_profile, None);
+    assert_eq!(gates.streaming_profile, None);
+    assert_eq!(gates.livestreaming, None);
+    assert_eq!(gates.go_live, None);
+    assert_eq!(record_blocked_reason(snapshot, &gates), None);
+    assert_eq!(live_stream_blocked_reason(snapshot, &gates), None);
+}
+
+#[test]
+fn a_known_current_plan_over_its_limits_is_the_only_thing_that_blocks() {
+    let known = over_every_limit(|_| {});
+    let gates = gates_of(&known);
+    assert!(gates.recording_profile.is_some());
+    assert!(gates.streaming_profile.is_some());
+    assert!(gates.livestreaming.is_some());
+    assert!(gates.go_live.is_some());
+    // An expiry still ahead is current; an env override is a known plan too.
+    let current = over_every_limit(|e| e.expires_at = Some("2026-11-11T00:00:00Z".to_string()));
+    assert!(gates_of(&current).go_live.is_some());
+    let developer = over_every_limit(|e| {
+        e.source = videorc_protocol::EntitlementSource::EnvOverride;
+    });
+    assert!(gates_of(&developer).go_live.is_some());
+}
+
+#[test]
+fn a_plan_not_loaded_yet_blocks_nothing() {
+    let mut snapshot = over_every_limit(|_| {});
+    snapshot.entitlements = None;
+    blocks_nothing(&snapshot);
+}
+
+#[test]
+fn a_signed_out_or_unreachable_cloud_blocks_nothing() {
+    // The backend's local default is what it answers signed out, offline, with
+    // an expired or unverifiable token, or before it ever hydrated.
+    let local = over_every_limit(|e| {
+        e.source = videorc_protocol::EntitlementSource::LocalDefault;
+    });
+    blocks_nothing(&local);
+    // Even the real local default, with a seventh destination, is left to the backend.
+    let mut basic = idle();
+    basic.entitlements = Some(crate::account::entitlements::default_basic_entitlements());
+    let six: Vec<_> = (0..6)
+        .map(|n| destination(&format!("custom-{n}"), "Custom RTMP", true))
+        .collect();
+    set_destinations(&mut basic, six);
+    blocks_nothing(&basic);
+}
+
+#[test]
+fn a_stale_plan_blocks_nothing() {
+    // Expired a day before `now()`.
+    let expired = over_every_limit(|e| e.expires_at = Some("2026-11-09T12:00:00Z".to_string()));
+    blocks_nothing(&expired);
+    // Expiring exactly now is expired.
+    let at_the_edge = over_every_limit(|e| e.expires_at = Some("2026-11-10T12:00:00Z".to_string()));
+    blocks_nothing(&at_the_edge);
+}
+
+#[test]
+fn a_plan_with_an_unreadable_expiry_blocks_nothing() {
+    let unreadable = over_every_limit(|e| e.expires_at = Some("next tuesday".to_string()));
+    blocks_nothing(&unreadable);
 }
 
 /// A destination on with no key: on, but not ready to start.

@@ -1,8 +1,12 @@
 //! The plan in the Studio: `entitlements.get` at every connection and
 //! `entitlements.updated` after it, kept in the snapshot for the start gates
 //! (`inspector::StartGates::of_snapshot`): Record and Go Live read the same
-//! entitlements Electron's `startBlockedReasonFor` does. A read that fails or
-//! isn't a snapshot keeps the last one, and none gates as Basic.
+//! entitlements Electron's `startBlockedReasonFor` does.
+//!
+//! The gates fail open (`inspector::plan_is_known`), so this never keeps a
+//! plan it can't vouch for: a read that fails, or an answer or event that
+//! isn't a plan, CLEARS the held one, and a start the app can't prove over
+//! the plan's limits is left to the backend, which enforces the plan.
 
 use serde_json::Value;
 
@@ -18,6 +22,10 @@ impl<B: StudioBackend> Studio<B> {
             .captions_request(ENTITLEMENTS_GET, Value::Null)
             .await
         else {
+            // Not read (the backend answers no plan): none held.
+            if self.lock().bootstrap_generation == generation {
+                self.set_entitlements(None);
+            }
             return;
         };
         if self.lock().bootstrap_generation != generation {
@@ -26,17 +34,18 @@ impl<B: StudioBackend> Studio<B> {
         self.apply_entitlements(&answer);
     }
 
-    /// An `entitlements.*` answer or event.
+    /// An `entitlements.*` answer or event. Not a plan: none held.
     pub(super) fn apply_entitlements(&self, payload: &Value) {
-        let Some(snapshot) = read_snapshot(payload) else {
-            return;
-        };
+        self.set_entitlements(read_snapshot(payload));
+    }
+
+    fn set_entitlements(&self, plan: Option<videorc_protocol::EntitlementsSnapshot>) {
         {
             let mut inner = self.lock();
-            if inner.entitlements.as_ref() == Some(&snapshot) {
+            if inner.entitlements == plan {
                 return;
             }
-            inner.entitlements = Some(snapshot);
+            inner.entitlements = plan;
         }
         self.publish();
     }
