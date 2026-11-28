@@ -43,6 +43,7 @@ describe('buildRecordingStudioGateSteps', () => {
       'real-user launch first-frame contract smoke',
       'layout/source preview liveness smoke',
       'active-session live layout switch recording smoke',
+      'scene switch back to a window scene while recording probe',
       'comment highlight stream artifact smoke',
       'living Buddy pet recording artifact smoke',
       'detached Comments command relay probe',
@@ -89,20 +90,21 @@ describe('buildRecordingStudioGateSteps', () => {
       '--exact'
     ])
     assert.equal(steps[6].env.VIDEORC_BUNDLED_FFMPEG_PATH, bundledFfmpegPath())
-    assert.deepEqual(steps.at(-29).args, ['smoke:captions-contract'])
-    assert.deepEqual(steps.at(-28).args, ['smoke:captions-live'])
-    assert.deepEqual(steps.at(-27).args, ['smoke:noise-cleanup'])
-    assert.deepEqual(steps.at(-26).args, ['smoke:dev'])
-    assert.deepEqual(steps.at(-25).args, ['smoke:app-quit-recording'])
-    assert.deepEqual(steps.at(-24).args, ['smoke:record-latency:gate'])
-    assert.deepEqual(steps.at(-23).args, ['smoke:output-stall'])
-    assert.deepEqual(steps.at(-22).args, ['smoke:screens'])
-    assert.deepEqual(steps.at(-21).args, ['smoke:banners'])
-    assert.deepEqual(steps.at(-20).args, ['smoke:html-overlay'])
-    assert.deepEqual(steps.at(-19).args, ['smoke:live-background'])
-    assert.deepEqual(steps.at(-18).args, ['smoke:preview-real-launch'])
-    assert.deepEqual(steps.at(-17).args, ['smoke:layout-source-loop'])
-    assert.deepEqual(steps.at(-16).args, ['smoke:live-layout-switch-recording'])
+    assert.deepEqual(steps.at(-30).args, ['smoke:captions-contract'])
+    assert.deepEqual(steps.at(-29).args, ['smoke:captions-live'])
+    assert.deepEqual(steps.at(-28).args, ['smoke:noise-cleanup'])
+    assert.deepEqual(steps.at(-27).args, ['smoke:dev'])
+    assert.deepEqual(steps.at(-26).args, ['smoke:app-quit-recording'])
+    assert.deepEqual(steps.at(-25).args, ['smoke:record-latency:gate'])
+    assert.deepEqual(steps.at(-24).args, ['smoke:output-stall'])
+    assert.deepEqual(steps.at(-23).args, ['smoke:screens'])
+    assert.deepEqual(steps.at(-22).args, ['smoke:banners'])
+    assert.deepEqual(steps.at(-21).args, ['smoke:html-overlay'])
+    assert.deepEqual(steps.at(-20).args, ['smoke:live-background'])
+    assert.deepEqual(steps.at(-19).args, ['smoke:preview-real-launch'])
+    assert.deepEqual(steps.at(-18).args, ['smoke:layout-source-loop'])
+    assert.deepEqual(steps.at(-17).args, ['smoke:live-layout-switch-recording'])
+    assert.deepEqual(steps.at(-16).args, ['probe:scene-window-switch:switch-back'])
     assert.deepEqual(steps.at(-15).args, ['smoke:comment-highlight-stream'])
     assert.deepEqual(steps.at(-14).args, ['smoke:buddy-pet'])
     assert.deepEqual(steps.at(-13).args, ['probe:comments-window'])

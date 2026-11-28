@@ -16,11 +16,18 @@
 //    non-16:9 frame, each aligned.
 // 4. Closed by its close button: `closed`, no window; reopened with ⌘P,
 //    aligned again; docked back with `preview-window-close`.
-// 5. Docked on the Scene page (`sceneHostsDocked`): aligned in the canvas.
+// 5. Docked back while the Studio window draws nothing (minimised, by the
+//    app's own pid): the layer takes the slot's size at once, not the
+//    Preview window's (#2580: it kept 960x540 in a 619x348 slot until the
+//    main window drew again, >2 s under load). SKIPs, saying why, when
+//    System Events can't minimise the window (no Accessibility grant).
+// 6. Docked on the Scene page (`sceneHostsDocked`): aligned in the canvas.
 
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { promisify } from 'node:util'
 
 import {
   describePreview,
@@ -72,6 +79,23 @@ export async function geometryAligned(command, where) {
     if (Date.now() > until) throw new Error(`${where}: ${why}`)
     await sleep(100)
   }
+}
+
+/**
+ * Minimises (or restores) the launched app's main window, found by its pid
+ * (never by name: the owner's Videorc may be running). The Preview window
+ * is titled "Preview"; the main window is every other one.
+ */
+async function minimiseMainWindow(pid, minimised) {
+  const target = `(first process whose unix id is ${pid})`
+  const run = (script) => promisify(execFile)('osascript', ['-e', script], { timeout: 10000 })
+  await run(
+    `tell application "System Events" to set value of attribute "AXMinimized" of (first window of ${target} whose name is not "Preview") to ${minimised}`
+  )
+  const { stdout } = await run(
+    `tell application "System Events" to get value of attribute "AXMinimized" of (first window of ${target} whose name is not "Preview")`
+  )
+  return stdout.trim() === String(minimised)
 }
 
 const steps = []
@@ -184,6 +208,49 @@ export async function runGpuiPreviewWindowProbe() {
       )
       const docked = await aligned('docked back')
       return { summary: `reopened ${reopened.cells}, docked back ${docked.cells}` }
+    })
+
+    await step('docked back while the Studio window draws nothing', async () => {
+      if ((await state())?.canFloat !== true) {
+        return {
+          skip: true,
+          reason: 'the Preview window opens only on macOS with the native preview'
+        }
+      }
+      const { pid } = JSON.parse(
+        await readFile(join(stateDir, 'profile', 'videorc-app.instance'), 'utf8')
+      )
+      await command('preview-window-open')
+      await settleAt(
+        'the Preview window never presented',
+        (seen) => seen?.floatingOpen === true && presenting(seen)
+      )
+      const floating = await aligned('in its window, before docking back')
+      try {
+        if (!(await minimiseMainWindow(pid, true))) {
+          throw new Error('the Studio window did not report AXMinimized')
+        }
+      } catch (error) {
+        await command('preview-window-close')
+        return {
+          skip: true,
+          reason: `System Events could not minimise the Studio window (Accessibility grant?): ${error?.message ?? error}`
+        }
+      }
+      try {
+        await command('preview-window-close')
+        await waitUntil(
+          'the Preview never docked back',
+          state,
+          (seen) => seen?.mode === 'docked' && seen?.floatingOpen === false,
+          { budgetMs: 5000, label: describePreview }
+        )
+        const docked = await aligned('docked back while the Studio window is minimised')
+        return { summary: `floating ${floating.cells}, docked back unseen ${docked.cells}` }
+      } finally {
+        await minimiseMainWindow(pid, false).catch(() => {})
+        await settleAt('the docked preview never presented again', presenting)
+      }
     })
 
     await step('docked on the Scene page', async () => {

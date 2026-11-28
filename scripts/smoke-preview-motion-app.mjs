@@ -10,9 +10,21 @@ import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { devAppSpawnSpec, smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { devAppSpawnSpec, smokeAppEnv, smokeAppIsGpui, stopProcess } from './lib/app-launcher.mjs'
 import { assertSmokeCommandConnection } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
+
+// Retired on the GPUI app (2026-11-28): this harness measures Electron's
+// pre-detached in-card surface (`inspect-native-preview-bootstrap`, KNOWN-STALE
+// above). The GPUI preview's motion is held by smoke:preview-interaction-stress
+// and smoke:recording-native-preview, which sample the detached preview's
+// presented frames every 100 ms and fail on a still longer than 1 s.
+if (smokeAppIsGpui()) {
+  console.log(
+    'SKIP: smoke:preview-motion is retired on VIDEORC_APP=gpui (KNOWN-STALE in-card measurement); the GPUI preview motion is held by smoke:preview-interaction-stress and smoke:recording-native-preview.'
+  )
+  process.exit(0)
+}
 
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 100000)
