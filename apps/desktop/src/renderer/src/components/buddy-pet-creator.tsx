@@ -843,7 +843,7 @@ function ReferenceStep({
                   data-testid="buddy-pet-new-buddy"
                   size="xs"
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   onClick={onNewBuddy}
                 >
                   <SparkleIcon data-icon="inline-start" />
@@ -1013,7 +1013,7 @@ function NotesEditor({
             disabled={disabled}
             size="xs"
             type="button"
-            variant="ghost"
+            variant="outline"
             onClick={() =>
               onChange({
                 ...draft,
@@ -1054,7 +1054,7 @@ function NotesStep({
           disabled={disabled}
           size="xs"
           type="button"
-          variant="ghost"
+          variant="outline"
           onClick={onOtherPicture}
         >
           Use another picture
@@ -1098,7 +1098,7 @@ function PilotStep({
             disabled={disabled || left === 0 || notesError !== null || creation.expired}
             size="xs"
             type="button"
-            variant="ghost"
+            variant="outline"
             onClick={onRedo}
           >
             <RefreshIcon data-icon="inline-start" />
@@ -1205,7 +1205,7 @@ function BuildStep({
                     disabled={disabled || working || creation.expired}
                     size="xs"
                     type="button"
-                    variant="ghost"
+                    variant="outline"
                     onClick={() =>
                       void (row.version
                         ? controller?.redoSheet(sheet.key)
@@ -1451,7 +1451,7 @@ function ReviewRow({
             disabled={disabled || redoing || redosLeft === 0 || !canRedo}
             size="xs"
             type="button"
-            variant="ghost"
+            variant="outline"
             onClick={onRedo}
           >
             {redoing ? (

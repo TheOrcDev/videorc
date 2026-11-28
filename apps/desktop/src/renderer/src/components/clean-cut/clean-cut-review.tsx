@@ -826,7 +826,7 @@ export function CleanCutReview({
                     disabled={history.future.length === 0}
                     size="xs"
                     type="button"
-                    variant="ghost"
+                    variant="outline"
                     onClick={redo}
                   >
                     Redo
@@ -954,7 +954,7 @@ export function CleanCutReview({
         {status.kind === 'ready' && changes === 0 && data?.job.outputSessionId ? (
           <Button
             type="button"
-            variant="ghost"
+            variant="outline"
             onClick={() =>
               data.job.outputSessionId && onOpenLibrarySession(data.job.outputSessionId)
             }
@@ -966,7 +966,7 @@ export function CleanCutReview({
           <Button
             disabled={saving}
             type="button"
-            variant="ghost"
+            variant="outline"
             onClick={() => edit(EMPTY_CLEAN_CUT_DRAFT)}
           >
             Discard

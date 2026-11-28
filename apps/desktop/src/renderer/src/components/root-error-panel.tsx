@@ -25,7 +25,7 @@ export function CopyDetailsButton({ details }: { details: string }): ReactElemen
     timerRef.current = window.setTimeout(() => setState('idle'), 1500)
   }
   return (
-    <Button type="button" variant="ghost" onClick={() => void copy()}>
+    <Button type="button" variant="outline" onClick={() => void copy()}>
       {state === 'copied' ? 'Copied' : state === 'failed' ? "Couldn't copy" : 'Copy details'}
     </Button>
   )

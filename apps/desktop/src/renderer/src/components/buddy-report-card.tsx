@@ -113,7 +113,7 @@ export function BuddyReportCard({
               <Button
                 data-testid="buddy-report-markers"
                 type="button"
-                variant="ghost"
+                variant="outline"
                 onClick={() => setMarkersOpen(true)}
               >
                 <MarkerIcon data-icon="inline-start" />
@@ -677,7 +677,7 @@ function ReportList<T>({
           className="w-fit"
           size="xs"
           type="button"
-          variant="ghost"
+          variant="outline"
           onClick={() => setExpanded((value) => !value)}
         >
           {expanded ? 'Show fewer' : `Show all ${items.length}`}

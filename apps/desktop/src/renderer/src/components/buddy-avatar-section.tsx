@@ -303,7 +303,7 @@ export function BuddyAvatarSection({
                   data-testid="buddy-test-open"
                   size="xs"
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   onClick={openTest}
                 >
                   <PlayIcon data-icon="inline-start" />
@@ -525,7 +525,7 @@ function AlivePanel({
               data-testid="buddy-pack-remove"
               disabled={!wornPack || isBuddyShippedPack(wornPack.packId)}
               type="button"
-              variant="ghost"
+              variant="outline"
               onClick={() => {
                 if (wornPack) onRemove(wornPack)
               }}

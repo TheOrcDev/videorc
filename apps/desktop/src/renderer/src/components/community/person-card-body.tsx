@@ -393,7 +393,7 @@ export function PersonCardBody({
             disabled={!known || hasX || busy !== null}
             size="xs"
             type="button"
-            variant="ghost"
+            variant="outline"
             onClick={() => setView('link')}
           >
             <LinkIcon aria-hidden data-icon="inline-start" />
@@ -524,7 +524,7 @@ function AccountsList({
               disabled={busy}
               size="xs"
               type="button"
-              variant="ghost"
+              variant="outline"
               onClick={() => onSplit(account)}
             >
               Not the same
@@ -564,7 +564,7 @@ function SuggestionRow({
         <Button disabled={busy} size="xs" type="button" variant="outline" onClick={onAccept}>
           Same person
         </Button>
-        <Button disabled={busy} size="xs" type="button" variant="ghost" onClick={onDismiss}>
+        <Button disabled={busy} size="xs" type="button" variant="outline" onClick={onDismiss}>
           Not the same
         </Button>
       </div>
