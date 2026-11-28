@@ -30,7 +30,8 @@ videorc-preview = { path = "crates/videorc-preview" }
 videorc-gpu-import = { path = "crates/videorc-gpu-import" }
 videorc-preview-ring = { path = "crates/videorc-preview-ring" }
 videorc-updater = { path = "crates/videorc-updater" }
-videorc-page-host = { path = "crates/videorc-page-host" }
+# videorc-page-host is a member with no user yet (plan 260 S1.7 fills it):
+# its entry here comes with its first dependent (Cargo warns on an unused one).
 videorc-kit = { path = "crates/videorc-kit" }
 # Plan 260 D1: GPUI as the weekly gpui-pre snapshot, pinned exactly, one pin
 # for the kit and the app (`pnpm ui:check` compares it with videorc-ui's).
