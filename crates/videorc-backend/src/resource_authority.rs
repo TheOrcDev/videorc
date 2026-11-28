@@ -1021,11 +1021,11 @@ mod tests {
     #[test]
     fn windows_verbatim_drive_paths_issue_consume_and_check_within_roots() {
         let authority = ResourceAuthority::default();
-        let (dir, file) = temp_file();
+        let (_dir, file) = temp_file();
         let plain_file = strip_verbatim_drive_prefix_path(std::fs::canonicalize(&file).unwrap());
         let verbatim_file = format!(r"\\?\{}", plain_file.display());
         let issued = authority
-            .issue(ResourceCapabilityIssueParams {
+            .issue(IssueResourceCapabilityParams {
                 path: verbatim_file,
                 kind: ResourceCapabilityKind::InputFile,
                 ttl_ms: None,
@@ -1039,7 +1039,8 @@ mod tests {
             plain_file
         );
 
-        let plain_root = strip_verbatim_drive_prefix_path(std::fs::canonicalize(&*dir).unwrap());
+        let root_dir = file.parent().unwrap();
+        let plain_root = strip_verbatim_drive_prefix_path(std::fs::canonicalize(root_dir).unwrap());
         let verbatim_root = PathBuf::from(format!(r"\\?\{}", plain_root.display()));
         assert!(canonical_path_is_within(&plain_file, &[verbatim_root]));
     }
