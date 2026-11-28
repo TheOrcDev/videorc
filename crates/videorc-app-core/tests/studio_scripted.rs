@@ -896,6 +896,35 @@ async fn the_bootstrap_reads_everything_in_one_go() {
 }
 
 #[tokio::test]
+async fn the_plan_arrives_by_event_and_keeps_the_last_good_one() {
+    let backend = Scripted::new();
+    let studio = new_studio(&backend);
+    studio.handle_event(ready()).await;
+    // The scripted backend has no `entitlements.get`: none read, Basic gates.
+    assert!(studio.snapshot().entitlements.is_none());
+    let mut plan =
+        serde_json::to_value(videorc_app_core::account::entitlements::default_basic_entitlements())
+            .expect("a plan");
+    plan["limits"]["streaming"]["maxDestinations"] = json!(3);
+    studio
+        .handle_event(BackendEvent::Untyped {
+            event: "entitlements.updated".to_string(),
+            payload: plan,
+        })
+        .await;
+    let held = studio.snapshot().entitlements.expect("the plan");
+    assert_eq!(held.limits.streaming.max_destinations, 3);
+    // Something that isn't a plan keeps the last one.
+    studio
+        .handle_event(BackendEvent::Untyped {
+            event: "entitlements.updated".to_string(),
+            payload: json!({"nonsense": true}),
+        })
+        .await;
+    assert_eq!(studio.snapshot().entitlements, Some(held));
+}
+
+#[tokio::test]
 async fn record_then_stop_walks_idle_starting_recording_stopping_idle() {
     let backend = Scripted::new();
     // The start waits at this gate, so the optimistic `starting` is visible.

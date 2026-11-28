@@ -323,6 +323,139 @@ fn the_gates_block_in_the_renderers_order() {
     );
 }
 
+// ── The entitlement gates (`StartGates::of_snapshot`) ─────────────────────
+
+/// The plan the backend says: Basic's, with `edit` laid over it.
+fn plan(edit: impl FnOnce(&mut videorc_protocol::EntitlementsSnapshot)) -> StudioSnapshot {
+    let mut snapshot = idle();
+    let mut entitlements = crate::account::entitlements::default_basic_entitlements();
+    edit(&mut entitlements);
+    snapshot.entitlements = Some(entitlements);
+    snapshot
+}
+
+fn gates_of(snapshot: &StudioSnapshot) -> StartGates {
+    StartGates::of_snapshot(snapshot)
+}
+
+#[test]
+fn no_plan_read_yet_gates_as_basic_and_blocks_nothing() {
+    let snapshot = idle();
+    assert!(snapshot.entitlements.is_none());
+    let gates = gates_of(&snapshot);
+    assert_eq!(gates.recording_profile, None);
+    assert_eq!(gates.streaming_profile, None);
+    assert_eq!(gates.livestreaming, None);
+    assert_eq!(gates.go_live, None);
+    assert_eq!(record_blocked_reason(&snapshot, &gates), None);
+    assert_eq!(live_stream_blocked_reason(&snapshot, &gates), None);
+}
+
+#[test]
+fn the_recording_profile_gate_follows_the_plans_recording_limit() {
+    // The saved video is 1080p30; the plan records at most 720p.
+    let snapshot = plan(|e| {
+        e.limits.recording.max_width = 1280;
+        e.limits.recording.max_height = 720;
+    });
+    let gates = gates_of(&snapshot);
+    let reason = gates.recording_profile.clone().expect("a recording gate");
+    assert!(reason.contains("exceeds the recording limit"), "{reason}");
+    // Record is blocked by it; Go Live too (it records by default, and the
+    // streaming profile is its own gate, off here).
+    assert_eq!(
+        record_blocked_reason(&snapshot, &gates).as_deref(),
+        Some(reason.as_str())
+    );
+    assert_eq!(gates.streaming_profile, None);
+}
+
+#[test]
+fn the_streaming_profile_gate_follows_the_plans_streaming_limit() {
+    // The destinations resolve to a 1080p stream; the plan streams at most 720p.
+    let snapshot = plan(|e| {
+        e.limits.streaming.max_width = 1280;
+        e.limits.streaming.max_height = 720;
+    });
+    let gates = gates_of(&snapshot);
+    let reason = gates.streaming_profile.clone().expect("a streaming gate");
+    assert!(reason.contains("exceeds the streaming limit"), "{reason}");
+    assert_eq!(
+        live_stream_blocked_reason(&snapshot, &gates).as_deref(),
+        Some(reason.as_str())
+    );
+    // Record never streams: it is free.
+    assert_eq!(record_blocked_reason(&snapshot, &gates), None);
+    assert_eq!(gates.recording_profile, None);
+}
+
+#[test]
+fn the_livestreaming_gate_follows_the_plans_capability() {
+    let snapshot = plan(|e| {
+        for capability in &mut e.capabilities {
+            if capability.feature_id == videorc_protocol::FeatureId::Livestreaming {
+                capability.state = videorc_protocol::EntitlementState::Disabled;
+                capability.reason = Some("Livestreaming is part of Videorc Premium.".to_string());
+            }
+        }
+    });
+    let gates = gates_of(&snapshot);
+    assert_eq!(
+        gates.livestreaming.as_deref(),
+        Some("Livestreaming is part of Videorc Premium.")
+    );
+    // The go-live gate says the same words (livestreaming comes first), and
+    // the jump goes to Destinations. Record stays free.
+    assert_eq!(gates.go_live, gates.livestreaming);
+    assert_eq!(record_blocked_reason(&snapshot, &gates), None);
+    assert_eq!(
+        live_stream_blocked_reason(&snapshot, &gates).as_deref(),
+        Some("Livestreaming is part of Videorc Premium.")
+    );
+    assert_eq!(
+        blocked_jump(&snapshot, &gates),
+        Some(BlockedJump {
+            label: "Open Destinations",
+            page: PageId::Live,
+        })
+    );
+}
+
+#[test]
+fn the_go_live_gate_follows_the_destinations_cap() {
+    // Six destinations on, each ready; the plan's cap is five.
+    let mut snapshot = idle();
+    let six: Vec<_> = (0..6)
+        .map(|n| destination(&format!("custom-{n}"), "Custom RTMP", true))
+        .collect();
+    set_destinations(&mut snapshot, six);
+    let gates = gates_of(&snapshot);
+    assert!(!gates.destination_not_ready);
+    assert_eq!(
+        gates.go_live.as_deref(),
+        Some("You can stream to up to 5 destinations at once.")
+    );
+    assert_eq!(
+        live_stream_blocked_reason(&snapshot, &gates).as_deref(),
+        Some("You can stream to up to 5 destinations at once.")
+    );
+    assert_eq!(
+        blocked_jump(&snapshot, &gates),
+        Some(BlockedJump {
+            label: "Open Destinations",
+            page: PageId::Live,
+        })
+    );
+    assert_eq!(record_blocked_reason(&snapshot, &gates), None);
+    // A plan that allows six leaves it open.
+    snapshot.entitlements = Some({
+        let mut entitlements = crate::account::entitlements::default_basic_entitlements();
+        entitlements.limits.streaming.max_destinations = 6;
+        entitlements
+    });
+    assert_eq!(gates_of(&snapshot).go_live, None);
+}
+
 /// A destination on with no key: on, but not ready to start.
 fn keyless(id: &str) -> videorc_protocol::streaming::StreamTargetSettings {
     let mut target = destination(id, "Custom RTMP", true);

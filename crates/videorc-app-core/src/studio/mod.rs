@@ -88,6 +88,7 @@ pub mod cloud_clips;
 pub mod cloud_iso;
 pub mod cloud_program_health;
 pub mod dashboard;
+mod entitlements_feed;
 pub mod families;
 pub mod follow_runner;
 pub mod gallery_show_stage;
@@ -241,7 +242,7 @@ const NOTICE_CHANNEL_CAPACITY: usize = 64;
 /// The events the Studio reads: the include list for its client socket
 /// (`backend.ready` always arrives, before any filter). The other areas add
 /// theirs as they land (S1.6b to S1.6e).
-pub const STUDIO_EVENTS: [&str; 51] = [
+pub const STUDIO_EVENTS: [&str; 52] = [
     crate::client::names::RECORDING_STATUS,
     crate::client::names::SCENE_CHANGED,
     crate::client::names::DEVICES_CHANGED,
@@ -316,6 +317,8 @@ pub const STUDIO_EVENTS: [&str; 51] = [
     // Destinations' Watchdog phones and After the stream read afresh when
     // the Videorc account changes.
     crate::accounts::methods::CHANGED_EVENT,
+    // The plan changed (Record's and Go Live's entitlement gates).
+    crate::captions::methods::ENTITLEMENTS_EVENT,
 ];
 
 /// `agents.stop`, the Session line's Stop.
@@ -528,6 +531,10 @@ pub struct StudioSnapshot {
     /// S1.6b part 5b: the caption service's status (`captions.status`), for
     /// the Captions row; `None` until it is read.
     pub captions_status: Option<Value>,
+    /// The plan as the backend last said it (`entitlements.get`, then
+    /// `entitlements.updated`): the entitlement gates of Record and Go Live
+    /// read it. `None` until read, which gates as Basic.
+    pub entitlements: Option<videorc_protocol::EntitlementsSnapshot>,
     /// S1.6b part 5b: the camera's low-light compensation (issue #1066).
     pub camera_low_light: camera_low_light::CameraLowLightView,
     /// S1.6b part 5c: what the running session mixes for System audio, its
@@ -729,6 +736,7 @@ struct Inner {
     /// S1.6b part 5b: the caption service's status, and the camera's
     /// low-light compensation with its reads.
     captions_status: Option<Value>,
+    entitlements: Option<videorc_protocol::EntitlementsSnapshot>,
     low_light: camera_low_light::LowLightCore,
     /// S1.6b part 5c: System audio's issue (by session) and its join latch.
     system_audio_issue: Option<(String, audio_mixer::SystemAudioIssue)>,
@@ -1058,6 +1066,7 @@ impl<B: StudioBackend> Studio<B> {
             source_reasons: [None, None, None],
             announced_returns: Vec::new(),
             captions_status: None,
+            entitlements: None,
             low_light: camera_low_light::LowLightCore::default(),
             system_audio_issue: None,
             system_audio_join: None,
@@ -1502,6 +1511,12 @@ impl<B: StudioBackend> Studio<B> {
             {
                 self.apply_captions_status(payload);
             }
+            // The plan changed: Go Live's entitlement gates follow it.
+            BackendEvent::Untyped { event, payload }
+                if event == crate::captions::methods::ENTITLEMENTS_EVENT =>
+            {
+                self.apply_entitlements(&payload);
+            }
             BackendEvent::Untyped { event, payload } => {
                 // S1.6c: the live area's events are its own.
                 // The dashboard folds several of the same events the other
@@ -1803,6 +1818,8 @@ impl<B: StudioBackend> Studio<B> {
         self.read_telemetry(generation).await;
         // S1.6b part 5b: the caption service's status, for the Captions row.
         self.read_captions_status(generation).await;
+        // The plan, for Record's and Go Live's entitlement gates.
+        self.read_entitlements(generation).await;
         // The Output page's performance check line.
         self.read_performance_check(generation).await;
         // S1.6a part 6c: the Clips ring's state, and the launch's arming.
@@ -3198,6 +3215,7 @@ impl<B: StudioBackend> Studio<B> {
             live_sources: inner.live_sources.view.clone(),
             source_reasons: inner.source_reasons.clone(),
             captions_status: inner.captions_status.clone(),
+            entitlements: inner.entitlements.clone(),
             camera_low_light: inner.low_light.view.clone(),
             system_audio,
             takeover_mute_ownership,

@@ -113,14 +113,16 @@ pub struct StartGates {
 }
 
 impl StartGates {
-    /// The gates the saved settings alone decide, which the app can always
-    /// fill in: a destination that is on but not ready to start. The
-    /// entitlement and topology gates stay off until their inputs land
-    /// (S1.6c, #1814).
+    /// The gates the saved settings and the plan decide, which the app can
+    /// always fill in: a destination on but not ready, and the four
+    /// entitlement gates Electron's `startBlockedReasonFor` reads (the
+    /// recording and streaming profiles against the plan's limits, livestreaming
+    /// on at all, and the destinations cap). The Windows envelope and the
+    /// output-topology verdict stay off: see `entitlement_gates`.
     pub fn of_snapshot(snapshot: &StudioSnapshot) -> Self {
         Self {
             destination_not_ready: destination_not_ready(snapshot),
-            ..Self::default()
+            ..entitlement_gates(snapshot)
         }
     }
 
@@ -130,6 +132,88 @@ impl StartGates {
         } else {
             self.record_compatibility.as_ref()
         }
+    }
+}
+
+/// The entitlement gates, over the plan the Studio holds (`None` gates as
+/// Basic, like Electron's `entitlements: null`):
+/// - `recording_profile`: `videoProfileEntitlementGate({ kind: 'recording' })`
+///   over the saved video;
+/// - `streaming_profile`: `resolvedStreamingProfileEntitlementGate`, the
+///   profile the destinations resolve to (`livestream::plan::resolve`, with
+///   recording off, as the renderer asks it);
+/// - `livestreaming`: `entitlementDisabledReason(…, 'livestreaming')`;
+/// - `go_live`: `goLiveEntitlementGate`, livestreaming plus the cap over the
+///   destinations on (`enabledTargetIds`).
+///
+/// Left to later, on purpose: the Windows envelope (`record_compatibility`,
+/// `live_compatibility`) and the topology verdict (`stream_split`). Go Live
+/// itself settles the topology check when it is pressed and says the same
+/// words (`go_live.rs`); Electron's pre-block needs the background probe
+/// the GPUI app does not run.
+fn entitlement_gates(snapshot: &StudioSnapshot) -> StartGates {
+    use crate::account::entitlements::{
+        ProfileKind, entitlement_disabled_reason, go_live_entitlement_gate,
+        video_profile_entitlement_gate,
+    };
+    use videorc_protocol::FeatureId;
+
+    let entitlements = snapshot.entitlements.as_ref();
+    let capture = &snapshot.settings.capture;
+    let enabled_ids = capture
+        .streaming
+        .as_ref()
+        .map(|streaming| streaming.enabled_target_ids.clone())
+        .unwrap_or_default();
+    let reason =
+        |gate: crate::account::entitlements::EntitlementGate| gate.reason().map(str::to_string);
+    StartGates {
+        recording_profile: reason(video_profile_entitlement_gate(
+            entitlements,
+            ProfileKind::Recording,
+            &capture.video,
+        )),
+        streaming_profile: reason(video_profile_entitlement_gate(
+            entitlements,
+            ProfileKind::Streaming,
+            &resolved_streaming_video(snapshot),
+        )),
+        livestreaming: entitlement_disabled_reason(entitlements, FeatureId::Livestreaming),
+        go_live: reason(go_live_entitlement_gate(entitlements, &enabled_ids)),
+        ..StartGates::default()
+    }
+}
+
+/// The video the destinations resolve to for a Go Live
+/// (`resolveProviderStreamOutputPlan(video, streaming, { recordEnabled: false,
+/// simulcastArmed })`'s `streamVideo`).
+fn resolved_streaming_video(snapshot: &StudioSnapshot) -> VideoSettings {
+    use crate::livestream::{plan, targets};
+
+    let capture = &snapshot.settings.capture;
+    let doc = &snapshot.settings.capture_doc;
+    let preset = serde_json::to_value(&capture.video.preset)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default();
+    let recording = plan::Video {
+        preset,
+        width: capture.video.width,
+        height: capture.video.height,
+        fps: capture.video.fps,
+        bitrate_kbps: capture.video.bitrate_kbps,
+    };
+    let list = targets::targets(doc);
+    let streaming = plan::streaming_of(doc, &list);
+    let simulcast = plan::simulcast_armed(doc, &list, true);
+    let resolved = plan::resolve(&recording, &streaming, false, simulcast, false).stream_video;
+    VideoSettings {
+        preset: serde_json::from_value(serde_json::Value::String(resolved.preset))
+            .unwrap_or_else(|_| capture.video.preset.clone()),
+        width: resolved.width,
+        height: resolved.height,
+        fps: resolved.fps,
+        bitrate_kbps: resolved.bitrate_kbps,
     }
 }
 
