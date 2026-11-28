@@ -269,9 +269,79 @@ pub mod encoder {
     }
 }
 
+// ── Separate source recordings (plan 157) ─────────────────────────────────
+
+/// `separateSourceRecordingsSupported` (`lib/capture.ts`): release test 146,
+/// plan 0001. Only macOS writes the Screen and Camera files, so elsewhere
+/// the row shows with its switch off and locked, and says why.
+pub fn separate_source_supported(platform: &str) -> bool {
+    platform == "darwin"
+}
+
+/// `separateSourceRecordingsIneligibilityCopy('unsupported-platform')`.
+pub const SEPARATE_SOURCE_UNSUPPORTED: &str =
+    "Works on Mac only for now. On this computer every recording is the Combined file.";
+
+/// The Output page's "Separate source recordings" switch: what it shows,
+/// whether it is locked, and the warning line under the description.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeparateSourceSwitch {
+    pub checked: bool,
+    pub disabled: bool,
+    pub note: Option<&'static str>,
+}
+
+/// `RecordingTab`'s switch: on a platform that can't write the files it is
+/// off whatever the saved setting says, locked, and says so; elsewhere it
+/// follows the setting and waits for the Save switch like the quality
+/// fields (D-3).
+pub fn separate_source_switch(
+    platform: &str,
+    enabled: bool,
+    quality_locked: bool,
+) -> SeparateSourceSwitch {
+    if separate_source_supported(platform) {
+        SeparateSourceSwitch {
+            checked: enabled,
+            disabled: quality_locked,
+            note: None,
+        }
+    } else {
+        SeparateSourceSwitch {
+            checked: false,
+            disabled: true,
+            note: Some(SEPARATE_SOURCE_UNSUPPORTED),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn separate_source_recordings_show_off_and_locked_off_the_mac() {
+        for platform in ["win32", "linux"] {
+            assert_eq!(
+                separate_source_switch(platform, true, false),
+                SeparateSourceSwitch {
+                    checked: false,
+                    disabled: true,
+                    note: Some(SEPARATE_SOURCE_UNSUPPORTED),
+                },
+                "{platform}"
+            );
+        }
+        assert_eq!(
+            separate_source_switch("darwin", true, false),
+            SeparateSourceSwitch {
+                checked: true,
+                disabled: false,
+                note: None,
+            }
+        );
+        assert!(separate_source_switch("darwin", false, true).disabled);
+    }
 
     fn video(width: u32, height: u32, fps: u32) -> VideoSettings {
         serde_json::from_value(serde_json::json!({
