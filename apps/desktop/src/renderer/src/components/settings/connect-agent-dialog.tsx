@@ -289,7 +289,7 @@ function ShowStep({
             aria-pressed={shown}
             size="xs"
             type="button"
-            variant="ghost"
+            variant="outline"
             onClick={() => setShown((current) => !current)}
           >
             <PreviewIcon data-icon="inline-start" />

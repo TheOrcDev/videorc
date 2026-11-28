@@ -108,7 +108,7 @@ export function CloudClipsSection({ showId }: { showId: string }) {
         </Button>
         {status?.enabled && status.generation && (
           <Button
-            variant="ghost"
+            variant="outline"
             disabled={busy}
             onClick={() =>
               void act(async () => {
@@ -156,7 +156,7 @@ export function CloudClipsSection({ showId }: { showId: string }) {
               {job.state === 'interrupted' && (
                 <Button
                   size="xs"
-                  variant="ghost"
+                  variant="outline"
                   disabled={busy || !status?.generation}
                   onClick={() =>
                     void act(async () => {
@@ -174,7 +174,7 @@ export function CloudClipsSection({ showId }: { showId: string }) {
               )}
               <Button
                 size="xs"
-                variant="ghost"
+                variant="outline"
                 disabled={busy}
                 onClick={() =>
                   void act(async () => client?.requestTyped('cloud.clips.discard', { id: job.id }))

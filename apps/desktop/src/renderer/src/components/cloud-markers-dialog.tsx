@@ -115,7 +115,7 @@ export function CloudMarkersDialog({
               <AlertDescription>{failure}</AlertDescription>
             </Alert>
           )}
-          <Button size="xs" variant="ghost" onClick={() => setRefresh((v) => v + 1)}>
+          <Button size="xs" variant="outline" onClick={() => setRefresh((v) => v + 1)}>
             Refresh
           </Button>
           {marks === null ? (
@@ -164,7 +164,7 @@ export function CloudMarkersDialog({
                   )}
                   <Button
                     size="xs"
-                    variant="ghost"
+                    variant="outline"
                     disabled={pending}
                     onClick={() => void remove(m)}
                   >
