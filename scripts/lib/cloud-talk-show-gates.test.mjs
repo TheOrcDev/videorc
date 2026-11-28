@@ -191,6 +191,31 @@ describe('cloud talk-show gates: the report', () => {
     assert.equal(evaluateCloudTalkShowReport(skipped).ok, true)
   })
 
+  it("judges the backend room's returned pictures when the backend hosted the run", () => {
+    const hosted = goodReport()
+    hosted.monitor = {
+      skipped: false,
+      guests: { ada: { luma: 84, expected: 85 }, bo: { luma: 209, expected: 208 } },
+      program: { ok: true }
+    }
+    assert.equal(evaluateCloudTalkShowReport(hosted).ok, true)
+    hosted.monitor.guests.bo.luma = 120
+    hosted.monitor.program.ok = false
+    const verdict = evaluateCloudTalkShowReport(hosted)
+    assert.equal(verdict.problems.length, 2)
+    assert.ok(verdict.problems.some((problem) => problem.includes('luma 120, expected 208')))
+    const missing = goodReport()
+    missing.monitor = {
+      skipped: false,
+      guests: { ada: { luma: 85, expected: 85 } },
+      program: { ok: true }
+    }
+    assert.ok(evaluateCloudTalkShowReport(missing).problems.some((p) => p.includes('both guests')))
+    const skipped = goodReport()
+    skipped.monitor = { skipped: true }
+    assert.equal(evaluateCloudTalkShowReport(skipped).ok, true)
+  })
+
   it('accepts a recording gap the smoke recorded instead of a file', () => {
     const report = goodReport()
     report.recording = { ffprobeOk: false, gap: 'no local target' }

@@ -215,6 +215,23 @@ export function evaluateCloudTalkShowReport(report) {
   need((report.layouts ?? []).length >= 3, 'fewer than 3 layouts were probed')
   need(report.hostOnAfterBringOn?.tile === true, "the host's tile left the program after Bring on")
   need(report.hostOnAfterBringOn?.tone === true, "the host's tone left the mix after Bring on")
+  // The backend's room hands the pictures back (a renderer-hosted run has none).
+  if (report.monitor && report.monitor.skipped !== true) {
+    for (const [key, picture] of Object.entries(report.monitor.guests ?? {})) {
+      need(
+        Math.abs(picture.luma - picture.expected) <= 18,
+        `${key}'s returned picture has luma ${picture.luma}, expected ${picture.expected}`
+      )
+    }
+    need(
+      Object.keys(report.monitor.guests ?? {}).length === 2,
+      'the backend did not return both guests'
+    )
+    need(
+      report.monitor.program?.ok === true,
+      "the Program monitor's picture did not show the host and Ada"
+    )
+  }
   need(report.return?.guestRefused === true, 'a guest was not refused the return')
   need(report.return?.guestHeardProgram === false, 'a guest heard the program')
   need(
