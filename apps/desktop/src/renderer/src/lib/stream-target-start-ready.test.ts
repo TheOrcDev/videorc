@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import fixture from '../../../../../../protocol-fixtures/stream-target-start-ready.json'
-import { isStreamTargetStartReady, type StreamTargetSettings } from './capture'
+import type { StreamTargetSettings } from '../../../shared/backend'
+import { isStreamTargetStartReady } from './capture'
 
 // `isStreamTargetStartReady` for every destination kind. The same cases drive
 // `livestream::lifecycle::start_ready` and the GPUI transport's gate in
