@@ -460,7 +460,11 @@ run = 'layout floating'
    Annex B samples for the H.264 FIFO, and keeps the raw-YUV FIFO as the fallback path.
    Use `pnpm probe:recording-native-preview:videotoolbox-output` for report-only
    source-complete evidence while the supported/default path and real-source gates are
-   finished.
+   finished. That output is raw Annex-B (no timestamps): FFmpeg stamps each frame when it
+   reads it, so its takes carry duplicate PTS by design (measured 2026-11-28: 61-131 near-zero
+   deltas per take). The probe reports them as a note and does not gate them; the default
+   MPEG-TS output (`pnpm probe:recording-native-preview:videotoolbox`) carries VideoToolbox's
+   own PTS and the probe requires exactly zero duplicates there.
 5. **Done gate:** 1080p30 and 1440p30 real screen+camera composition under the
    compositor frame-time budget (p95 < 16ms @ 60fps preview / < 30ms @ 30fps output);
    final recording shows no repeated frames from a late compositor.
