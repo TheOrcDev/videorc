@@ -162,16 +162,20 @@ pub fn status_bar(
 
     bar = bar
         .child(
-            StatusBarHint::new("search", "Search", ShortcutKeys::keystrokes("cmd-f"))
+            StatusBarHint::new("search", "Search", ShortcutKeys::keystrokes("secondary-f"))
                 .on_click(|_, _, _| {}),
         )
         .child(
-            StatusBarHint::new("write", "Write", ShortcutKeys::keystrokes("cmd-l"))
+            StatusBarHint::new("write", "Write", ShortcutKeys::keystrokes("secondary-l"))
                 .on_click(|_, _, _| {}),
         )
         .child(
-            StatusBarHint::new("sidekick", "Sidekick", ShortcutKeys::keystrokes("cmd-j"))
-                .on_click(|_, _, _| {}),
+            StatusBarHint::new(
+                "sidekick",
+                "Sidekick",
+                ShortcutKeys::keystrokes("secondary-j"),
+            )
+            .on_click(|_, _, _| {}),
         );
 
     if actions_wide {

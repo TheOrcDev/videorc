@@ -339,6 +339,24 @@ mod tests {
         );
     }
 
+    /// The Stream Manager's hints (Search, Write, Sidekick) are written
+    /// `secondary-…`, as their bindings are: ⌘ on macOS, Ctrl elsewhere.
+    /// Written `cmd-…` they printed "Win+L" on Windows, a key that locks
+    /// the PC, while the binding was Ctrl+L.
+    #[test]
+    fn a_secondary_key_is_the_platforms_own() {
+        let on = |os| {
+            let stroke = Keystroke::parse_with_os("secondary-l", os).expect("secondary-l");
+            label(
+                [(stroke.modifiers, stroke.key.as_str())],
+                os == OperatingSystem::Mac,
+            )
+        };
+        assert_eq!(on(OperatingSystem::Mac), "⌘L");
+        assert_eq!(on(OperatingSystem::Windows), "Ctrl+L");
+        assert_eq!(on(OperatingSystem::Linux), "Ctrl+L");
+    }
+
     #[test]
     fn prints_words_elsewhere() {
         assert_eq!(read("ctrl-shift-j", false), "Ctrl+Shift+J");

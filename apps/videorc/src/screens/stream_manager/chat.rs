@@ -1163,7 +1163,7 @@ impl ChatPane {
                         .accessibility_label(pane::copy::SEARCH_LABEL),
                 ),
             )
-            .child(ShortcutKeys::keystrokes("cmd-f"));
+            .child(ShortcutKeys::keystrokes("secondary-f"));
 
         let on_stream = div()
             .flex()
