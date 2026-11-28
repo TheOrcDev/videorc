@@ -921,7 +921,20 @@ function createGpuiDriver(smoke) {
     throw new Error(`Timed out: ${description}; full GPUI state in ${statePath}`)
   }
   const applyLayout = async (patch, predicate, description) => {
-    await command('studio-scene-layout', { patch })
+    try {
+      await command('studio-scene-layout', { patch })
+    } catch (error) {
+      // GPUI refuses a screen layout while no screen or window is picked
+      // (layout-screen-not-selected), where the renderer's fire-and-forget
+      // call never says. The probe picks each fixture window next and applies
+      // Screen only again then, so this one carries nothing.
+      const sources = (await state()).visual.sources
+      if (/refused/i.test(String(error)) && !sources.windowId && !sources.screenId) {
+        log(`${description}: refused with no screen picked yet; applied after the window`)
+        return state()
+      }
+      throw error
+    }
     return waitFor(predicate, description)
   }
   const configureVideo = (video) => command('studio-capture-configure', { config: { video } })
@@ -970,6 +983,16 @@ function createGpuiDriver(smoke) {
     return saved.id
   }
   const saveWindowScene = async (target, name) => {
+    // As the renderer driver: the new scene first, so preparing Beta never
+    // edits Alpha's screen (plan 231 D11). With no screen picked yet (the
+    // first scene), GPUI has no confirmed look to save: pick the window
+    // first; nothing else is on stream to edit then.
+    const sources = (await state()).visual.sources
+    if (!sources.windowId && !sources.screenId) {
+      await selectWindow(target)
+      await waitForScreenLive(target.windowId)
+      return save(name)
+    }
     const id = await save(name)
     await selectWindow(target)
     await waitForScreenLive(target.windowId)
