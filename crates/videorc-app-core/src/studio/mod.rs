@@ -429,6 +429,17 @@ pub struct SessionView {
     pub live_streaming: Option<StreamingSettings>,
 }
 
+impl SessionView {
+    /// `sessionOwnsTransport`: a recording or a livestream runs (or is
+    /// starting or stopping). The Clips ring alone, a replay-only session, is
+    /// not "a session" to the pages that lock while one runs: Electron's
+    /// `isSessionActive` leaves it out, as first-run setup and Settings'
+    /// "Run setup again…" read it.
+    pub fn owns_transport(&self) -> bool {
+        self.phase.is_active() && !self.status.replay_only
+    }
+}
+
 /// The persisted settings, as the pages read them (S3.0d).
 #[derive(Debug, Clone)]
 pub struct SettingsView {

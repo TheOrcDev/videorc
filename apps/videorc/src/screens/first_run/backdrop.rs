@@ -82,6 +82,7 @@ pub use macos::Player;
 mod macos {
     use std::ffi::c_void;
     use std::ptr::NonNull;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
 
@@ -198,6 +199,9 @@ fragment float4 backdrop_tone_main(ToneVOut in [[stage_in]],
     struct Shared {
         controls: Mutex<Controls>,
         changed: Condvar,
+        /// Frames the GPU finished and presented, since the player started
+        /// (the smokes' presented-frames counter, `first-run-state`).
+        presented: AtomicU64,
     }
 
     impl Shared {
@@ -266,6 +270,7 @@ fragment float4 backdrop_tone_main(ToneVOut in [[stage_in]],
                     quit: false,
                 }),
                 changed: Condvar::new(),
+                presented: AtomicU64::new(0),
             });
             let (events, inbox) = unbounded_channel();
             let mut player = Self {
@@ -288,6 +293,11 @@ fragment float4 backdrop_tone_main(ToneVOut in [[stage_in]],
                 return Err((StillReason::Unsupported, Some(error.to_string())));
             }
             Ok((player, inbox))
+        }
+
+        /// Frames the GPU has presented since this player started.
+        pub fn presented_frames(&self) -> u64 {
+            self.shared.presented.load(Ordering::Relaxed)
         }
 
         /// The element that shows the picture; paint it after the poster.
@@ -532,6 +542,7 @@ fragment float4 backdrop_tone_main(ToneVOut in [[stage_in]],
                 if command_buffer.status() != MTLCommandBufferStatus::Completed {
                     return Err("the GPU did not finish the frame".to_string());
                 }
+                shared.presented.fetch_add(1, Ordering::Relaxed);
                 Ok(true)
             });
             if let Some(stall) = stall {

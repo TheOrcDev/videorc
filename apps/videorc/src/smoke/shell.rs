@@ -9,7 +9,7 @@ use std::time::Duration;
 use gpui::{AnyWindowHandle, App, Entity, WindowAppearance, WindowHandle};
 use serde_json::{Value, json};
 use videorc_app_core::smoke::security::{UiAppearanceRequest, UiToastRequest, UiWindow};
-use videorc_kit::theme::{IncreaseContrast, ReduceMotion};
+use videorc_kit::theme::{self, IncreaseContrast, ReduceMotion};
 use videorc_kit::{ToastData, ToastKind};
 
 use super::ShellSmoke;
@@ -131,6 +131,33 @@ impl ShellSmoke for ShellWindows {
         self.notices
             .update(cx, |hub, cx| hub.press_toast(id.clone(), toast, cx));
         Ok(json!({ "shown": true, "id": id }))
+    }
+
+    fn window_theme_tokens(&self, cx: &mut App) -> Result<Value, String> {
+        self.main
+            .update(cx, |_, window, cx| {
+                let appearance = theme::current(window, cx);
+                let t = appearance.theme();
+                // `#rrggbb`: the alpha of a text token is always 1.
+                let hex = |color: u32| format!("#{:06x}", color >> 8);
+                json!({
+                    "theme": if appearance.dark { "dark" } else { "light" },
+                    "increaseContrast": appearance.increase_contrast,
+                    "background": hex(t.background),
+                    "foreground": hex(t.foreground),
+                    "mutedForeground": hex(t.muted_foreground),
+                    "subtle": hex(t.subtle),
+                })
+            })
+            .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())
+    }
+
+    fn first_run_state(&self, cx: &mut App) -> Result<Value, String> {
+        self.main
+            .update(cx, |shell, window, cx| {
+                shell.smoke_first_run_state(window, cx)
+            })
+            .map_err(|_| super::MAIN_WINDOW_NOT_READY.to_string())
     }
 
     fn notifications(&self, cx: &mut App) -> Result<Value, String> {

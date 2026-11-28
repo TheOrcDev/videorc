@@ -152,6 +152,7 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "exercise-native-preview-scene",
     "exercise-native-preview-scene-after-surface-loss",
     "exercise-preview-click-focus",
+    "first-run-state",
     "global-shortcuts-fire",
     "global-shortcuts-recorder",
     "global-shortcuts-state",
@@ -226,6 +227,7 @@ pub const APP_WINDOW_COMMANDS: &[&str] = &[
     "ui-toast",
     "ui-tree",
     "ui-type",
+    "window-theme-tokens",
 ];
 
 /// A part of the app that runs some smoke commands: the Studio's, or a

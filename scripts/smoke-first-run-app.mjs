@@ -11,7 +11,7 @@ import { join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 
 import { connectBackend, request } from './smoke-recording-session.mjs'
-import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
+import { launchDevApp, repoRoot, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import {
   evaluateFirstRunSmokeStep,
   FIRST_RUN_SMOKE_LIMITS,
@@ -20,6 +20,13 @@ import {
   firstRunSourceStartLines
 } from './lib/first-run-smoke-gate.mjs'
 import { seedUiSettingsJs, UI_SETTINGS_READY_TIMEOUT_MS } from './lib/renderer-profile-seed.mjs'
+
+// `VIDEORC_APP=gpui`: the GPUI app has no renderer to drive through CDP; its
+// port seeds, observes and drives it with the app's own smoke commands.
+if (smokeAppIsGpui()) {
+  await import('./smoke-first-run-gpui.mjs')
+  process.exit(process.exitCode ?? 0)
+}
 
 if (process.platform !== 'darwin')
   throw new Error('First-run app smoke requires macOS; Windows acceptance is owner-owed.')
