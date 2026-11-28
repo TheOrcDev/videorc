@@ -90,7 +90,7 @@ export function ThumbnailField({
         {assetId && removable ? (
           <Button
             disabled={disabled}
-            variant="ghost"
+            variant="outline"
             onClick={() => {
               setError('')
               onChange(null)

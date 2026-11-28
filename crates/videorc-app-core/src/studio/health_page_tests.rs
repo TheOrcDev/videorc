@@ -584,6 +584,61 @@ fn an_idle_test_pattern_reads_as_the_electron_baseline_does() {
 }
 
 #[test]
+fn windows_without_preview_yet_is_neutral_and_not_counted_by_health() {
+    let now = Instant::now();
+    for preview_payload in [
+        json!({"bottleneck": "none", "droppedFrames": 0, "skippedFrames": 0,
+            "duplicateCaptureSources": [], "backendRssBytes": 104_857_600}),
+        json!({"bottleneck": "none", "droppedFrames": 0, "skippedFrames": 0,
+            "duplicateCaptureSources": [], "backendRssBytes": 104_857_600,
+            "previewTransport": "unavailable", "previewSurfaceBacking": "none"}),
+    ] {
+        let mut telemetry = HealthTelemetry::default();
+        telemetry.apply(DIAGNOSTICS_STATS_EVENT, preview_payload, now);
+        let summary = summary(true);
+        let log = RecordingLog::default();
+        let sources = json!({});
+        let view = health_page(&PageInputs {
+            telemetry: &telemetry,
+            summary: &summary,
+            capture_sources: f(&sources),
+            native_preview_surface_enabled: false,
+            platform: "win32",
+            development: true,
+            pipeline: None,
+            device_warnings: &[],
+            recording_log: &log,
+            app_log: &[],
+            crash: None,
+            record_latency: &Default::default(),
+            camera: Default::default(),
+            linux_keyring: None,
+            linux_desktop: None,
+            now,
+        });
+        let attention: Vec<(&str, &str)> = view
+            .checks
+            .iter()
+            .filter(|check| check_needs_attention(check.tone))
+            .map(|check| (check.label, check.value.as_str()))
+            .collect();
+        assert!(attention.is_empty(), "unexpected attention: {attention:?}");
+        assert_eq!(view.verdict.variant, VerdictVariant::Success);
+        assert!(!view.groups[3].attention);
+        let preview = view.checks.iter().find(|c| c.id == "preview").unwrap();
+        assert_eq!(preview.value, "Not on Windows yet");
+        assert_eq!(preview.tone, Tone::Neutral);
+        let speed = view
+            .checks
+            .iter()
+            .find(|c| c.id == "preview-speed")
+            .unwrap();
+        assert_eq!(speed.value, "Not on Windows yet");
+        assert_eq!(speed.tone, Tone::Neutral);
+    }
+}
+
+#[test]
 fn a_missing_recorder_says_so_and_opens_its_group() {
     let now = Instant::now();
     let telemetry = HealthTelemetry::default();

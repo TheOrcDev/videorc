@@ -341,7 +341,7 @@ function StreamingSetup({
                     {destinationLabel(target.label)}: {target.scheduledEventTitle}
                   </span>
                   <Button
-                    variant="ghost"
+                    variant="outline"
                     disabled={
                       isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)
                     }

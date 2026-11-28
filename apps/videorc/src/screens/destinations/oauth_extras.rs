@@ -88,7 +88,7 @@ impl DestinationsPanel {
                 .child(
                     Button::new(format!("dest-x-check-{dest_id}"))
                         .label(x_live.check_label.clone())
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .disabled(disabled || !x_live.check_enabled)
                         .on_click({
                             let entity = entity.clone();
@@ -148,7 +148,7 @@ impl DestinationsPanel {
                 links = links.child(
                     Button::new(format!("dest-x-link-{dest_id}-{i}"))
                         .label(link.label.clone())
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .on_click(move |_, _, cx| cx.open_url(&url)),
                 );
             }

@@ -686,7 +686,7 @@ export function DestinationCard({
                   <Button
                     className="w-fit"
                     disabled={disabled}
-                    variant="ghost"
+                    variant="outline"
                     onClick={() => void onRestorePreviousStreamKey(target.id)}
                   >
                     <ResetIcon />
@@ -1218,7 +1218,7 @@ function OAuthAccountPanel({
           </Button>
         ) : null}
         {shared ? null : (
-          <Button disabled={disabled} variant="ghost" onClick={() => setDisconnectOpen(true)}>
+          <Button disabled={disabled} variant="outline" onClick={() => setDisconnectOpen(true)}>
             <SignOutIcon data-icon="inline-start" weight="bold" />
             Disconnect
           </Button>
@@ -1342,7 +1342,7 @@ function OAuthAccountPanel({
             </Badge>
             <Button
               disabled={disabled || xNativeCapabilityLoading}
-              variant="ghost"
+              variant="outline"
               onClick={() => void onRefreshXNativeCapability(account.accountId)}
             >
               <SyncIcon data-icon="inline-start" weight="bold" />

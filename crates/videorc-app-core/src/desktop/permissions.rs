@@ -444,6 +444,23 @@ pub async fn request_media_access_with_restart(
     })
 }
 
+/// What `CGPreflightScreenCaptureAccess` means for the screen. It answers
+/// granted or not and nothing else, so a Mac that was never asked reads the
+/// same as one that said no. The app remembers that it has asked
+/// (`asked_before`): until then "not granted" is `NotDetermined`, which is
+/// the only state [`request_screen_access_with_watch`] asks from, so the
+/// app asks (and macOS lists it under Screen & System Audio Recording)
+/// instead of reporting "denied" without ever having asked.
+pub fn screen_status_from_preflight(granted: bool, asked_before: bool) -> MediaAccessStatus {
+    if granted {
+        MediaAccessStatus::Granted
+    } else if asked_before {
+        MediaAccessStatus::Denied
+    } else {
+        MediaAccessStatus::NotDetermined
+    }
+}
+
 /// `requestScreenAccessWithWatch`: only a never-asked Mac is asked. The
 /// watcher starts before the request and outlives it.
 pub async fn request_screen_access_with_watch(
@@ -813,6 +830,14 @@ mod tests {
             fake.calls()
                 .contains(&"log:Warn:Could not request camera permission: tcc".to_string())
         );
+    }
+
+    #[test]
+    fn a_never_asked_screen_is_not_determined_until_the_app_has_asked() {
+        assert_eq!(screen_status_from_preflight(true, false), Granted);
+        assert_eq!(screen_status_from_preflight(true, true), Granted);
+        assert_eq!(screen_status_from_preflight(false, false), NotDetermined);
+        assert_eq!(screen_status_from_preflight(false, true), Denied);
     }
 
     #[tokio::test]
