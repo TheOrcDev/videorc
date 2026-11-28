@@ -29,6 +29,11 @@ import {
 } from './lib/gpui-preview-probe.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
+import {
+  arrivalStampedNote,
+  bridgeOutputStampsByArrival,
+  duplicatePtsGatesForBridgeOutput
+} from './lib/bridge-output-timestamps.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 import { continuity, continuityFailures } from './gpui-preview-interaction-stress.mjs'
 import { geometryAligned } from './gpui-preview-window-probe.mjs'
@@ -210,14 +215,23 @@ export async function runGpuiRecordingNativePreview() {
     } else if (relative(stateDir, output).startsWith('..')) {
       failures.push(`the take left the smoke's folder: ${output}`)
     } else {
+      // Duplicate PTS: exactly zero where each frame carries VideoToolbox's own
+      // PTS (the default MPEG-TS output); reported, not gated, for the Annex-B
+      // diagnostic output, where FFmpeg stamps frames on arrival.
+      const bridgeOutput = process.env.VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT
       const quality = await analyzeRecording(output, {
         ffmpegPath,
         ffprobePath,
         intendedFps: 30,
         expectAudio: false,
-        gates: { requireMotion: false }
+        gates: { requireMotion: false, ...duplicatePtsGatesForBridgeOutput(bridgeOutput) }
       })
       const reports = writeReports(quality)
+      if (bridgeOutputStampsByArrival(bridgeOutput)) {
+        notes.push(
+          arrivalStampedNote(quality.metrics.duplicatePtsCount, quality.metrics.maxDuplicatePtsRun)
+        )
+      }
       if (!quality.verdict.pass) {
         failures.push(
           `the take failed analysis: ${quality.verdict.failures.join('; ')} (${reports.mdPath})`

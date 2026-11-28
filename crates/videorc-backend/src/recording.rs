@@ -20990,7 +20990,11 @@ fn default_encoder_bridge_video_output_for_outputs(
     // (default 5MB probe starved the multi-input graph) and fifo-muxer-wrapped
     // per-target FLV outputs with an explicit FLV codec tag (tee forwards the
     // mpegts tag [27], which flv rejects). Annex-B stays reachable via
-    // VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT for diagnosis.
+    // VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT for diagnosis. Its takes still carry
+    // duplicate PTS by design (2026-11-28: 61-155 near-zero deltas per 10 s
+    // take, MPEG-TS none): the pipe writer drops each frame's VideoToolbox
+    // timing, so FFmpeg stamps a burst of frames with one read time. The native
+    // preview probes know this (`scripts/lib/bridge-output-timestamps.mjs`).
     default_encoder_bridge_video_output()
 }
 

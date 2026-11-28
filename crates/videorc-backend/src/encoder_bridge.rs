@@ -15284,6 +15284,81 @@ mod tests {
         assert_eq!(pts, vec![0, 9_000]);
     }
 
+    /// 2026-11-28: takes of the Annex-B output (`videotoolbox-h264`) carried
+    /// 61-155 near-zero inter-frame deltas (runs of 2-18 frames on one stamp)
+    /// while the MPEG-TS takes of the same scene carried none. Neither writer
+    /// reads a clock, so "delivery in a burst" is simply "written back to
+    /// back": what differs is whether each access unit carries its own PTS.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_delivery_burst_keeps_regular_pts_in_mpeg_ts_and_leaves_annex_b_nothing_to_stamp_with() {
+        let frames = (0..30)
+            .map(|frame_index| VideoToolboxH264AnnexBFrame {
+                timing: VideoToolboxFrameTiming::new(frame_index, 30, 1, 30),
+                bytes: vec![0x55; 64],
+                nal_types: vec![1],
+                is_idr: false,
+            })
+            .collect::<Vec<_>>();
+
+        // MPEG-TS: thirty frames written with no time between them still carry
+        // VideoToolbox's own PTS, one 30 fps tick (3000 ticks of 90 kHz) apart.
+        let mut mpeg_ts = VideoToolboxH264PipeWriter::for_output(
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+        );
+        let mut ts_sink = CountingSink::default();
+        for frame in &frames {
+            mpeg_ts
+                .write_frame(&mut ts_sink, frame)
+                .expect("write MPEG-TS frame");
+        }
+        let pts = ts_sink
+            .bytes
+            .chunks_exact(188)
+            .filter(|packet| {
+                let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
+                pid == 0x0101 && packet[1] & 0x40 != 0
+            })
+            .filter_map(|packet| {
+                let payload = match (packet[3] >> 4) & 0x03 {
+                    1 => &packet[4..],
+                    3 => &packet[5 + usize::from(packet[4])..],
+                    _ => return None,
+                };
+                (payload.len() >= 14 && payload.starts_with(&[0x00, 0x00, 0x01, 0xe0]))
+                    .then(|| decode_test_pts(&payload[9..14]))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pts,
+            (0..30)
+                .map(|frame_index| frame_index * 3_000)
+                .collect::<Vec<u64>>(),
+            "a burst must not be able to put two frames on one stamp"
+        );
+
+        // Annex-B: the same frames reach the FIFO as bytes only. Their timing
+        // is dropped, so a reader can only stamp them by when it reads them
+        // (`-use_wallclock_as_timestamps 1`), and a burst is one stamp.
+        let mut annex_b = VideoToolboxH264PipeWriter::for_output(
+            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+        );
+        let mut annex_sink = CountingSink::default();
+        for frame in &frames {
+            annex_b
+                .write_frame(&mut annex_sink, frame)
+                .expect("write Annex-B frame");
+        }
+        assert_eq!(
+            annex_sink.bytes,
+            frames
+                .iter()
+                .flat_map(|frame| frame.bytes.iter().copied())
+                .collect::<Vec<u8>>(),
+            "the Annex-B writer adds no timestamps; that is why it is a diagnostic output only"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     fn decode_test_pts(bytes: &[u8]) -> u64 {
         (u64::from((bytes[0] >> 1) & 0x07) << 30)
