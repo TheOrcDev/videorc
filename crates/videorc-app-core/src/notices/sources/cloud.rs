@@ -8,7 +8,10 @@
 //! port, so [`CloudChange`] carries what they decided, and this turns it
 //! into entries.
 
+use std::collections::BTreeSet;
+
 use super::devices::CURRENT_SESSION;
+use crate::livestream::{cloud_show, cloud_status::CloudStatus, cloud_view};
 use crate::notices::Store;
 use crate::notices::types::{Action, ActionKind, Input, ProgressState};
 
@@ -168,6 +171,47 @@ pub fn publish_cloud_change(store: &mut Store, change: &CloudChange<'_>, now: u6
             now,
         );
     }
+}
+
+/// `publishCloudStatus`: compares `previous` and `next` `CloudStatus`
+/// snapshots and publishes the same bell/toast entries as Electron's
+/// `lib/notifications/sources/cloud.ts`.
+pub fn publish_cloud_status(
+    store: &mut Store,
+    previous: Option<&CloudStatus>,
+    next: &CloudStatus,
+    now: u64,
+    warned: &mut BTreeSet<String>,
+) {
+    let fallback = cloud_view::cloud_fallback_toast(previous, next);
+    let lost = cloud_view::cloud_lost_toast(previous, next);
+    let restarted = cloud_view::cloud_restart_toast(previous, next);
+    let cap = cloud_view::cloud_show_cap_toast(previous, next, now as i64, warned);
+    let problem = cap
+        .as_deref()
+        .or(restarted)
+        .or(lost)
+        .or(fallback.as_deref());
+    let allowance_past = next
+        .allowance_past
+        .and_then(|_| cloud_view::cloud_allowance_past_toast(previous, next));
+    let taken_over_by = (next.stopped_by.as_deref() == Some("taken-over")
+        && previous.and_then(|p| p.stopped_by.as_deref()) != Some("taken-over"))
+    .then(|| cloud_show::on_air_device_name(next.on_air.as_ref()));
+    let change = CloudChange {
+        previous_show: previous
+            .and_then(|p| p.show.as_ref())
+            .map(|s| s.id.as_str()),
+        next_show: next.show.as_ref().map(|s| s.id.as_str()),
+        ended_elsewhere: next.end_reason.as_deref() == Some("ended-elsewhere")
+            && previous.and_then(|p| p.end_reason.as_deref()) != Some("ended-elsewhere"),
+        problem,
+        allowance_past: allowance_past
+            .as_ref()
+            .map(|(title, desc)| (title.as_str(), *desc)),
+        taken_over_by: taken_over_by.as_deref(),
+    };
+    publish_cloud_change(store, &change, now);
 }
 
 /// `announceCloud`'s entry (plan 222 U1): "Videorc Cloud is on", once per
@@ -432,5 +476,189 @@ mod tests {
             "../../../../../apps/desktop/src/renderer/src/lib/notifications/sources/health.ts"
         );
         assert!(HEALTH.contains(&format!("CLOUD_SESSION_PREFIX = '{CLOUD_SESSION_PREFIX}'")));
+    }
+
+    fn base_status() -> CloudStatus {
+        use crate::livestream::cloud_status::CloudShow;
+        CloudStatus {
+            phase: "live".into(),
+            show: Some(CloudShow {
+                id: "sh_1".into(),
+                node_id: "node-1".into(),
+                ..CloudShow::default()
+            }),
+            ..CloudStatus::default()
+        }
+    }
+
+    fn popped_toasts(store: &mut Store) -> Vec<String> {
+        use crate::notices::store::Effect;
+        store
+            .take_effects()
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::Show { entry, .. } => Some(entry.key),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn taken_over_notice_goes_to_bell_only_once_per_transition() {
+        use crate::livestream::cloud_status::CloudOnAirDevice;
+        use crate::notices::types::Tone;
+        let mut store = Store::new(0, 0);
+        store.set_pressed();
+        let mut warned = BTreeSet::new();
+        let base = base_status();
+        let mut next = base.clone();
+        next.stopped_by = Some("taken-over".into());
+        next.on_air = Some(CloudOnAirDevice {
+            name: Some("Smoke phone".into()),
+            kind: "phone".into(),
+            ..CloudOnAirDevice::default()
+        });
+        publish_cloud_status(&mut store, Some(&base), &next, 1_000, &mut warned);
+        publish_cloud_status(&mut store, Some(&next), &next, 2_000, &mut warned);
+        let entry = store
+            .snapshot()
+            .iter()
+            .find(|e| e.key == "cloud-taken-over")
+            .expect("taken-over entry");
+        assert_eq!(entry.tone, Tone::News);
+        assert_eq!(entry.title, "Your show continues on Smoke phone");
+        assert_eq!(entry.occurrences, 1);
+        assert_eq!(entry.actions[0].id, "open-studio");
+        assert!(popped_toasts(&mut store).is_empty(), "news never pops up");
+    }
+
+    #[test]
+    fn ended_elsewhere_notice_goes_to_bell_only_and_ignores_host_end() {
+        use crate::notices::types::Tone;
+        let mut store = Store::new(0, 0);
+        store.set_pressed();
+        let mut warned = BTreeSet::new();
+        let base = base_status();
+        let mut ended = base.clone();
+        ended.phase = "off".into();
+        ended.end_reason = Some("ended-elsewhere".into());
+        publish_cloud_status(&mut store, Some(&base), &ended, 1_000, &mut warned);
+        publish_cloud_status(&mut store, Some(&ended), &ended, 2_000, &mut warned);
+        let entry = store
+            .snapshot()
+            .iter()
+            .find(|e| e.key == "cloud-ended-elsewhere:sh_1")
+            .expect("ended-elsewhere entry");
+        assert_eq!(entry.tone, Tone::News);
+        assert_eq!(entry.title, "The show was ended from videorc.com");
+        assert_eq!(entry.occurrences, 1);
+        assert!(popped_toasts(&mut store).is_empty(), "news never pops up");
+
+        let mut host_ended = base.clone();
+        host_ended.phase = "off".into();
+        host_ended.end_reason = Some("ended-by-host".into());
+        let mut store2 = Store::new(0, 0);
+        publish_cloud_status(&mut store2, Some(&base), &host_ended, 1_000, &mut warned);
+        assert!(store2.snapshot().is_empty());
+    }
+
+    #[test]
+    fn cloud_problem_notice_respects_idle_bell_only_and_live_warning_routing() {
+        use crate::livestream::cloud_status::CloudRestart;
+        use crate::notices::types::Tone;
+        let mut warned = BTreeSet::new();
+        let base = base_status();
+        let mut lost = base.clone();
+        lost.direct_fallback_available = true;
+
+        // Idle: bell only (no toast).
+        let mut idle_store = Store::new(0, 0);
+        idle_store.set_pressed();
+        publish_cloud_status(&mut idle_store, Some(&base), &lost, 1_000, &mut warned);
+        assert!(
+            popped_toasts(&mut idle_store).is_empty(),
+            "warning stays behind the bell while idle"
+        );
+        let entry = idle_store
+            .snapshot()
+            .iter()
+            .find(|e| e.key == CLOUD_STATUS_KEY)
+            .expect("cloud-status entry");
+        assert_eq!(entry.tone, Tone::Warning);
+        assert_eq!(entry.title, "Videorc Cloud lost your show");
+        assert_eq!(entry.session_id.as_deref(), Some("cloud:sh_1"));
+
+        // Live: warning condition updates in place and resolves when the show ends.
+        let mut live_store = Store::new(0, 0);
+        live_store.set_pressed();
+        live_store.set_live(true);
+        publish_cloud_status(&mut live_store, Some(&base), &lost, 1_000, &mut warned);
+        assert!(
+            popped_toasts(&mut live_store).is_empty(),
+            "warning while live stays behind the bell (quiet during live)"
+        );
+        let mut restarted = lost.clone();
+        restarted.restart = Some(CloudRestart {
+            at: "2026-11-19T10:00:00Z".into(),
+            destinations_resent: true,
+        });
+        publish_cloud_status(&mut live_store, Some(&lost), &restarted, 2_000, &mut warned);
+        assert_eq!(live_store.snapshot().len(), 1);
+        assert_eq!(
+            live_store.snapshot()[0].title,
+            "Videorc Cloud restarted your show"
+        );
+        let mut gone = restarted.clone();
+        gone.phase = "off".into();
+        gone.show = None;
+        publish_cloud_status(&mut live_store, Some(&restarted), &gone, 3_000, &mut warned);
+        assert_eq!(live_store.snapshot()[0].state, State::Resolved);
+    }
+
+    #[test]
+    fn allowance_past_notice_goes_to_bell_only_once_per_show() {
+        use crate::livestream::cloud_status::CloudAllowancePast;
+        use crate::notices::types::Tone;
+        let mut store = Store::new(0, 0);
+        store.set_pressed();
+        let mut warned = BTreeSet::new();
+        let base = base_status();
+        let mut past = base.clone();
+        past.allowance_past = Some(CloudAllowancePast { seconds: 600 });
+        publish_cloud_status(&mut store, Some(&base), &past, 1_000, &mut warned);
+        publish_cloud_status(&mut store, Some(&past), &past, 2_000, &mut warned);
+        let entry = store
+            .snapshot()
+            .iter()
+            .find(|e| e.key == "cloud-allowance")
+            .expect("cloud-allowance entry");
+        assert_eq!(entry.tone, Tone::News);
+        assert_eq!(entry.title, "You're 10 min past this month's cloud hours");
+        assert_eq!(entry.occurrences, 1);
+        assert!(popped_toasts(&mut store).is_empty(), "news never pops up");
+    }
+
+    #[test]
+    fn launch_quiet_window_suppresses_toasts_for_all_cloud_notices() {
+        use crate::livestream::cloud_status::{CloudAllowancePast, CloudOnAirDevice};
+        use crate::notices::policy::LAUNCH_QUIET_MS;
+        let mut store = Store::new(1_000, LAUNCH_QUIET_MS);
+        let mut warned = BTreeSet::new();
+        let mut launch_state = base_status();
+        launch_state.direct_fallback_available = true;
+        launch_state.allowance_past = Some(CloudAllowancePast { seconds: 600 });
+        launch_state.stopped_by = Some("taken-over".into());
+        launch_state.end_reason = Some("ended-elsewhere".into());
+        launch_state.on_air = Some(CloudOnAirDevice {
+            name: Some("Phone".into()),
+            kind: "phone".into(),
+            ..CloudOnAirDevice::default()
+        });
+        publish_cloud_status(&mut store, None, &launch_state, 2_000, &mut warned);
+        assert!(
+            popped_toasts(&mut store).is_empty(),
+            "no toast pile-up during launch quiet window"
+        );
+        assert!(!store.snapshot().is_empty(), "entries stay behind the bell");
     }
 }

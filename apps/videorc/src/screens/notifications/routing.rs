@@ -108,6 +108,18 @@ impl Hub {
                 self.store.publish(input, now());
             }
             BackendEvent::Untyped { event, payload } => match event.as_str() {
+                "cloud.state" => {
+                    if let Ok(next) = serde_json::from_value::<CloudStatus>(payload) {
+                        sources::cloud::publish_cloud_status(
+                            &mut self.store,
+                            self.cloud_status.as_ref(),
+                            &next,
+                            now(),
+                            &mut self.cloud_cap_warned,
+                        );
+                        self.cloud_status = Some(next);
+                    }
+                }
                 "stream.targets" => {
                     if let Ok(snapshot) =
                         serde_json::from_value::<n::StreamTargetsSnapshot>(payload)

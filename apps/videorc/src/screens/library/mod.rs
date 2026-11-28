@@ -43,6 +43,8 @@ pub struct LibraryScreen {
     busy: BTreeSet<String>,
     message: Option<String>,
     cloud: videorc_app_core::library::cloud::CloudTab,
+    cloud_watch: videorc_app_core::library::cloud::CloudRecordingWatch,
+    cloud_poll_running: bool,
     cloud_shown: bool,
     active: bool,
     cloud_loading: bool,
@@ -138,6 +140,38 @@ impl LibraryScreen {
                     }
                     Err(_) => break,
                 };
+                if let videorc_app_core::BackendEvent::Untyped { event, payload } = &event
+                    && event == "cloud.state"
+                {
+                    let recording = payload.get("recording");
+                    let active = recording
+                        .and_then(|r| r.get("active"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    let since = recording
+                        .and_then(|r| r.get("since"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
+                    if entity
+                        .update(cx, |this, cx| {
+                            let stopped = this.cloud_watch.note(
+                                active,
+                                since.as_deref(),
+                                chrono::Utc::now().timestamp_millis(),
+                            );
+                            this.cloud.note_stop(this.cloud_watch.last_stop());
+                            if stopped && this.active && this.cloud_shown {
+                                this.refresh_cloud_quiet(true, cx);
+                                this.ensure_cloud_poll(cx);
+                            }
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
                 let refresh = matches!(
                     &event,
                     videorc_app_core::BackendEvent::Untyped { event, .. } if event == "account.changed"
@@ -204,6 +238,8 @@ impl LibraryScreen {
             busy: BTreeSet::new(),
             message: None,
             cloud: Default::default(),
+            cloud_watch: Default::default(),
+            cloud_poll_running: false,
             cloud_shown: false,
             active: false,
             cloud_loading: false,

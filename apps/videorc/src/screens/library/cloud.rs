@@ -6,7 +6,7 @@ use videorc_kit::{
     button::Button,
     empty::Empty,
     kebab_menu::{KebabMenu, KebabMenuItem},
-    list_row::{GroupedList, ListRow},
+    list_row::{GroupedList, GroupedRow, ListRow},
     page_tabs::PageTabs,
     scroll_area::ScrollArea,
 };
@@ -46,11 +46,14 @@ impl LibraryScreen {
         cx.notify();
     }
     pub(super) fn refresh_cloud(&mut self, cx: &mut Context<Self>) {
+        self.refresh_cloud_quiet(false, cx);
+    }
+    pub(super) fn refresh_cloud_quiet(&mut self, quiet: bool, cx: &mut Context<Self>) {
         if self.cloud_loading || !self.core.data().online {
             return;
         }
         self.cloud_loading = true;
-        self.cloud.begin_refresh(false);
+        self.cloud.begin_refresh(quiet);
         let epoch = self.cloud_epoch;
         let backend = self.studio.backend().clone();
         self.task(
@@ -84,11 +87,61 @@ impl LibraryScreen {
                         this.cloud_signed_in = Some(signed_in);
                         this.cloud.refreshed(&rows);
                     }
-                    Err(error) => this.cloud.refresh_failed(false, &error),
+                    Err(error) => this.cloud.refresh_failed(quiet, &error),
                 }
+                this.ensure_cloud_poll(cx);
             },
             cx,
         );
+    }
+    pub(super) fn ensure_cloud_poll(&mut self, cx: &mut Context<Self>) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        if self.cloud_poll_running
+            || !self.active
+            || !self.cloud_shown
+            || !self.cloud.should_poll(
+                self.cloud_signed_in == Some(true),
+                self.core.data().online,
+                now_ms,
+            )
+        {
+            return;
+        }
+        self.cloud_poll_running = true;
+        let runtime = self.runtime.clone();
+        cx.spawn(async move |entity, cx| {
+            loop {
+                let delay = runtime.spawn(async {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        c::CLOUD_RECORDING_POLL_MS as u64,
+                    ))
+                    .await;
+                });
+                let _ = delay.await;
+                let keep_going = entity
+                    .update(cx, |this, cx| {
+                        let now_ms = chrono::Utc::now().timestamp_millis();
+                        let should = this.active
+                            && this.cloud_shown
+                            && this.cloud.should_poll(
+                                this.cloud_signed_in == Some(true),
+                                this.core.data().online,
+                                now_ms,
+                            );
+                        if should {
+                            this.refresh_cloud_quiet(true, cx);
+                        } else {
+                            this.cloud_poll_running = false;
+                        }
+                        should
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
     fn cloud_action(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.cloud_signed_in != Some(true) || self.cloud_busy.contains(&id) {
@@ -220,12 +273,13 @@ impl LibraryScreen {
         };
         let mut rows = GroupedList::new();
         for (item, row) in view.rows {
+            let take_label = c::cloud_take_label(&item);
             let mut line = ListRow::new(
-                SharedString::from(format!("cloud-row-{}", item.id)),
-                c::cloud_take_label(&item),
+                SharedString::from(format!("cloud-row-inner-{}", item.id)),
+                take_label.clone(),
             )
             .context(c::cloud_orientation_label(&item.orientation))
-            .meta(row.status_label);
+            .meta(row.status_label.clone());
             if let Some(action) = row.action {
                 let id = item.id.clone();
                 let unavailable = matches!(
@@ -268,7 +322,16 @@ impl LibraryScreen {
                 )
                 .label(c::ROW_MENU_LABEL),
             );
-            rows = rows.row(line);
+            rows = rows.item(
+                div()
+                    .id(SharedString::from(format!("cloud-row-{}", item.id)))
+                    .role(gpui::Role::ListItem)
+                    .aria_label(SharedString::from(format!(
+                        "{take_label} · {}",
+                        row.status_label
+                    )))
+                    .child(line.grouped()),
+            );
         }
         body = body.child(rows);
         if let Some(footer) = view.footer {

@@ -11,11 +11,12 @@ use gpui::{
     Context, Entity, EventEmitter, FocusHandle, Global, KeyBinding, Window, actions, prelude::*,
 };
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     rc::Rc,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use videorc_app_core::livestream::cloud_status::CloudStatus;
 use videorc_app_core::notices::{
     self as n, ActionKind, Effect, Entry, Notice, NoticeAction, NoticeCommand, NoticeKind,
     NoticeLifetime, Store, Tone, sources,
@@ -62,6 +63,8 @@ pub struct Hub {
     busy: HashSet<String>,
     shown: Vec<Entry>,
     watchdog: Vec<sources::watchdog::WatchdogAlert>,
+    cloud_status: Option<CloudStatus>,
+    cloud_cap_warned: BTreeSet<String>,
 }
 
 impl Hub {
@@ -91,7 +94,7 @@ impl Hub {
                 if let Incoming::Event(event) = &incoming {
                     let relevant = match event {
                         BackendEvent::HealthEvent(_) | BackendEvent::RecordingFinalization(_) | BackendEvent::EventsLagged(_) | BackendEvent::ClientLagged {..} => true,
-                        BackendEvent::Untyped {event, ..} => matches!(event.as_str(), "stream.targets" | "replay.saved" | "replay.saveFailed" | "replay.state" | sources::app::AGENTS_ACTIVITY_EVENT),
+                        BackendEvent::Untyped {event, ..} => matches!(event.as_str(), "cloud.state" | "stream.targets" | "replay.saved" | "replay.saveFailed" | "replay.state" | sources::app::AGENTS_ACTIVITY_EVENT),
                         _ => false,
                     };
                     if !relevant { continue; }
@@ -125,6 +128,8 @@ impl Hub {
             busy: HashSet::new(),
             shown: Vec::new(),
             watchdog: Vec::new(),
+            cloud_status: None,
+            cloud_cap_warned: BTreeSet::new(),
         };
         this.backend(initial_backend);
         this.refresh();
@@ -287,7 +292,8 @@ impl Hub {
         match id.strip_prefix("fix:").unwrap_or(id) {
             "open-health" => Some(NoticeAction::OpenHealth),
             "open-sources" => Some(NoticeAction::OpenPage(PageId::Sources)),
-            "open-audio" => Some(NoticeAction::OpenPage(PageId::Studio)),
+            "open-studio" | "open-audio" => Some(NoticeAction::OpenPage(PageId::Studio)),
+            "open-destinations" => Some(NoticeAction::OpenPage(PageId::Live)),
             "open-output" => Some(NoticeAction::OpenPage(PageId::Recording)),
             "open-permissions" | "open-shortcuts" => None,
             "resume-system-audio" | "resume" if key == sources::devices::SYSTEM_AUDIO_ECHO_KEY => {
@@ -313,6 +319,7 @@ impl Hub {
                 | NoticeAction::OpenUrl { .. }
                 | NoticeAction::OpenPage(
                     PageId::Studio
+                        | PageId::Live
                         | PageId::Library
                         | PageId::Sources
                         | PageId::Recording

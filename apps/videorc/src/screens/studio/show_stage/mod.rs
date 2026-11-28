@@ -21,7 +21,9 @@ use gpui::{
 use videorc_app_core::guests::layout::{
     StageCanvas, StageTile, StageTileKind, plan_stage, show_stage_input, stage_rect_fraction,
 };
-use videorc_app_core::guests::program::{ProgramMonitorView, StageMonitorState, is_managed_show};
+use videorc_app_core::guests::program::{
+    ProgramMonitorView, StageMonitorState, is_managed_show, managed_program_stage_input,
+};
 use videorc_app_core::guests::session::PROGRAM_MONITOR_EMPTY;
 use videorc_app_core::guests::stage_screens::{
     STAGE_MAX_SCREENS, add_screen, one_screen_stage, prune_stage_screens, remove_screen,
@@ -1399,12 +1401,28 @@ impl ShowStage {
                 .child(WAITING_PROGRAM)
                 .into_any_element(),
             ProgramMonitorView::Stage(StageMonitorState::Shown) => {
-                // Managed preview: the same stage tiles with remote frames.
-                let tiles = plan_stage(STAGE_CANVAS, &show_stage_input(self.room()));
+                // Managed preview: the program page's confirmed projection
+                // (`managedProgramStageInput`, `show-stage.tsx:1295`).
+                let tiles = plan_stage(STAGE_CANVAS, &managed_program_stage_input(self.room()));
                 let host = self.host_identity(cx);
                 let mut well = div().relative().size_full().bg(hsla(t.video_ground));
                 for tile in &tiles {
-                    well = well.child(self.tile_view(tile, self.room(), host.as_deref(), t, cx));
+                    let kind = match tile.kind {
+                        StageTileKind::Person => "person",
+                        StageTileKind::Screen => "screen",
+                    };
+                    well = well.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "show-stage-program-tile-{kind}-{}",
+                                tile.identity
+                            )))
+                            .role(Role::Group)
+                            .aria_label(tile.identity.clone())
+                            .absolute()
+                            .inset_0()
+                            .child(self.tile_view(tile, self.room(), host.as_deref(), t, cx)),
+                    );
                 }
                 well.into_any_element()
             }
@@ -1451,6 +1469,8 @@ impl ShowStage {
         // a full-width stack above them (that made the Program well far taller).
         div()
             .id("show-stage-program")
+            .role(Role::Region)
+            .aria_label(title)
             .flex()
             .flex_col()
             .gap(px(6.))
