@@ -60,6 +60,10 @@ const KEEP_ON_TOP_WAYLAND: &str =
 const KEEP_ON_TOP_X11: &str = "Keep on top isn't written for X11 yet (plan 260 S2.6c).";
 const PLACE_WAYLAND: &str =
     "Placing a window isn't available on Wayland yet (plan 260 platform fill-ins).";
+/// What `perform_close` answers on Wayland: a client cannot press its own
+/// close button there (only the compositor sends `xdg_toplevel.close`), so the
+/// smoke driver runs the window's own should-close handler itself.
+pub const CLOSE_WAYLAND: &str = "Closing a window as its close button does isn't available on Wayland: the compositor sends the close.";
 const RAISE_WAYLAND: &str =
     "Raising a window isn't available on Wayland yet (plan 260 platform fill-ins).";
 
@@ -148,6 +152,32 @@ fn x11_raise(window: u32, level: SmokeWindowLevel) -> OsResult<()> {
 
     conn.flush()
         .map_err(|error| format!("flush(raise): {error}"))?;
+    Ok(())
+}
+
+/// The window manager's close: a `WM_DELETE_WINDOW` client message, what a
+/// click on the title bar's close button sends, so GPUI's own should-close
+/// handler runs before the window goes.
+fn x11_close(window: u32) -> OsResult<()> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{ClientMessageEvent, ConnectionExt, EventMask};
+
+    let (conn, _) = x11rb::connect(None).map_err(|error| format!("the X connection: {error}"))?;
+    let intern = |name: &str| -> OsResult<u32> {
+        let reply = conn
+            .intern_atom(false, name.as_bytes())
+            .map_err(|error| format!("intern_atom({name}): {error}"))?
+            .reply()
+            .map_err(|error| format!("intern_atom({name}) reply: {error}"))?;
+        Ok(reply.atom)
+    };
+    let protocols = intern("WM_PROTOCOLS")?;
+    let delete = intern("WM_DELETE_WINDOW")?;
+    let event = ClientMessageEvent::new(32, window, protocols, [delete, 0, 0, 0, 0]);
+    conn.send_event(false, window, EventMask::NO_EVENT, event)
+        .map_err(|error| format!("send_event(WM_DELETE_WINDOW): {error}"))?;
+    conn.flush()
+        .map_err(|error| format!("flush(close): {error}"))?;
     Ok(())
 }
 
@@ -303,6 +333,13 @@ impl Platform for Linux {
             f64::from(geometry.width) / f64::from(window.scale_factor()),
             f64::from(geometry.height) / f64::from(window.scale_factor()),
         ))
+    }
+
+    fn perform_close(&self, window: &Window) -> OsResult<()> {
+        if wayland() {
+            return Err(CLOSE_WAYLAND.into());
+        }
+        x11_close(x11_window_id(window)?)
     }
 
     fn raise_window(&self, window: &Window, level: SmokeWindowLevel) -> OsResult<()> {

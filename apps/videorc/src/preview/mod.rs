@@ -563,10 +563,25 @@ impl Preview {
 
     /// The smoke driver's view of the preview (`inspect-native-preview-runtime`,
     /// `preview-window-state`): where it is, its phase, and what it says.
+    /// The smokes' `preview-window-os-close` on Wayland, where no client can
+    /// press its own close button: the Preview's own should-close handler
+    /// runs (the floating window's close path), which the caller follows with
+    /// the window's removal, exactly what GPUI does when that handler answers
+    /// true.
+    #[cfg(target_os = "linux")]
+    pub fn smoke_close_floating(&mut self, cx: &mut Context<Self>) {
+        self.floating_closed_linux(cx);
+    }
+
     pub fn smoke_state(&self) -> serde_json::Value {
         #[cfg(target_os = "macos")]
         let floating_open = self.floating.is_some();
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        let floating_open = self
+            .native
+            .as_ref()
+            .is_some_and(|native| native.floating.is_some());
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let floating_open = false;
         serde_json::json!({
             "mode": self.mode.as_str(),
@@ -599,7 +614,7 @@ impl Preview {
     pub fn smoke_canvas(&self) -> Option<(u32, u32)> {
         // The frames' own size when one has drawn; the Studio's video
         // settings before that.
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(native) = self.native.as_ref() {
             let telemetry = native.element.telemetry();
             if telemetry.frame_width > 0 && telemetry.frame_height > 0 {
@@ -636,12 +651,17 @@ impl Preview {
     /// log reads refreshes only every 750 ms). `presentedFrameId` advances
     /// with every frame the layer shows.
     pub fn smoke_surface_status(&self) -> serde_json::Value {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if let Some(native) = self.native.as_ref() {
             let telemetry = native.element.telemetry();
             let status = native.element.status();
+            #[cfg(target_os = "macos")]
+            let transport = serde_json::json!("native-surface");
+            #[cfg(target_os = "linux")]
+            let transport = serde_json::json!(telemetry.surface_transport);
             return serde_json::json!({
-                "transport": "native-surface",
+                "transport": transport,
+                "backing": telemetry.surface_backing,
                 // Electron's surface states: `live` while frames present (the
                 // smokes wait for it), else the element's phase.
                 "state": if status.phase == videorc_preview::element::Phase::Presenting {
@@ -693,11 +713,17 @@ impl Preview {
         })
     }
 
-    /// The Preview's own window while it is open (macOS), for the driver.
+    /// The Preview's own window while it is open, for the driver.
     pub fn floating_window(&self) -> Option<gpui::AnyWindowHandle> {
         #[cfg(target_os = "macos")]
         return self.floating.map(Into::into);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        return self
+            .native
+            .as_ref()
+            .and_then(|native| native.floating)
+            .map(Into::into);
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         None
     }
 
@@ -1512,7 +1538,7 @@ fn words_card(words: PreviewWords) -> impl IntoElement {
 }
 
 /// A layer rect for the smoke driver's answers.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn rect_json(rect: videorc_preview::LayerRect) -> serde_json::Value {
     serde_json::json!({
         "x": rect.x,
