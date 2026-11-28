@@ -74,6 +74,11 @@ pub const SIGNED_OUT: &str = "Sign in to ask Sidekick.";
 pub const VOICE_PAUSED: &str = "Voice commands are paused by Videorc.";
 pub const EMPTY_SENTENCE: &str = "Say what Sidekick should do, like /sidekick switch to BRB.";
 pub const TOO_LONG: &str = "That's too long for Sidekick. Keep it under 500 characters.";
+/// Owner rule (2026-10-28): only the bubble is automatic. A Sidekick post in
+/// chat requires an explicit streamer voice or `/sidekick` (`/buddy`) order;
+/// every other Sidekick turn is refused and told to use the bubble or a Suggest
+/// card instead.
+pub const CHAT_POST_REQUIRES_ORDER: &str = "Sidekick only posts in chat when you order it by voice or /sidekick. Use the bubble or a Suggest card instead.";
 const DEFAULT_LINE: &str = "On it.";
 
 /// Why Sidekick (Buddy) is invoking an agent tool.

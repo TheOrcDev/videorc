@@ -35,10 +35,6 @@ pub const WAITING_FOR_YOU: &str = "Waiting for you to confirm in Videorc.";
 /// `buddy_say` while Buddy is on no output (plan 211 D12). Only this tool
 /// says it: the line would bubble on a picture nobody sees.
 pub const BUDDY_UNSEEN: &str = "Your avatar isn't on the picture, so nobody would see it.";
-/// Owner rule (2026-10-28): only the bubble is automatic. A Sidekick post in
-/// chat requires an explicit streamer voice or `/buddy` order; every other
-/// Sidekick turn is refused and told to use the bubble or a Suggest card.
-pub const BUDDY_CHAT_POST_REQUIRES_ORDER: &str = "Sidekick only posts in chat when you order it by voice or /buddy. Use the bubble or a Suggest card instead.";
 
 fn text_of<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value
@@ -184,7 +180,7 @@ pub async fn send_chat_message(
             .buddy_origin
             .is_some_and(crate::buddy_act::BuddyTurnOrigin::allows_chat_post)
     {
-        return ToolOutcome::refused(BUDDY_CHAT_POST_REQUIRES_ORDER);
+        return ToolOutcome::refused(crate::buddy_act::CHAT_POST_REQUIRES_ORDER);
     }
     let Some(text) = text_of(&args, "text") else {
         return ToolOutcome::refused("Say what to post: text.");
@@ -970,7 +966,7 @@ mod tests {
             .await;
             assert_eq!(
                 outcome,
-                ToolOutcome::refused(BUDDY_CHAT_POST_REQUIRES_ORDER),
+                ToolOutcome::refused(crate::buddy_act::CHAT_POST_REQUIRES_ORDER),
                 "origin {origin:?} must not post to chat"
             );
             assert!(
@@ -989,7 +985,7 @@ mod tests {
                 json!({ "text": "default buddy call" })
             )
             .await,
-            ToolOutcome::refused(BUDDY_CHAT_POST_REQUIRES_ORDER)
+            ToolOutcome::refused(crate::buddy_act::CHAT_POST_REQUIRES_ORDER)
         );
         let bare_buddy = AgentIdentity {
             id: BUDDY_AGENT_ID.to_string(),
@@ -998,7 +994,7 @@ mod tests {
         };
         assert_eq!(
             send_chat_message(&state, &bare_buddy, json!({ "text": "bare buddy" })).await,
-            ToolOutcome::refused(BUDDY_CHAT_POST_REQUIRES_ORDER)
+            ToolOutcome::refused(crate::buddy_act::CHAT_POST_REQUIRES_ORDER)
         );
 
         // No send operation was created and no D11 posted-in-chat notice fired.
@@ -1020,7 +1016,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn buddy_typed_and_voice_orders_can_post_to_chat() {
+    async fn buddy_typed_order_can_post_to_chat() {
         use crate::buddy_act::{Halt, PendingAct, Plan, PlannedStep, run_steps};
         let state = test_state();
         let mut events = state.events.subscribe();
@@ -1042,7 +1038,6 @@ mod tests {
         )
         .await;
 
-        // 1. Explicit `/buddy` typed order (`spoken = false`).
         let mut typed = PendingAct::new(
             "/buddy post links in chat",
             Plan {
@@ -1063,7 +1058,43 @@ mod tests {
             vec!["Posted in chat on YouTube and Twitch.".to_string()]
         );
 
-        // 2. Explicit wake-word voice order (`spoken = true`).
+        let rows = state.database.list_agent_activity(10, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, crate::storage::AgentActivityOutcome::Ok);
+        let mut notices = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.event == "agents.activity"
+                && let Some(notice) = event.payload["notice"].as_str()
+            {
+                notices.push(notice.to_string());
+            }
+        }
+        assert_eq!(notices, vec!["Sidekick posted in chat.".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn buddy_voice_order_can_post_to_chat() {
+        use crate::buddy_act::{Halt, PendingAct, Plan, PlannedStep, run_steps};
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        seed(
+            &state,
+            &[
+                (
+                    StreamPlatform::Youtube,
+                    CommentsWriteState::Ready,
+                    FakeChatSendBehavior::Sent,
+                ),
+                (
+                    StreamPlatform::Twitch,
+                    CommentsWriteState::Ready,
+                    FakeChatSendBehavior::Sent,
+                ),
+            ],
+            &[],
+        )
+        .await;
+
         let mut voice = PendingAct::new(
             "sidekick tell chat we're starting soon",
             Plan {
@@ -1082,11 +1113,8 @@ mod tests {
         );
 
         let rows = state.database.list_agent_activity(10, None).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert!(
-            rows.iter()
-                .all(|row| row.outcome == crate::storage::AgentActivityOutcome::Ok)
-        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, crate::storage::AgentActivityOutcome::Ok);
         let mut notices = Vec::new();
         while let Ok(event) = events.try_recv() {
             if event.event == "agents.activity"
@@ -1095,13 +1123,7 @@ mod tests {
                 notices.push(notice.to_string());
             }
         }
-        assert_eq!(
-            notices,
-            vec![
-                "Sidekick posted in chat.".to_string(),
-                "Sidekick posted in chat.".to_string(),
-            ]
-        );
+        assert_eq!(notices, vec!["Sidekick posted in chat.".to_string()]);
     }
 
     #[tokio::test]
