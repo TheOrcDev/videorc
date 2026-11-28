@@ -1,5 +1,7 @@
 [package]
 name = "videorc-app"
+# Not the app's version: that is apps/desktop/package.json's, compiled in by
+# build.rs as VIDEORC_APP_VERSION (`APP_VERSION`).
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
@@ -60,6 +62,10 @@ raw-window-handle = "0.6"
 # `async-io`, not `tokio`: gpui-pre-linux asks for ashpd with `async-io`, and
 # ashpd refuses both at once (a compile_error). zbus then runs its own
 # executor thread, so awaiting it on the app's tokio runtime still works.
+[build-dependencies]
+# build.rs reads the release version from apps/desktop/package.json.
+serde_json = "1.0"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts"] }
 futures-util = "0.3"
