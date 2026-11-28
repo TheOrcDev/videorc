@@ -162,3 +162,48 @@ test('a portal recording must carry video at the requested size over most of the
 
   assert.equal(assessPortalRecording(undefined, expected).ok, false)
 })
+
+test('a GPUI proof run must report the GPUI CPU preview, and nothing native', () => {
+  const compositor = {
+    state: 'live',
+    runId: 'run-3',
+    sceneSources: [
+      { id: 'source:screen', kind: 'screen', visible: true, deviceId: PORTAL_MONITOR_SOURCE_ID }
+    ]
+  }
+  const gpuiSurface = {
+    source: 'screen',
+    sourcePixelsPresent: true,
+    transport: 'cpu-shared-memory',
+    backing: 'wl-shm-subsurface',
+    nativePreviewHostKind: null
+  }
+  assert.deepEqual(assessPortalPreviewProof({ compositor, surface: gpuiSurface, app: 'gpui' }), {
+    ok: true,
+    failures: []
+  })
+  // The same report is wrong for Electron, whose Preview is the proof surface.
+  assert.equal(assessPortalPreviewProof({ compositor, surface: gpuiSurface }).ok, false)
+  const native = assessPortalPreviewProof({
+    compositor,
+    surface: {
+      ...gpuiSurface,
+      transport: 'native-surface',
+      backing: 'cametal-layer',
+      nativePreviewHostKind: 'in-process'
+    },
+    app: 'gpui'
+  })
+  assert.equal(native.ok, false)
+  assert.match(native.failures.join('\n'), /cpu-shared-memory/)
+  assert.match(native.failures.join('\n'), /claims a native host/)
+  // Pixels are still required of GPUI.
+  assert.equal(
+    assessPortalPreviewProof({
+      compositor,
+      surface: { ...gpuiSurface, sourcePixelsPresent: false },
+      app: 'gpui'
+    }).ok,
+    false
+  )
+})
