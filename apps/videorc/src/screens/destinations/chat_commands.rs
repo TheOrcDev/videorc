@@ -10,6 +10,7 @@ use videorc_app_core::studio::chat_commands_store::ChatCommandsStore;
 use videorc_kit::button::{Button, ButtonVariant};
 use videorc_kit::dialog::{Dialog, DialogHandle, DialogSize};
 use videorc_kit::empty::Empty;
+use videorc_kit::field::Field as KitField;
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::kebab_menu::{KebabMenu, KebabMenuItem};
 use videorc_kit::list_row::{GroupedList, ListRow};
@@ -259,17 +260,29 @@ impl DestinationsPanel {
         let pending = editor.pending;
         let error = editor.error.clone();
 
+        // Electron's `ChatCommandDialog` is a FieldGroup of plain Fields
+        // (`gap-4`): each label above its input, the hint under it. As
+        // SettingsRows the inputs took the dialog's width and squeezed each
+        // label to one letter a line, the dialog running off the window.
+        let reply_room = {
+            let reply = editor.reply.read(cx).value().to_string();
+            chat_commands::room_label(&reply)
+        };
         let mut body = div().flex().flex_col().gap(px(8.)).child(
-            SettingsGroup::new()
-                .row(
-                    SettingsRow::new("cmd-name", NAME_LABEL).child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(
+                    KitField::new("cmd-name").label(NAME_LABEL).child(
                         Input::new("cmd-name-input", &editor.name)
                             .accessibility_label(NAME_LABEL)
                             .disabled(pending),
                     ),
                 )
-                .row(
-                    SettingsRow::new("cmd-description", DESCRIPTION_LABEL)
+                .child(
+                    KitField::new("cmd-description")
+                        .label(DESCRIPTION_LABEL)
                         .description(DESCRIPTION_HINT)
                         .child(
                             Input::new("cmd-description-input", &editor.description)
@@ -277,12 +290,10 @@ impl DestinationsPanel {
                                 .disabled(pending),
                         ),
                 )
-                .row(
-                    SettingsRow::new("cmd-reply", REPLY_LABEL)
-                        .description({
-                            let reply = editor.reply.read(cx).value().to_string();
-                            chat_commands::room_label(&reply)
-                        })
+                .child(
+                    KitField::new("cmd-reply")
+                        .label(REPLY_LABEL)
+                        .description(reply_room)
                         .child(
                             Input::new("cmd-reply-input", &editor.reply)
                                 .accessibility_label(REPLY_LABEL)
