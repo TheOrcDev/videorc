@@ -228,15 +228,22 @@ export type BlockedJump = {
   settingsTab?: SettingsTabId
 }
 
+/** The reasons whose fix is one step away, so the row is that step (see below). */
+const JUMP_IS_THE_ROW: ReadonlySet<string> = new Set([
+  START_BLOCKED_COPY.noDestination,
+  START_BLOCKED_COPY.destinationSetup
+])
+
 /**
  * Why a start cannot run right now, as one quiet line under the transport
  * (plan 174 S3.2, B-9; never the yellow top banner of post-0.9.4 F8), with
  * the jump to the page that owns the fix. Without the shell's navigation
  * (a bare transport under test) the line stands alone.
  *
- * With no destination on, the fix is one step away, so the row is the step
- * itself (owner call, 2026-11-27): one "Open Destinations" button across the
- * row, with the reason on its hover and focus.
+ * With no destination on, or one still to finish, the fix is one step away,
+ * so the row is the step itself (owner calls, 2026-11-27 and 2026-11-28): one
+ * "Open Destinations" button across the row, with the reason on its hover and
+ * focus. Buttons, not links.
  */
 function BlockedReasonLine({
   reason,
@@ -251,7 +258,7 @@ function BlockedReasonLine({
       ? (): void =>
           jump.to === 'settings' ? nav.openSettings(jump.settingsTab) : nav.setActive(jump.to)
       : null
-  if (jump && openJump && reason === START_BLOCKED_COPY.noDestination) {
+  if (jump && openJump && JUMP_IS_THE_ROW.has(reason)) {
     return <BlockedJumpButton label={jump.label} reason={reason} onOpen={openJump} />
   }
   return (
