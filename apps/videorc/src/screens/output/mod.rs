@@ -274,7 +274,7 @@ impl OutputModel {
             session_locked,
             record_enabled,
             separate_enabled: capture.separate_source_recordings.enabled,
-            separate_supported: cfg!(target_os = "macos"),
+            separate_supported: quality::separate_source_supported(hotkeys::node_platform()),
             quality_locked,
             preset_options: recording_preset_options(&preset, vertical),
             preset,
@@ -1804,27 +1804,47 @@ impl Render for OutputPanel {
                         }),
                 ),
         );
-        if model.separate_supported {
-            local_rows = local_rows.item(
-                SettingsRow::new(
-                    "output-separate-source-recordings",
-                    "Separate source recordings",
-                )
-                .description(SEPARATE_DESCRIPTION)
-                .child(
-                    Switch::new("output-separate")
-                        .accessibility_label("Separate source recordings")
-                        .checked(model.separate_enabled)
-                        .disabled(model.quality_locked)
-                        .on_change({
-                            let entity = entity.clone();
-                            move |value, _, cx| {
-                                entity.update(cx, |this, cx| this.set_separate_enabled(value, cx))
-                            }
-                        }),
-                ),
-            );
-        }
+        // Every platform lists the row, as Electron does; off the Mac the
+        // switch is off, locked and says why (release test 146).
+        let separate = quality::separate_source_switch(
+            hotkeys::node_platform(),
+            model.separate_enabled,
+            model.quality_locked,
+        );
+        let separate_description = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(SEPARATE_DESCRIPTION)
+            .children(separate.note.map(|note| {
+                // The tone rides on the icon; the words stay monochrome.
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_color(hsla(t.foreground))
+                    .child(icon(IconName::WarningFill, 14., hsla(t.warning)))
+                    .child(note)
+            }));
+        local_rows = local_rows.item(
+            SettingsRow::new(
+                "output-separate-source-recordings",
+                "Separate source recordings",
+            )
+            .description(separate_description)
+            .child(
+                Switch::new("output-separate")
+                    .accessibility_label("Separate source recordings")
+                    .checked(separate.checked)
+                    .disabled(separate.disabled)
+                    .on_change({
+                        let entity = entity.clone();
+                        move |value, _, cx| {
+                            entity.update(cx, |this, cx| this.set_separate_enabled(value, cx))
+                        }
+                    }),
+            ),
+        );
         local = local.child(local_rows);
 
         // The quality: a plain FieldGroup under the grouped rows, as
