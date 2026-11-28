@@ -252,11 +252,16 @@ impl ScenePage {
     }
 
     /// The inspector's model again; the banners and the overlay layout are
-    /// read once per connection (and after every write).
+    /// read once per connection, after every write, and when the backend
+    /// says the banners changed.
     fn update_editor(&mut self, snapshot: &StudioSnapshot, cx: &mut Context<Self>) {
         let connected = matches!(snapshot.connection, Connection::Connected { .. });
-        if connected && self.controls.lists_generation != Some(snapshot.connection_generation) {
+        if connected
+            && (self.controls.lists_generation != Some(snapshot.connection_generation)
+                || self.controls.banners_revision != Some(snapshot.banners_revision))
+        {
             self.controls.lists_generation = Some(snapshot.connection_generation);
+            self.controls.banners_revision = Some(snapshot.banners_revision);
             self.load_lists(cx);
         }
         let room_open = talk_show_room(self.studio.cloud_now().status.as_ref()).open;

@@ -466,6 +466,22 @@ async fn a_sidekick_key_waits_for_the_settings_to_read() {
     }
 }
 
+/// A banner added elsewhere (the Stream Manager, a remote) while the Scene
+/// page is open: `banners.changed` moves the snapshot's revision, which the
+/// page reads its banners again on. Other lists leave it.
+#[test]
+fn a_banners_change_moves_the_revision_the_scene_page_rereads_on() {
+    let studio = silent_studio();
+    let before = studio.snapshot().banners_revision;
+    studio.follow_remote_list(
+        "banners.changed",
+        &json!([{ "id": "sale", "name": "Sale", "shown": true }]),
+    );
+    assert_eq!(studio.snapshot().banners_revision, before + 1);
+    studio.follow_remote_list("sounds.changed", &json!({ "sounds": [] }));
+    assert_eq!(studio.snapshot().banners_revision, before + 1);
+}
+
 #[test]
 fn the_lists_follow_their_events_and_a_late_read_never_wins() {
     let studio = silent_studio();

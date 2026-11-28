@@ -195,6 +195,9 @@ pub(super) struct Controls {
     pub timing_open_for: Option<String>,
     /// The connection the banners and the overlay layout were read on.
     pub lists_generation: Option<u64>,
+    /// The Studio's `banners_revision` the lists were read at: a
+    /// `banners.changed` (a banner added elsewhere) reads them again.
+    pub banners_revision: Option<u64>,
 }
 
 impl Controls {
@@ -255,6 +258,7 @@ impl Controls {
             choose_image: DialogHandle::new(false),
             timing_open_for: None,
             lists_generation: None,
+            banners_revision: None,
         }
     }
 
