@@ -171,7 +171,7 @@ impl SettingsScreen {
             .action(
                 Button::new("refresh-permissions")
                     .accessibility_label(view::copy::REFRESH)
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .child(icon(IconName::ArrowsClockwise, 16., hsla(t.foreground)))
                     .child(view::copy::REFRESH)
                     .on_click(cx.listener(|this, _, _, cx| {

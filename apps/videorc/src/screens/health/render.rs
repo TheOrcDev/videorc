@@ -372,7 +372,7 @@ impl Render for HealthScreen {
                     } else {
                         h::copy::show_all_checks(self.view.checks.len())
                     })
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.show_all = !this.show_all;
@@ -475,7 +475,7 @@ impl Render for HealthScreen {
                 .child(
                     Button::new("copy-support-path")
                         .label("Copy path")
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .on_click(move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(
                                 path.to_string_lossy().into_owned(),

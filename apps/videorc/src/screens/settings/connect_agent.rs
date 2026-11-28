@@ -511,7 +511,7 @@ impl ConnectAgentDialog {
                         agents::copy::SHOW_TOKEN
                     })
                     .size(ButtonSize::Xs)
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.shown = !this.shown;
                         cx.notify();

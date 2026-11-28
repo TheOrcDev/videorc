@@ -126,9 +126,106 @@ pub async fn poll_remote_frame(
     Ok(read_poll(status, &headers, body))
 }
 
+/// A room picture's pixels: BGRA, rows top-down, the alpha as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomBgra {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+/// The pixels of the room route's BMP: the HTML overlay dialect
+/// (`encode_bgra_bmp_with_alpha`: a V4 header, 32 bits, uncompressed or
+/// `BI_BITFIELDS` with the BGRA masks, rows top-down for a negative height).
+/// None for any other BMP, so a stranger is skipped, never drawn wrong.
+pub fn bgra_from_room_bmp(bmp: &[u8]) -> Option<RoomBgra> {
+    const BI_RGB: u32 = 0;
+    const BI_BITFIELDS: u32 = 3;
+    let u32_at = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(bmp.get(at..at + 4)?.try_into().ok()?))
+    };
+    if bmp.get(0..2) != Some(&b"BM"[..]) {
+        return None;
+    }
+    let offset = usize::try_from(u32_at(10)?).ok()?;
+    let width = i32::from_le_bytes(bmp.get(18..22)?.try_into().ok()?);
+    let height = i32::from_le_bytes(bmp.get(22..26)?.try_into().ok()?);
+    let bits = u16::from_le_bytes(bmp.get(28..30)?.try_into().ok()?);
+    let compression = u32_at(30)?;
+    if width <= 0 || height == 0 || bits != 32 || !matches!(compression, BI_RGB | BI_BITFIELDS) {
+        return None;
+    }
+    if compression == BI_BITFIELDS
+        && (u32_at(54)? != 0x00FF_0000 || u32_at(58)? != 0x0000_FF00 || u32_at(62)? != 0x0000_00FF)
+    {
+        return None;
+    }
+    let (width, height) = (width.unsigned_abs(), height.unsigned_abs());
+    let stride = usize::try_from(width).ok()?.checked_mul(4)?;
+    let len = stride.checked_mul(usize::try_from(height).ok()?)?;
+    let source = bmp.get(offset..offset.checked_add(len)?)?;
+    let pixels = if height_is_top_down(bmp)? {
+        source.to_vec()
+    } else {
+        source
+            .chunks_exact(stride)
+            .rev()
+            .flatten()
+            .copied()
+            .collect()
+    };
+    Some(RoomBgra {
+        width,
+        height,
+        pixels,
+    })
+}
+
+fn height_is_top_down(bmp: &[u8]) -> Option<bool> {
+    Some(i32::from_le_bytes(bmp.get(22..26)?.try_into().ok()?) < 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn room_bmp(compression: u32, height: i32, pixels: &[u8]) -> Vec<u8> {
+        let mut bmp = vec![0; 122];
+        bmp[0..2].copy_from_slice(b"BM");
+        bmp[10..14].copy_from_slice(&122_u32.to_le_bytes());
+        bmp[14..18].copy_from_slice(&108_u32.to_le_bytes());
+        bmp[18..22].copy_from_slice(&2_i32.to_le_bytes());
+        bmp[22..26].copy_from_slice(&height.to_le_bytes());
+        bmp[26..28].copy_from_slice(&1_u16.to_le_bytes());
+        bmp[28..30].copy_from_slice(&32_u16.to_le_bytes());
+        bmp[30..34].copy_from_slice(&compression.to_le_bytes());
+        bmp[54..58].copy_from_slice(&0x00FF_0000_u32.to_le_bytes());
+        bmp[58..62].copy_from_slice(&0x0000_FF00_u32.to_le_bytes());
+        bmp[62..66].copy_from_slice(&0x0000_00FF_u32.to_le_bytes());
+        bmp.extend_from_slice(pixels);
+        bmp
+    }
+
+    #[test]
+    fn the_rooms_v4_bmp_decodes_to_bgra_rows_top_down() {
+        // Two rows of two pixels: top-down keeps them, bottom-up flips them.
+        let rows = [1, 2, 3, 255, 4, 5, 6, 200, 7, 8, 9, 255, 10, 11, 12, 100];
+        let top_down = bgra_from_room_bmp(&room_bmp(3, -2, &rows)).unwrap();
+        assert_eq!((top_down.width, top_down.height), (2, 2));
+        assert_eq!(top_down.pixels, rows);
+        let bottom_up = bgra_from_room_bmp(&room_bmp(3, 2, &rows)).unwrap();
+        assert_eq!(&bottom_up.pixels[..8], &rows[8..]);
+        assert_eq!(&bottom_up.pixels[8..], &rows[..8]);
+        assert!(bgra_from_room_bmp(&room_bmp(0, -2, &rows)).is_some());
+    }
+
+    #[test]
+    fn a_bmp_that_is_not_the_rooms_dialect_is_skipped() {
+        let rows = [0_u8; 16];
+        assert_eq!(bgra_from_room_bmp(&room_bmp(1, -2, &rows)), None);
+        assert_eq!(bgra_from_room_bmp(&room_bmp(3, -2, &rows[..8])), None);
+        assert_eq!(bgra_from_room_bmp(b"PNG"), None);
+    }
 
     fn headers(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs

@@ -15,8 +15,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, Image, ObjectFit, Role, SharedString, Window,
-    div, img, prelude::*, px, relative,
+    AnyElement, App, Context, Entity, EventEmitter, ObjectFit, RenderImage, Role, SharedString,
+    Window, div, img, prelude::*, px, relative,
 };
 use videorc_app_core::guests::layout::{
     StageCanvas, StageTile, StageTileKind, plan_stage, show_stage_input, stage_rect_fraction,
@@ -310,7 +310,12 @@ impl ShowStage {
             .is_some()
     }
 
-    fn remote_frame(&self, identity: &str, source: RemoteSource, cx: &App) -> Option<Arc<Image>> {
+    fn remote_frame(
+        &self,
+        identity: &str,
+        source: RemoteSource,
+        cx: &App,
+    ) -> Option<Arc<RenderImage>> {
         self.room_host
             .as_ref()
             .and_then(|host| host.read(cx).remote_frame(identity, source))

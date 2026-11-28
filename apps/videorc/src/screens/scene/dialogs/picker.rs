@@ -208,6 +208,9 @@ impl SceneDialogs {
             alert_pending: false,
         });
         self.picker.open(window, cx);
+        // After the dialog is drawn (it is built from `picking`, set above).
+        let focus = self.picker_focus.clone();
+        window.defer(cx, move |window, cx| focus.focus(window, cx));
         self.ask_display_stills(cx);
         cx.notify();
     }
@@ -528,8 +531,21 @@ impl SceneDialogs {
         t: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // A button a screen reader (and a smoke) finds by its name, with the
+        // pick shown as toggled.
+        let name = SharedString::from(match &meta {
+            Some(meta) => format!("{title}, {meta}"),
+            None => title.clone(),
+        });
         div()
             .id(id)
+            .role(gpui::Role::Button)
+            .aria_label(name)
+            .aria_toggled(if selected {
+                gpui::Toggled::True
+            } else {
+                gpui::Toggled::False
+            })
             .w(px(148.))
             .flex()
             .flex_col()
@@ -689,7 +705,12 @@ impl SceneDialogs {
             ),
         };
 
-        let mut body = div().flex().flex_col().gap(px(16.));
+        let mut body = div()
+            .id("scene-picker-body")
+            .track_focus(&self.picker_focus)
+            .flex()
+            .flex_col()
+            .gap(px(16.));
         if mac && !grant_missing && !apps.is_empty() {
             body = body.child(
                 Input::new("scene-picker-search", &self.picker_search).accessibility_label(

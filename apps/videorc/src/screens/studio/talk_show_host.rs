@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use gpui::{Context, Entity, Image, ImageFormat, Window, div, prelude::*};
+use gpui::{Context, Entity, RenderImage, Window, div, prelude::*};
 use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
 use videorc_app_core::cloud_scene::types::SceneOrientation;
@@ -35,7 +35,9 @@ use videorc_app_core::guests::wire::{RoomStatus, Stage};
 use videorc_app_core::library::cloud::{CloudRecordingStop, CloudRecordingWatch};
 use videorc_app_core::studio::preview_scene::studio_scene_params;
 use videorc_app_core::studio::room_background::{self, LiveClockMemory};
-use videorc_app_core::studio::room_frames::{self, FrameCursor, FramePoll, RemoteSource};
+use videorc_app_core::studio::room_frames::{
+    self, FrameCursor, FramePoll, RemoteSource, bgra_from_room_bmp,
+};
 use videorc_app_core::studio::room_media::{
     self, AVATAR_SET, CAMERA_SET, HTML_SET, MICROPHONE_SET, MONITOR_SET, PRESENTATION_EVENT,
     PRESENTATION_SET, RETURN_SET, RoomMedia, SCREEN_SET, STAGE_SET, host_shape_for_camera,
@@ -60,6 +62,30 @@ use crate::app::bridge::Mirror;
 /// The tiles' polling pace: half the renderer's 30 fps until the Show
 /// stage's cost is measured (each picture is a whole BMP decoded here).
 const TILE_INTERVAL: Duration = Duration::from_millis(66);
+/// One tile poll, its picture already decoded.
+enum HostPoll {
+    Frame(FrameCursor, Arc<RenderImage>),
+    Empty,
+    Unchanged,
+}
+
+/// The poll's BMP as a picture GPUI draws (BGRA, as the route wrote it). A
+/// BMP that does not decode is skipped like an unchanged one.
+fn host_poll(poll: FramePoll) -> HostPoll {
+    match poll {
+        FramePoll::Frame { cursor, bmp } => bgra_from_room_bmp(&bmp)
+            .and_then(|frame| image::RgbaImage::from_raw(frame.width, frame.height, frame.pixels))
+            .map_or(HostPoll::Unchanged, |pixels| {
+                HostPoll::Frame(
+                    cursor,
+                    Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])),
+                )
+            }),
+        FramePoll::Empty => HostPoll::Empty,
+        FramePoll::Unchanged => HostPoll::Unchanged,
+    }
+}
+
 /// The monitor's key: the route ignores its identity.
 const MONITOR_KEY: &str = "monitor";
 
@@ -106,7 +132,11 @@ pub struct TalkShowRoomHost {
     avatar_guests: bool,
     /// R3: each person's latest picture (camera or screen) and the Program
     /// monitor's, with its cursor, while the room publishes them.
-    frames: HashMap<(String, RemoteSource), (FrameCursor, Arc<Image>)>,
+    /// Decoded once off the main thread and drawn as a `RenderImage`: a
+    /// replaced or removed one goes through `cx.drop_image`, so its texture
+    /// leaves the GPU (an `Image` source would keep every frame's decode in
+    /// the asset cache and its texture in the atlas for good).
+    frames: HashMap<(String, RemoteSource), (FrameCursor, Arc<RenderImage>)>,
     /// R4: the Program monitor takes the runner's return, and Listen.
     monitor: bool,
     listening: bool,
@@ -246,8 +276,16 @@ impl TalkShowRoomHost {
                     let (port, token) = (ready.port, ready.token.clone());
                     let asked = identity.clone();
                     let job = poll_runtime.spawn(async move {
-                        room_frames::poll_remote_frame(port, &token, &asked, source, after.as_ref())
-                            .await
+                        let poll = room_frames::poll_remote_frame(
+                            port,
+                            &token,
+                            &asked,
+                            source,
+                            after.as_ref(),
+                        )
+                        .await;
+                        // The decode runs here, off the main thread.
+                        poll.map(host_poll)
                     });
                     let Ok(Ok(poll)) = job.await else {
                         continue;
@@ -448,7 +486,7 @@ impl TalkShowRoomHost {
     /// R3: a person's latest picture (`Camera` or `Screen`), or the Program
     /// monitor's (`Monitor`, any identity), while the room publishes it. The
     /// host notifies on every new picture.
-    pub fn remote_frame(&self, identity: &str, source: RemoteSource) -> Option<Arc<Image>> {
+    pub fn remote_frame(&self, identity: &str, source: RemoteSource) -> Option<Arc<RenderImage>> {
         let key = match source {
             RemoteSource::Monitor => MONITOR_KEY,
             _ => identity,
@@ -478,9 +516,18 @@ impl TalkShowRoomHost {
                 wanted.push((MONITOR_KEY.to_string(), RemoteSource::Monitor));
             }
         }
-        let before = self.frames.len();
-        self.frames.retain(|key, _| wanted.contains(key));
-        if self.frames.len() != before {
+        let gone: Vec<_> = self
+            .frames
+            .keys()
+            .filter(|key| !wanted.contains(key))
+            .cloned()
+            .collect();
+        for key in &gone {
+            if let Some((_, frame)) = self.frames.remove(key) {
+                cx.drop_image(frame, None);
+            }
+        }
+        if !gone.is_empty() {
             cx.notify();
         }
         wanted
@@ -499,21 +546,24 @@ impl TalkShowRoomHost {
         &mut self,
         identity: String,
         source: RemoteSource,
-        poll: FramePoll,
+        poll: HostPoll,
         cx: &mut Context<Self>,
     ) {
         match poll {
-            FramePoll::Frame { cursor, bmp } => {
-                let image = Arc::new(Image::from_bytes(ImageFormat::Bmp, bmp));
-                self.frames.insert((identity, source), (cursor, image));
+            HostPoll::Frame(cursor, image) => {
+                // The frame it replaces leaves the GPU.
+                if let Some((_, before)) = self.frames.insert((identity, source), (cursor, image)) {
+                    cx.drop_image(before, None);
+                }
                 cx.notify();
             }
-            FramePoll::Empty => {
-                if self.frames.remove(&(identity, source)).is_some() {
+            HostPoll::Empty => {
+                if let Some((_, before)) = self.frames.remove(&(identity, source)) {
+                    cx.drop_image(before, None);
                     cx.notify();
                 }
             }
-            FramePoll::Unchanged => {}
+            HostPoll::Unchanged => {}
         }
     }
 
@@ -713,7 +763,9 @@ impl TalkShowRoomHost {
             self.refused = [false; SLOTS];
             self.pending_scene = None;
             if self.room_media.take().is_some() || !self.frames.is_empty() {
-                self.frames.clear();
+                for (_, (_, frame)) in self.frames.drain() {
+                    cx.drop_image(frame, None);
+                }
                 cx.notify();
             }
             return;
