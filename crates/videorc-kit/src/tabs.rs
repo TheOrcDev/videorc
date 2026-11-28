@@ -98,7 +98,10 @@ impl RenderOnce for Tabs {
             .map(|(index, (label, disabled))| {
                 let selected = index == self.selected;
                 let on_select = self.on_select.clone();
+                // The tab's words are its accessible name: without them a screen
+                // reader and the UI driver see an unnamed tab.
                 let tab = gpui_base::Tab::new(index)
+                    .accessibility_label(label.clone())
                     .selected(selected)
                     .disabled(disabled)
                     .set_position(index + 1, count)
