@@ -217,6 +217,25 @@ fn the_picked_picture_comes_first() {
 }
 
 #[test]
+fn the_lock_line_names_the_computer_it_runs_on() {
+    assert_eq!(lock_line(Some("darwin")), LOCK_LINE);
+    assert_eq!(lock_line(None), LOCK_LINE);
+    assert_eq!(hint(Some("darwin")), HINT);
+    assert_eq!(
+        lock_line(Some("win32")),
+        "Done on this PC, before anything is recorded or sent."
+    );
+    assert_eq!(
+        hint(Some("win32")),
+        "Works best with light on your face. Done on this PC, before anything is recorded or sent."
+    );
+    assert_eq!(
+        lock_line(Some("linux")),
+        "Done on this computer, before anything is recorded or sent."
+    );
+}
+
+#[test]
 fn the_words_say_where_it_runs_and_what_a_blur_can_still_show() {
     assert_eq!(
         DESCRIPTION,
