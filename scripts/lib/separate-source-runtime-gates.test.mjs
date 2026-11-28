@@ -1,6 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
+  COMPOSITOR_TIMING_FILENAME,
+  analyzeCompositorTiming,
   audioEnergyTransitions,
   audioToneWindows,
   createRuntimeCaseCollector,
@@ -10,6 +15,7 @@ import {
   evaluateSourceEnvelope,
   evaluateEventAlignment,
   evaluateFrameMarkers,
+  readCompositorTiming,
   refinedToneTransitions,
   videoTransitionTimes
 } from './separate-source-runtime-gates.mjs'
@@ -514,4 +520,245 @@ test('runtime remains fail-fast by default and interruptions never collect', asy
     (error) => error === interrupted
   )
   assert.deepEqual(collector.failures, [])
+})
+
+function smoothCompositorTrace({
+  fps = 30,
+  frames = 90,
+  startMs = 100,
+  roles = [0, 3, 1, 2]
+} = {}) {
+  const intervalMs = 1000 / fps
+  const entries = []
+  for (let sequence = 1; sequence <= frames; sequence++) {
+    const baseMs = startMs + (sequence - 1) * intervalMs
+    for (const [roleOffset, role] of roles.entries()) {
+      entries.push({
+        role,
+        sequence,
+        beganMs: baseMs + roleOffset * 2,
+        completedMs: baseMs + roleOffset * 2 + 1.5,
+        outcome: 'native',
+        targetRefs: 4,
+        sourceTextureMs: 0.9,
+        commandWaitMs: 0.6
+      })
+    }
+  }
+  return entries
+}
+
+test('434ms compositor stall overlapping a missed event replaces the A/V message with audio exact', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'videorc-compositor-stall-'))
+  try {
+    // Mirrors the ed29c48da 1920x1080-30-0-dual-stream freeze: tick 50 finishes 434ms after tick 49,
+    // shifting video events at 1.967s and 2.000s while audio stayed on the pulse grid.
+    const trace = smoothCompositorTrace({ fps: 30, frames: 90, startMs: 152.6 })
+    for (const entry of trace) {
+      if (entry.sequence === 50) {
+        entry.beganMs += 118
+        entry.completedMs += 401
+      } else if (entry.sequence > 50) {
+        entry.beganMs += 401
+        entry.completedMs += 401
+      }
+    }
+    writeFileSync(join(dir, COMPOSITOR_TIMING_FILENAME), JSON.stringify(trace))
+    const exactAudio = [0.49, 0.89, 1.59, 1.79, 2.19, 3.09]
+    const stalledVideo = [0.467, 0.867, 1.967, 2.0, 2.2, 3.1]
+    const verdict = evaluateAudioVideoEvents(stalledVideo, exactAudio, {
+      fps: 30,
+      endSeconds: 3.5,
+      evidenceDir: dir
+    })
+    assert.equal(verdict.pass, false)
+    assert.equal(verdict.failures.length, 2)
+    for (const failure of verdict.failures) {
+      assert.match(failure, /^compositor stalled 434 ms at \d+\.\d{3}s \(frame 50\); audio exact$/)
+      assert.ok(!failure.includes('audio misses'))
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('434ms compositor stall keeps the audio offset when audio is not exact', () => {
+  const trace = smoothCompositorTrace({ fps: 30, frames: 90, startMs: 100 })
+  for (const entry of trace) {
+    if (entry.sequence === 50) {
+      entry.beganMs += 118
+      entry.completedMs += 401
+    } else if (entry.sequence > 50) {
+      entry.beganMs += 401
+      entry.completedMs += 401
+    }
+  }
+  // Audio also drifts late (+150ms) on both non-stalled and stalled events.
+  const video = [0.5, 1.0, 1.967, 2.5, 3.0]
+  const driftedAudio = [0.65, 1.15, 2.117, 2.65, 3.15]
+  const verdict = evaluateAudioVideoEvents(video, driftedAudio, {
+    fps: 30,
+    endSeconds: 3.5,
+    compositorTiming: trace
+  })
+  assert.equal(verdict.pass, false)
+  assert.ok(
+    verdict.failures.some((failure) =>
+      /^compositor stalled 434 ms at \d+\.\d{3}s \(frame 50\); audio offset \+150 ms$/.test(failure)
+    ),
+    JSON.stringify(verdict.failures)
+  )
+  assert.ok(verdict.failures.every((failure) => !failure.includes('audio exact')))
+})
+
+test('passing A/V runs never fail on compositor timing, including real single-tick jitter fixtures', () => {
+  // Captured single-tick jitter shapes from passing ed29c48da release-readiness runs:
+  // 30fps normal (48ms), 30fps gains (53ms), 30fps muted (52ms), 60fps prep-delay-screen (30ms),
+  // 30fps precommit-iso-failure (46ms after sequence reset), dual-stream 75/102ms, and even
+  // a 300ms pause that did not cause an A/V miss.
+  const jitterCases = [
+    { name: 'normal-30fps-48ms', fps: 30, jitterFrame: 74, extraMs: 14.7 },
+    { name: 'gains-30fps-53ms', fps: 30, jitterFrame: 37, extraMs: 19.6 },
+    { name: 'muted-30fps-52ms', fps: 30, jitterFrame: 94, extraMs: 18.9 },
+    { name: 'prep-delay-screen-60fps-30ms', fps: 60, jitterFrame: 149, extraMs: 13.0 },
+    { name: 'precommit-iso-failure-30fps-46ms', fps: 30, jitterFrame: 105, extraMs: 13.2 },
+    { name: 'dual-stream-30fps-102ms', fps: 30, jitterFrame: 49, extraMs: 68.4 },
+    { name: 'large-gap-without-av-miss', fps: 30, jitterFrame: 50, extraMs: 300 }
+  ]
+  const events = [0.5, 1.0, 1.5, 2.0, 2.5]
+  for (const item of jitterCases) {
+    const trace = smoothCompositorTrace({
+      fps: item.fps,
+      frames: Math.max(115, item.jitterFrame + 10),
+      startMs: 100
+    })
+    for (const entry of trace) {
+      if (entry.sequence >= item.jitterFrame) {
+        entry.beganMs += item.extraMs
+        entry.completedMs += item.extraMs
+      }
+    }
+    const verdict = evaluateAudioVideoEvents(events, events, {
+      fps: item.fps,
+      endSeconds: 3,
+      compositorTiming: trace
+    })
+    assert.equal(verdict.pass, true, `${item.name}: ${JSON.stringify(verdict)}`)
+  }
+})
+
+test('real audio miss with smooth compositor keeps the existing A/V message and appends max compositor gap context', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'videorc-compositor-audio-miss-'))
+  try {
+    writeFileSync(
+      join(dir, COMPOSITOR_TIMING_FILENAME),
+      JSON.stringify(smoothCompositorTrace({ fps: 30, frames: 90, startMs: 100 }))
+    )
+    const video = [0.5, 1.0, 1.5, 2.0, 2.5]
+    const delayedAudio = [0.5, 1.0, 1.62, 2.0, 2.5]
+    const verdict = evaluateAudioVideoEvents(video, delayedAudio, {
+      fps: 30,
+      endSeconds: 3,
+      evidenceDir: dir
+    })
+    assert.equal(verdict.pass, false)
+    assert.equal(verdict.failures.length, 1)
+    assert.match(
+      verdict.failures[0],
+      /^audio misses ordered video event 2 at 1\.500s \(max compositor gap 33 ms at \d+\.\d{3}s, frame \d+\)$/
+    )
+    assert.ok(!verdict.failures[0].includes('compositor stalled'))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('non-overlapping stall keeps the missed event A/V message with largest compositor gap as context', () => {
+  const trace = smoothCompositorTrace({ fps: 30, frames: 90, startMs: 100 })
+  for (const entry of trace) {
+    if (entry.sequence >= 75) {
+      entry.beganMs += 300
+      entry.completedMs += 300
+    }
+  }
+  const video = [0.5, 1.0, 1.5, 2.0, 2.5]
+  // Audio miss is at 0.500s, nowhere near the 333ms stall at ~2.467s.
+  const delayedAudio = [0.62, 1.0, 1.5, 2.0, 2.5]
+  const verdict = evaluateAudioVideoEvents(video, delayedAudio, {
+    fps: 30,
+    endSeconds: 3,
+    compositorTiming: trace
+  })
+  assert.equal(verdict.pass, false)
+  assert.equal(verdict.failures.length, 1)
+  assert.match(
+    verdict.failures[0],
+    /^audio misses ordered video event 0 at 0\.500s \(max compositor gap 333 ms at \d+\.\d{3}s, frame 75\)$/
+  )
+})
+
+test('missing compositor-timing.json logs one line and keeps existing A/V gate behaviour', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'videorc-compositor-missing-'))
+  try {
+    const video = [0.5, 1.0, 1.5, 2.0, 2.5]
+    const passLogs = []
+    const passVerdict = evaluateAudioVideoEvents(video, video, {
+      fps: 30,
+      endSeconds: 3,
+      evidenceDir: dir,
+      log: (line) => passLogs.push(line)
+    })
+    assert.equal(passVerdict.pass, true)
+    assert.equal(passLogs.length, 0)
+
+    const readLogs = []
+    assert.equal(readCompositorTiming(dir, { log: (line) => readLogs.push(line) }), null)
+    assert.equal(readLogs.length, 1)
+    assert.match(readLogs[0], /compositor-timing\.json.*missing/i)
+
+    const failLogs = []
+    const failVerdict = evaluateAudioVideoEvents(video, [0.5, 1.0, 1.62, 2.0, 2.5], {
+      fps: 30,
+      endSeconds: 3,
+      evidenceDir: dir,
+      log: (line) => failLogs.push(line)
+    })
+    assert.equal(failVerdict.pass, false)
+    assert.equal(failLogs.length, 1)
+    assert.match(failLogs[0], /compositor-timing\.json.*missing/i)
+    assert.deepEqual(failVerdict.failures, ['audio misses ordered video event 2 at 1.500s'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('compositor timing analyzer handles sequence resets, 250ms threshold, and validates input', () => {
+  const cancelledTake = smoothCompositorTrace({ fps: 30, frames: 5, startMs: 100 })
+  const realTake = smoothCompositorTrace({ fps: 30, frames: 10, startMs: 500 })
+  const resetSummary = analyzeCompositorTiming([...cancelledTake, ...realTake])
+  assert.equal(resetSummary.stalls.length, 0)
+  assert.ok(resetSummary.largestGap.gapMs < 40)
+
+  const belowThreshold = analyzeCompositorTiming([
+    { sequence: 1, beganMs: 100 },
+    { sequence: 2, beganMs: 349 }
+  ])
+  assert.equal(belowThreshold.stalls.length, 0)
+  assert.equal(belowThreshold.largestGap.gapMs, 249)
+
+  const atThreshold = analyzeCompositorTiming([
+    { sequence: 1, beganMs: 100 },
+    { sequence: 2, beganMs: 350 }
+  ])
+  assert.equal(atThreshold.stalls.length, 1)
+  assert.equal(atThreshold.stalls[0].gapMs, 250)
+
+  assert.throws(() => analyzeCompositorTiming([{ sequence: 1, beganMs: NaN }]), /finite beganMs/)
+  const badDir = mkdtempSync(join(tmpdir(), 'videorc-compositor-bad-'))
+  try {
+    writeFileSync(join(badDir, COMPOSITOR_TIMING_FILENAME), JSON.stringify({ not: 'an array' }))
+    assert.throws(() => readCompositorTiming(badDir), /JSON array/)
+  } finally {
+    rmSync(badDir, { recursive: true, force: true })
+  }
 })
