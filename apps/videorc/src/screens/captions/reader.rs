@@ -235,6 +235,7 @@ pub fn show(cx: &mut App) {
     options.window_min_size = Some(size(px(MIN_WIDTH), px(MIN_HEIGHT)));
     options.app_id = Some(app_id.into());
     let opened = cx.open_window(options, move |window, cx| {
+        crate::platform::follow_frame_appearance(window, cx);
         cx.new(|cx| CaptionsReader::new(frame, feed, window, cx))
     });
     match opened {

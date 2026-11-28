@@ -14,6 +14,7 @@ use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Globalization::{
     GetLocaleInfoEx, GetUserDefaultLocaleName, LOCALE_STIMEFORMAT,
 };
+use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowDisplayAffinity, HWND_TOP, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_SHOWWINDOW, SetWindowDisplayAffinity, SetWindowPos, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
@@ -255,6 +256,12 @@ impl Platform for WindowsOs {
         Err("Keep on top isn't written for windows yet (plan 260 S2.6)".into())
     }
 
+    /// `DWMWA_USE_IMMERSIVE_DARK_MODE`, the attribute GPUI sets from the
+    /// system's look when the window opens and when the system's changes.
+    fn set_frame_dark(&self, window: &Window, dark: bool) -> OsResult<()> {
+        set_immersive_dark_mode(hwnd(window)?, dark)
+    }
+
     fn keep_display_awake(&self, _: &str) -> OsResult<u32> {
         Err("The display sleep guard isn't written for windows yet (plan 260 S2.6)".into())
     }
@@ -282,6 +289,27 @@ impl Platform for WindowsOs {
             .map_err(|error| format!("DeviceAccessInformation: {error}"))?;
         Ok(media_access_status(status))
     }
+}
+
+/// The native title bar (and the Mica under the window) dark or light.
+fn set_immersive_dark_mode(hwnd: HWND, dark: bool) -> OsResult<()> {
+    let value: i32 = dark.into();
+    // SAFETY: a live HWND from this process; the attribute takes a BOOL,
+    // passed by pointer with its size.
+    let result = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            std::ptr::from_ref(&value).cast(),
+            std::mem::size_of::<i32>() as u32,
+        )
+    };
+    if result < 0 {
+        return Err(format!(
+            "DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE) failed: {result:#010x}"
+        ));
+    }
+    Ok(())
 }
 
 /// Electron's `ConvertDeviceAccessStatus`: never asked, allowed, turned off
@@ -339,5 +367,55 @@ mod tests {
             let status = WindowsOs.media_access(permission).expect("read");
             assert_ne!(status, MediaAccessStatus::Unknown, "{permission:?}");
         }
+    }
+
+    /// A real, never-shown top-level window: DWM keeps what was set, both
+    /// ways, which is what the title bar draws from.
+    #[test]
+    fn the_title_bar_takes_dark_and_light() {
+        use windows_sys::Win32::Graphics::Dwm::DwmGetWindowAttribute;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WS_OVERLAPPEDWINDOW,
+        };
+
+        // SAFETY: the system STATIC class, no parent, menu or extra data.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                windows_sys::w!("STATIC"),
+                windows_sys::w!("videorc title bar test"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                200,
+                100,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        assert!(!hwnd.is_null(), "CreateWindowExW");
+        let read = || {
+            let mut value = -1i32;
+            // SAFETY: the window above; a BOOL out-param with its size.
+            let result = unsafe {
+                DwmGetWindowAttribute(
+                    hwnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+                    std::ptr::from_mut(&mut value).cast(),
+                    std::mem::size_of::<i32>() as u32,
+                )
+            };
+            assert!(result >= 0, "DwmGetWindowAttribute: {result:#010x}");
+            value
+        };
+        let answers = [true, false, true].map(|dark| {
+            set_immersive_dark_mode(hwnd, dark).expect("set");
+            read()
+        });
+        // SAFETY: the window this test made, on this thread.
+        unsafe { DestroyWindow(hwnd) };
+        assert_eq!(answers, [1, 0, 1]);
     }
 }

@@ -361,6 +361,8 @@ impl SettingsScreen {
         };
         // macOS sets the windows' appearance; Linux can't, so the kit reads
         // the app's own choice first on every platform (`AppearanceOverride`).
+        // Windows' native title bars follow the override
+        // (`platform::follow_frame_appearance`).
         cx.set_window_appearance(appearance);
         cx.set_global(videorc_kit::theme::AppearanceOverride(appearance));
         cx.refresh_windows();

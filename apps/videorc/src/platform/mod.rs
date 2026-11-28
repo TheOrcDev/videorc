@@ -18,11 +18,12 @@
 
 use std::sync::Arc;
 
-use gpui::Window;
+use gpui::{App, Window, WindowAppearance};
 use videorc_app_core::desktop::camera_extension::CameraExtensionBinding;
 use videorc_app_core::desktop::permissions::{
     MediaAccessPermission, MediaAccessStatus, MediaPane, PermissionFuture,
 };
+use videorc_kit::theme::AppearanceOverride;
 
 pub mod idle;
 #[cfg(target_os = "linux")]
@@ -149,6 +150,15 @@ pub trait Platform: Send + Sync {
 
     /// Keep on top: the window above other apps' windows, or back to normal.
     fn set_keep_on_top(&self, window: &Window, on_top: bool) -> OsResult<()>;
+
+    /// The OS-drawn frame (Windows' native title bar) light or dark, to
+    /// match the app's theme. See [`follow_frame_appearance`].
+    ///
+    /// The default does nothing: macOS takes the app's choice through
+    /// `cx.set_window_appearance`, and on Linux the desktop draws the frame.
+    fn set_frame_dark(&self, _window: &Window, _dark: bool) -> OsResult<()> {
+        Ok(())
+    }
 
     /// The display sleep guard's start: keeps the display awake and answers
     /// the blocker the OS handed out (`desktop::sleep_guard`).
@@ -305,6 +315,44 @@ pub fn current() -> &'static dyn Platform {
     }
 }
 
+/// Keeps `window`'s OS-drawn frame in the app's light or dark: now, when
+/// the app's theme changes (`AppearanceOverride`), and when the system's
+/// changes. Every window that has an OS frame calls it as it opens.
+///
+/// On Windows GPUI sets the native title bar from the system's look only:
+/// its `set_window_appearance` does nothing there, so a Light app on a dark
+/// Windows kept a dark title bar. GPUI also sets the system's look again
+/// right after it tells the window the system changed, so the app's choice
+/// goes back on the next frame.
+pub fn follow_frame_appearance(window: &mut Window, cx: &mut App) {
+    fn apply(window: &Window, cx: &App) {
+        let forced = cx
+            .try_global::<AppearanceOverride>()
+            .and_then(|forced| forced.0);
+        if let Err(error) =
+            current().set_frame_dark(window, frame_dark(forced, window.appearance()))
+        {
+            eprintln!("[videorc-app] the window frame kept its look: {error}");
+        }
+    }
+    apply(window, cx);
+    window
+        .observe_global::<AppearanceOverride>(cx, |window, cx| apply(window, cx))
+        .detach();
+    window
+        .observe_window_appearance(|window, _| window.on_next_frame(|window, cx| apply(window, cx)))
+        .detach();
+}
+
+/// Whether the frame is dark: the app's own choice when it made one, else
+/// the system's, as `videorc_kit::theme::current` picks the window's theme.
+fn frame_dark(forced: Option<WindowAppearance>, system: WindowAppearance) -> bool {
+    matches!(
+        forced.unwrap_or(system),
+        WindowAppearance::Dark | WindowAppearance::VibrantDark
+    )
+}
+
 /// How this computer writes a day and a time (`format::day_label`), as
 /// `Intl.DateTimeFormat` with the system locale writes it in Electron: on
 /// macOS the system's own pattern for the user's region and 12/24-hour
@@ -322,5 +370,27 @@ pub fn system_date_style() -> Option<videorc_app_core::format::DateStyle> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::WindowAppearance::{Dark, Light, VibrantDark, VibrantLight};
+
+    use super::frame_dark;
+
+    #[test]
+    fn the_frame_takes_the_apps_choice_over_the_systems() {
+        assert!(!frame_dark(Some(Light), Dark));
+        assert!(frame_dark(Some(Dark), Light));
+        assert!(frame_dark(Some(VibrantDark), VibrantLight));
+    }
+
+    #[test]
+    fn the_frame_follows_the_system_when_the_app_has_no_choice() {
+        assert!(frame_dark(None, Dark));
+        assert!(frame_dark(None, VibrantDark));
+        assert!(!frame_dark(None, Light));
+        assert!(!frame_dark(None, VibrantLight));
     }
 }

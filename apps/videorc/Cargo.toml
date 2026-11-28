@@ -100,9 +100,12 @@ objc2-system-extensions = { version = "0.3.2", default-features = false, feature
 # `GetForegroundWindow` + process image path), and the smoke driver's
 # `WM_GETOBJECT` to its own window. `Win32_Globalization`: the user
 # locale and time format dates follow (`platform::system_date_style`).
+# `Win32_Graphics_Dwm`: the native title bar's light or dark
+# (`set_frame_dark`).
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Globalization",
+  "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
   "Win32_System_Threading",
   "Win32_UI_Accessibility",
