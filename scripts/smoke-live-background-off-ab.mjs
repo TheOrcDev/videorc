@@ -17,7 +17,7 @@
 // a prebuilt one (VIDEORC_GPUI_APP_BINARY_BASE / _BRANCH, its backend
 // beside it), so neither tree needs its own target dir. The clip buffer is
 // turned off through the Studio (`studio-replay-buffer`), and there is no
-// renderer process to weigh (rendererRssMb is Electron's own).
+// renderer process to weigh: the app's own process is (appRssMb).
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { mkdtempSync, readFileSync } from 'node:fs'
@@ -26,6 +26,7 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { smokeAppIsGpui } from './lib/app-launcher.mjs'
+import { acquireAppRunLock } from './lib/app-run-lock.mjs'
 
 const branchRoot = resolve(import.meta.dirname, '..')
 const args = process.argv.slice(2)
@@ -54,6 +55,13 @@ const LAYOUT = {
   sideBySideCameraSide: 'right'
 }
 
+// The whole comparison holds the app-run lock: each launch below then finds
+// it held by this run (or its parent) and starts at once, so readyMs never
+// counts another lane's turn, and base and branch runs stay back to back.
+const appRunLock = await acquireAppRunLock({
+  lane: 'live-background-off-ab',
+  onWait: (owner) => console.log(`waiting for the app-run lock (${owner?.lane ?? 'another run'})`)
+})
 const results = { base: [], branch: [] }
 for (let round = 0; round < rounds; round += 1) {
   // Alternate the order so a host trend doesn't favour one side.
@@ -74,8 +82,9 @@ const metrics = [
   'recordP95Ms',
   'ownedRssMb',
   'backendRssMb',
-  // Electron's renderer; the GPUI app draws in its own process (ownedRssMb).
-  ...(gpuiApp ? [] : ['rendererRssMb'])
+  // Electron's renderer; the GPUI app draws in its own process, which the
+  // census labels `electron-main` (it names the app process by its name).
+  ...(gpuiApp ? ['appRssMb'] : ['rendererRssMb'])
 ]
 const rows = metrics.map((metric) => {
   const base = results.base.map((run) => run[metric]).filter(Number.isFinite)
@@ -104,6 +113,7 @@ assert.equal(
   0,
   `zero cost when off FAILED: ${failed.map((row) => row.metric).join(', ')}`
 )
+appRunLock.release()
 console.log('Live background zero-cost A/B PASS')
 
 /** The side's prebuilt GPUI binary, if one is named (VIDEORC_GPUI_APP_BINARY_BASE/_BRANCH). */
@@ -236,7 +246,8 @@ async function measureMemory(root) {
   return {
     ownedRssMb: summary.maxOwnedRssKb / 1024,
     backendRssMb: roleMb('backend'),
-    rendererRssMb: roleMb('renderer')
+    rendererRssMb: roleMb('renderer'),
+    appRssMb: roleMb('electron-main')
   }
 }
 

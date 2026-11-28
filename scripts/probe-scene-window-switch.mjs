@@ -10,6 +10,12 @@
 // switches the working scene's window through the renderer's source picker
 // path (`switchSourceDeviceLive`).
 //
+// On the GPUI app (VIDEORC_APP=gpui) the same scenes go through the Studio's
+// own actions (`studio-scenes-state`, `studio-scene-save`, `-apply`,
+// `-layout`, `studio-capture-configure`, `select-screen-device`): the GPUI
+// driver below answers the renderer driver's calls with them. A switch's
+// request time is taken here, just before `studio-scene-apply {wait: false}`.
+//
 // Run: A→B→A for `--switches` (20) switches per variant:
 //   idle       status evidence only (no program file while idle);
 //   recording  the recording decoded per frame (ffmpeg, 160x90 rgb24): each
@@ -53,7 +59,7 @@ import { hostname, loadavg, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { buildFixtureApps } from './fixtures/build-fixture-apps.mjs'
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import { flashFixtureApp, launchFixtureApp, stopFixtureApps } from './lib/fixture-app-process.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { decodeSceneFrames } from './lib/scene-artifact-frames.mjs'
@@ -211,7 +217,7 @@ try {
   log(`devices: "${alphaDevice.name}" and "${betaDevice.name}" available`)
   summary.devices = { alpha: alphaDevice, beta: betaDevice }
 
-  const renderer = createRendererDriver(smoke)
+  const renderer = smokeAppIsGpui() ? createGpuiDriver(smoke) : createRendererDriver(smoke)
   await renderer.waitFor(() => true, 'renderer scene-preset actions ready')
   // The renderer starts the native screen preview from the Studio page.
   await requestSmokeCommand(
@@ -220,19 +226,11 @@ try {
     { tab: 'studio', waitFor: '[data-videorc-preview-card]' },
     { timeoutMs }
   )
-  await renderer.evaluate(
-    `window.__videorcSmokeScenePresets.configure({video: ${JSON.stringify(video)}}); return true`
-  )
+  await renderer.configureVideo(video)
   await renderer.chooseCameraOff()
   // The default Clips ring (plan 181) runs a buffer-only session that stops
   // and restarts on every scene apply; it would hide the switch itself. Off.
-  await renderer.evaluate(`
-    const current = JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}');
-    window.__videorcSmokeScenePresets.configure({
-      replayBuffer: { ...(current.replayBuffer ?? {}), enabled: false, explicit: true }
-    });
-    return true;
-  `)
+  await renderer.clipsOff()
   await waitForRecordingIdle()
   await renderer.applyLayout(
     { layoutPreset: 'screen-only' },
@@ -858,8 +856,171 @@ function createRendererDriver(smoke) {
     }
     return { ok: false, error: 'renderer never settled the switch', at: null }
   }
+  const configureVideo = (video) =>
+    evaluate(
+      `window.__videorcSmokeScenePresets.configure({video: ${JSON.stringify(video)}}); return true`
+    )
+  const clipsOff = () =>
+    evaluate(`
+    const current = JSON.parse(window.__videorcUiSettings?.getItem('videorc.captureConfig') ?? '{}');
+    window.__videorcSmokeScenePresets.configure({
+      replayBuffer: { ...(current.replayBuffer ?? {}), enabled: false, explicit: true }
+    });
+    return true;
+  `)
   return {
     evaluate,
+    configureVideo,
+    clipsOff,
+    state,
+    waitFor,
+    applyLayout,
+    chooseCameraOff,
+    selectWindow,
+    save,
+    saveWindowScene,
+    goTo,
+    requestSwitch,
+    waitForSwitchDone
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GPUI driver: the renderer driver's calls through the Studio's own smoke
+// commands, its state in the renderer's shape (the fields this probe reads).
+
+function createGpuiDriver(smoke) {
+  const command = (name, params = {}) => requestSmokeCommand(smoke, name, params, { timeoutMs })
+  const state = async () => {
+    const scenes = await command('studio-scenes-state')
+    const studio = await command('studio-state')
+    const recording = ['recording', 'streaming'].find((phase) =>
+      String(studio?.phase ?? '').includes(phase)
+    )
+    return {
+      canSave: scenes.loaded === true && scenes.readOnly !== true,
+      visual: { sources: scenes.working?.sources ?? {}, layout: scenes.working?.layout ?? {} },
+      scenes: scenes.scenes ?? [],
+      activeId: scenes.onStreamId ?? null,
+      pendingId: scenes.pendingSceneId ?? null,
+      pendingLayout: false,
+      recording: recording ?? 'idle',
+      diagnostics: { phase: studio?.phase }
+    }
+  }
+  const waitFor = async (predicate, description, waitMs = timeoutMs) => {
+    const until = Date.now() + waitMs
+    let lastState = null
+    while (Date.now() < until) {
+      lastState = await state()
+      if (predicate(lastState)) return lastState
+      await sleep(100)
+    }
+    const statePath = join(outputDirectory, 'last-gpui-state.json')
+    writeFileSync(statePath, JSON.stringify(lastState, null, 2))
+    throw new Error(`Timed out: ${description}; full GPUI state in ${statePath}`)
+  }
+  const applyLayout = async (patch, predicate, description) => {
+    await command('studio-scene-layout', { patch })
+    return waitFor(predicate, description)
+  }
+  const configureVideo = (video) => command('studio-capture-configure', { config: { video } })
+  const clipsOff = () => command('studio-replay-buffer', { armed: false })
+  const chooseCameraOff = async () => {
+    await command('studio-capture-configure', {
+      config: { sources: { cameraId: null, cameraName: null, cameraOff: true } }
+    })
+    return waitFor(
+      (current) =>
+        current.canSave &&
+        current.visual.sources.cameraOff === true &&
+        !current.visual.sources.cameraId,
+      'confirmed Camera Off'
+    )
+  }
+  const windowAvailable = async (windowId) => {
+    const listed = await request(ws, timeoutMs, 'devices.list', { ffmpegPath })
+    return (listed.devices ?? []).some(
+      (device) => device.id === windowId && device.status === 'available'
+    )
+  }
+  const selectWindow = async (target) => {
+    await command('select-screen-device', { sourceId: target.windowId, settleMs: 0 })
+    await waitFor(
+      (current) => current.visual.sources.windowId === target.windowId,
+      `working scene on ${target.key}`
+    )
+    if (!(await windowAvailable(target.windowId))) {
+      throw new Error(`${target.key} window is not listed as available`)
+    }
+    await applyLayout(
+      { layoutPreset: 'screen-only' },
+      (current) => current.canSave && current.visual.sources.windowId === target.windowId,
+      `${target.key} working scene confirmed`
+    )
+  }
+  const save = async (name, id) => {
+    const saved = await command('studio-scene-save', { name, ...(id ? { updateId: id } : {}) })
+    if (saved?.saved !== true)
+      throw new Error(`Saving scene "${name}" returned ${JSON.stringify(saved)}`)
+    await waitFor(
+      (current) => current.scenes.some((entry) => entry.id === saved.id),
+      `saved scene ${name}`
+    )
+    return saved.id
+  }
+  const saveWindowScene = async (target, name) => {
+    const id = await save(name)
+    await selectWindow(target)
+    await waitForScreenLive(target.windowId)
+    return save(name, id)
+  }
+  const goTo = async (target) => {
+    if (options.mode === 'scenes') {
+      await command('studio-scene-apply', { id: target.sceneId })
+      await waitFor(
+        (current) => current.activeId === target.sceneId && !current.pendingId,
+        `scene ${target.key} active`
+      )
+    } else {
+      await command('select-screen-device', { sourceId: target.windowId, settleMs: 0 })
+      await waitFor(
+        (current) => current.visual.sources.windowId === target.windowId,
+        `working scene on ${target.key}`
+      )
+    }
+  }
+  // The switch in flight: what it waits for, set by requestSwitch.
+  let switching = null
+  const requestSwitch = async (target) => {
+    const reqAt = Date.now()
+    switching = target
+    if (options.mode === 'scenes') {
+      await command('studio-scene-apply', { id: target.sceneId, wait: false })
+    } else {
+      await command('select-screen-device', { sourceId: target.windowId, settleMs: 0 })
+    }
+    return reqAt
+  }
+  const waitForSwitchDone = async (waitMs) => {
+    const until = Date.now() + waitMs
+    while (Date.now() < until) {
+      const current = await state()
+      const done =
+        options.mode === 'scenes'
+          ? current.activeId === switching?.sceneId && !current.pendingId
+          : current.visual.sources.windowId === switching?.windowId
+      if (done) return { ok: true, at: Date.now() }
+      await sleep(25)
+    }
+    return { ok: false, error: 'the Studio never settled the switch', at: null }
+  }
+  return {
+    evaluate: () => {
+      throw new Error('eval-js is Electron only; the GPUI driver answers through the Studio')
+    },
+    configureVideo,
+    clipsOff,
     state,
     waitFor,
     applyLayout,
