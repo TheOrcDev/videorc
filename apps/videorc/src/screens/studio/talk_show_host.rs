@@ -67,6 +67,34 @@ enum HostPoll {
     Frame(FrameCursor, Arc<RenderImage>),
     Empty,
     Unchanged,
+    /// A picture whose BMP is not the room route's dialect: skipped, and
+    /// named in the log (its header) so a tile that never draws says why.
+    Undecodable(String),
+}
+
+/// A BMP's header in a few words, for the log: the header size, width,
+/// height, bits and compression.
+fn bmp_header_words(bmp: &[u8]) -> String {
+    let u32_at = |at: usize| {
+        bmp.get(at..at + 4)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+    };
+    let i32_at = |at: usize| u32_at(at).map(|value| value as i32);
+    let bits = bmp
+        .get(28..30)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u16::from_le_bytes);
+    format!(
+        "{} bytes, magic {:?}, header {:?}, {:?}x{:?}, {:?} bits, compression {:?}",
+        bmp.len(),
+        bmp.get(0..2).map(String::from_utf8_lossy),
+        u32_at(14),
+        i32_at(18),
+        i32_at(22),
+        bits,
+        u32_at(30),
+    )
 }
 
 /// The poll's BMP as a picture GPUI draws (BGRA, as the route wrote it). A
@@ -75,16 +103,24 @@ fn host_poll(poll: FramePoll) -> HostPoll {
     match poll {
         FramePoll::Frame { cursor, bmp } => bgra_from_room_bmp(&bmp)
             .and_then(|frame| image::RgbaImage::from_raw(frame.width, frame.height, frame.pixels))
-            .map_or(HostPoll::Unchanged, |pixels| {
-                HostPoll::Frame(
-                    cursor,
-                    Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])),
-                )
-            }),
+            .map_or_else(
+                || HostPoll::Undecodable(bmp_header_words(&bmp)),
+                |pixels| {
+                    HostPoll::Frame(
+                        cursor,
+                        Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])),
+                    )
+                },
+            ),
         FramePoll::Empty => HostPoll::Empty,
         FramePoll::Unchanged => HostPoll::Unchanged,
     }
 }
+
+/// The backend events the room host reads; the app's event filter takes
+/// them (without `cloud.room.presentation` the Show stage, the guest tiles
+/// and the Program monitor never learn what the room publishes).
+pub const EVENTS: [&str; 1] = [PRESENTATION_EVENT];
 
 /// The monitor's key: the route ignores its identity.
 const MONITOR_KEY: &str = "monitor";
@@ -137,6 +173,11 @@ pub struct TalkShowRoomHost {
     /// leaves the GPU (an `Image` source would keep every frame's decode in
     /// the asset cache and its texture in the atlas for good).
     frames: HashMap<(String, RemoteSource), (FrameCursor, Arc<RenderImage>)>,
+    /// Each feed's last poll outcome, logged when it changes (a tile that
+    /// stays empty names its cause once, not 15 times a second).
+    poll_outcomes: HashMap<(String, RemoteSource), String>,
+    /// The feeds last asked for, logged when the set changes.
+    logged_wanted: Vec<(String, RemoteSource)>,
     /// R4: the Program monitor takes the runner's return, and Listen.
     monitor: bool,
     listening: bool,
@@ -287,8 +328,10 @@ impl TalkShowRoomHost {
                         // The decode runs here, off the main thread.
                         poll.map(host_poll)
                     });
-                    let Ok(Ok(poll)) = job.await else {
-                        continue;
+                    let poll = match job.await {
+                        Ok(Ok(poll)) => poll,
+                        Ok(Err(error)) => HostPoll::Undecodable(format!("poll failed: {error:#}")),
+                        Err(error) => HostPoll::Undecodable(format!("poll task failed: {error}")),
                     };
                     if this
                         .update(cx, |host, cx| host.take_poll(identity, source, poll, cx))
@@ -336,6 +379,8 @@ impl TalkShowRoomHost {
             room_avatar: None,
             avatar_guests: false,
             frames: HashMap::new(),
+            poll_outcomes: HashMap::new(),
+            logged_wanted: Vec::new(),
             monitor: false,
             listening: false,
             scenes_enabled: false,
@@ -516,6 +561,18 @@ impl TalkShowRoomHost {
                 wanted.push((MONITOR_KEY.to_string(), RemoteSource::Monitor));
             }
         }
+        if wanted != self.logged_wanted {
+            eprintln!(
+                "[videorc-app] room tiles wanted: {:?} (room media: {})",
+                wanted,
+                if self.room_media.is_some() {
+                    "known"
+                } else {
+                    "none"
+                }
+            );
+            self.logged_wanted = wanted.clone();
+        }
         let gone: Vec<_> = self
             .frames
             .keys()
@@ -549,6 +606,19 @@ impl TalkShowRoomHost {
         poll: HostPoll,
         cx: &mut Context<Self>,
     ) {
+        let outcome = match &poll {
+            HostPoll::Frame(..) => "frames".to_string(),
+            HostPoll::Empty => "no picture".to_string(),
+            HostPoll::Unchanged => String::new(),
+            HostPoll::Undecodable(why) => why.clone(),
+        };
+        if !outcome.is_empty()
+            && self.poll_outcomes.get(&(identity.clone(), source)) != Some(&outcome)
+        {
+            eprintln!("[videorc-app] room tile {identity} {source:?}: {outcome}");
+            self.poll_outcomes
+                .insert((identity.clone(), source), outcome);
+        }
         match poll {
             HostPoll::Frame(cursor, image) => {
                 // The frame it replaces leaves the GPU.
@@ -563,7 +633,7 @@ impl TalkShowRoomHost {
                     cx.notify();
                 }
             }
-            HostPoll::Unchanged => {}
+            HostPoll::Unchanged | HostPoll::Undecodable(_) => {}
         }
     }
 
