@@ -841,7 +841,7 @@ impl Render for SoundsPanel {
                 icon(IconName::ArrowCounterClockwise, 16., hsla(t.foreground)).into_any_element()
             };
             let mut restore = Button::new("sound-restore-starters")
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .disabled(offline || self.restoring)
                 .child(glyph)
                 .child(if self.restoring {

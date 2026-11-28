@@ -1223,7 +1223,7 @@ fn person_row(
                 )))
                 .label(mute_label)
                 .size(ButtonSize::Xs)
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .disabled(disabled)
                 .on_click(move |_, _, cx| {
                     entity_mute.update(cx, |this, cx| this.toggle_mute(&person_mute, cx))
@@ -1236,7 +1236,7 @@ fn person_row(
                 )))
                 .label(share.action_label.clone())
                 .size(ButtonSize::Xs)
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .disabled(disabled)
                 .tooltip(share.hint.clone())
                 .on_click(move |_, _, cx| {

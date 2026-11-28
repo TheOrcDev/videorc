@@ -231,7 +231,7 @@ impl Render for ErrorPanels {
                                             .child(
                                                 Button::new("error-copy")
                                                     .label(copy_label)
-                                                    .variant(ButtonVariant::Ghost)
+                                                    .variant(ButtonVariant::Outline)
                                                     .on_click({
                                                         let entity = entity.clone();
                                                         move |_, _, cx| {
@@ -280,7 +280,7 @@ impl Render for ErrorPanels {
                                 .child(
                                     Button::new("page-error-copy")
                                         .label(copy_label)
-                                        .variant(ButtonVariant::Ghost)
+                                        .variant(ButtonVariant::Outline)
                                         .on_click({
                                             let entity = entity.clone();
                                             move |_, _, cx| {

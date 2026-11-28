@@ -974,7 +974,7 @@ pub fn render_community(
                 )
                 .child(
                     Button::new(format!("dismiss-{key}"))
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Xs)
                         .label(NOT_THE_SAME)
                         .on_click({
@@ -1720,7 +1720,7 @@ fn render_person_card(
                 let key = account.account_key.clone();
                 row = row.child(
                     Button::new(format!("unlink-{}", account.account_key))
-                        .variant(ButtonVariant::Ghost)
+                        .variant(ButtonVariant::Outline)
                         .size(ButtonSize::Xs)
                         .label(NOT_THE_SAME)
                         .disabled(busy)
@@ -1945,7 +1945,7 @@ fn render_person_card(
     } else {
         actions = actions.child(
             Button::new("same-person")
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .size(ButtonSize::Xs)
                 .label(SAME_PERSON_AS)
                 .disabled(!known || busy)

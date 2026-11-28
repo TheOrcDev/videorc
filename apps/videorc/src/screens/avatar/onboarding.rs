@@ -1214,7 +1214,7 @@ fn describe_step(
             )
             .child(
                 Button::new("avatar-onboarding-picture-remove")
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .label(view::PICTURE_REMOVE)
                     .disabled(disabled)
@@ -1481,7 +1481,7 @@ fn create_step(
             let entity = cx.entity();
             let cancel = can_cancel.then(|| {
                 Button::new("avatar-onboarding-cancel")
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .label(if cancelling {
                         view::CANCELING
@@ -1647,7 +1647,7 @@ fn pose_tiles(
             let button = Button::new(SharedString::from(format!(
                 "avatar-onboarding-redo-{state}"
             )))
-            .variant(ButtonVariant::Ghost)
+            .variant(ButtonVariant::Outline)
             .size(ButtonSize::Xs)
             .label(gate::redo_label(view::REDO))
             .disabled(busy || reason.is_some() || redoing)
@@ -1764,7 +1764,7 @@ fn footer(
         left = left
             .child(
                 Button::new("avatar-onboarding-delete")
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .label(view::DELETE)
                     .disabled(busy)
                     .on_click(move |_, _, cx| {
@@ -1773,7 +1773,7 @@ fn footer(
             )
             .child(
                 Button::new("avatar-onboarding-start-new")
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .label(view::START_NEW)
                     .disabled(busy)
                     .on_click(move |_, window, cx| {
@@ -1917,7 +1917,7 @@ fn replace_confirm(onboarding: &Onboarding, cx: &mut Context<AvatarScreen>) -> A
     .close_button(false)
     .footer(
         Button::new("avatar-onboarding-replace-keep")
-            .variant(ButtonVariant::Ghost)
+            .variant(ButtonVariant::Outline)
             .label(words::REPLACE_KEEP)
             .on_click(move |_, window, cx| {
                 keep.update(cx, |screen, cx| {

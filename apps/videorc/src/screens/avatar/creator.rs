@@ -1673,7 +1673,7 @@ fn step_header(current: Step, t: &Theme) -> impl IntoElement {
 fn other_picture_button(disabled: bool, cx: &mut Context<AvatarScreen>) -> Button {
     let entity = cx.entity();
     Button::new("avatar-creator-other-picture")
-        .variant(ButtonVariant::Ghost)
+        .variant(ButtonVariant::Outline)
         .size(ButtonSize::Xs)
         .label(OTHER_PICTURE)
         .disabled(disabled)
@@ -1775,7 +1775,7 @@ fn reference_step(
                             .child(meta(PERSONA_LINE, t))
                             .child(
                                 Button::new("avatar-creator-new-avatar")
-                                    .variant(ButtonVariant::Ghost)
+                                    .variant(ButtonVariant::Outline)
                                     .size(ButtonSize::Xs)
                                     .label(words::LIBRARY_NEW_BUDDY)
                                     .on_click(move |_, _, cx| {
@@ -1917,7 +1917,7 @@ fn notes_editor(
     features = features.child(
         div().flex().child(
             Button::new("avatar-creator-add-feature")
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .size(ButtonSize::Xs)
                 .label(ADD_FEATURE)
                 .disabled(disabled)
@@ -2041,7 +2041,7 @@ fn pilot_step(
     };
     let entity = cx.entity();
     let redo = Button::new("avatar-creator-redo-pilot")
-        .variant(ButtonVariant::Ghost)
+        .variant(ButtonVariant::Outline)
         .size(ButtonSize::Xs)
         .label(format!("Draw them again ({left} left)"))
         .disabled(disabled || left == 0 || !notes_ok || creation.expired)
@@ -2136,7 +2136,7 @@ fn build_step(
                     "avatar-creator-sheet-redo-{}",
                     sheet.key
                 )))
-                .variant(ButtonVariant::Ghost)
+                .variant(ButtonVariant::Outline)
                 .size(ButtonSize::Xs)
                 .label(if redo { REDO } else { TRY_AGAIN })
                 .disabled(locked || working || creation.expired)
@@ -2361,7 +2361,7 @@ fn review_row(
     let (mark, redo) = (cx.entity(), cx.entity());
     let redo_label = if this_redoing { REDOING } else { REDO_ROW };
     let redo_button = Button::new(SharedString::from(format!("avatar-creator-redo-{key}")))
-        .variant(ButtonVariant::Ghost)
+        .variant(ButtonVariant::Outline)
         .size(ButtonSize::Xs)
         .disabled(disabled || this_redoing || creation.redos_remaining == 0 || creation.expired)
         .on_click(move |_, _, cx| redo.update(cx, |screen, cx| screen.creator_redo_row(key, cx)));

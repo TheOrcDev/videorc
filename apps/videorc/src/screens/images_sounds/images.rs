@@ -751,7 +751,7 @@ fn ghost_btn(
     Button::new(id.into())
         .label(label)
         .size(ButtonSize::Xs)
-        .variant(ButtonVariant::Ghost)
+        .variant(ButtonVariant::Outline)
         .disabled(disabled)
         .on_click(on_click)
 }

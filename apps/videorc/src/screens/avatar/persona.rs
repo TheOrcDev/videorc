@@ -492,7 +492,7 @@ pub(super) fn render_persona(
         .child(
             div().mt(px(2.)).child(
                 Button::new("avatar-start-over")
-                    .variant(ButtonVariant::Ghost)
+                    .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Xs)
                     .icon(IconName::ArrowCounterClockwise)
                     .label(words::START_OVER)
@@ -645,7 +645,7 @@ pub(super) fn persona_dialogs(screen: &AvatarScreen, cx: &mut Context<AvatarScre
     .close_button(false)
     .footer(
         Button::new("avatar-example-keep")
-            .variant(ButtonVariant::Ghost)
+            .variant(ButtonVariant::Outline)
             .label(words::REPLACE_KEEP)
             .on_click(move |_, window, cx| {
                 keep.update(cx, |screen, cx| screen.answer_replace(false, window, cx))
@@ -669,7 +669,7 @@ pub(super) fn persona_dialogs(screen: &AvatarScreen, cx: &mut Context<AvatarScre
     .close_button(false)
     .footer(
         Button::new("avatar-start-over-keep")
-            .variant(ButtonVariant::Ghost)
+            .variant(ButtonVariant::Outline)
             .label(words::start_over_keep(&persona.name))
             .on_click(move |_, _, cx| cancel.update(cx, |screen, cx| screen.cancel_start_over(cx))),
     )
