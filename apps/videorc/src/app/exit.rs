@@ -119,8 +119,23 @@ impl ExitGuard {
                 cx.defer(move |cx| Self::close_main(main, cx));
                 return false;
             }
+            // Elsewhere the Studio closes and takes the other windows with
+            // it, as Electron's Studio `closed` handler closes the detached
+            // ones (#978); the last window closing then quits (`main.rs`).
+            // Without this an open Stream Manager or Notes kept the app
+            // running with no Studio.
+            cx.defer(move |cx| Self::close_others(main, cx));
             true
         });
+    }
+
+    /// Every window but the main one closes.
+    fn close_others(main: AnyWindowHandle, cx: &mut App) {
+        for other in cx.windows() {
+            if other != main {
+                let _ = other.update(cx, |_, window, _| window.remove_window());
+            }
+        }
     }
 
     /// The main window goes (P1513, P1514). On macOS the app stays in the
@@ -132,11 +147,7 @@ impl ExitGuard {
     fn close_main(main: AnyWindowHandle, cx: &mut App) {
         #[cfg(target_os = "macos")]
         {
-            for other in cx.windows() {
-                if other != main {
-                    let _ = other.update(cx, |_, window, _| window.remove_window());
-                }
-            }
+            Self::close_others(main, cx);
             let _ = main.update(cx, |_, window, _| {
                 crate::platform::macos::hide_window(window)
             });
