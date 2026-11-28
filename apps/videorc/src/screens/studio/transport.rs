@@ -51,9 +51,14 @@ pub struct SessionControls {
 impl SessionControls {
     pub fn of(snapshot: &StudioSnapshot) -> Self {
         Self {
-            // The entitlement, destination and topology gates are inputs the
-            // app doesn't hold yet (S1.6c, #1814); none of them is on.
-            transport: TransportView::from_snapshot(snapshot, &StartGates::default(), false),
+            // The destination gate comes from the saved settings; the
+            // entitlement and topology gates are inputs the app doesn't hold
+            // yet (S1.6c, #1814), and neither is on.
+            transport: TransportView::from_snapshot(
+                snapshot,
+                &StartGates::of_snapshot(snapshot),
+                false,
+            ),
             stop_question: snapshot.session.stop_confirmation.clone(),
         }
     }
