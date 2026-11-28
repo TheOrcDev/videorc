@@ -4,8 +4,8 @@ use gpui::{AnyElement, Context, PathPromptOptions, Window, div, prelude::*, px};
 use videorc_app_core::livestream::copy as page_copy;
 use videorc_app_core::livestream::details::{self, ThumbnailField};
 use videorc_kit::button::{Button, ButtonVariant};
+use videorc_kit::field::Field as KitField;
 use videorc_kit::icon::{IconName, icon};
-use videorc_kit::settings_row::SettingsRow;
 use videorc_kit::theme::{self, TypeScale, hsla};
 use videorc_kit::tokens::text;
 
@@ -107,7 +107,12 @@ impl DestinationsPanel {
                 .child(hint),
         );
 
-        SettingsRow::new("stream-thumbnail", page_copy::THUMBNAIL)
+        // Electron's `ThumbnailField` is a plain Field: the label over the
+        // buttons and the hint, like Title and Description above it. A
+        // SettingsRow put the label beside the body, where the hint's width
+        // crushed it to one letter a line.
+        KitField::new("stream-thumbnail")
+            .label(page_copy::THUMBNAIL)
             .child(body)
             .into_any_element()
     }
