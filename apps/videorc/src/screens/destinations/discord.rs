@@ -7,6 +7,7 @@ use videorc_app_core::livestream::copy as page_copy;
 use videorc_app_core::livestream::discord::{self, DiscordView, Test};
 use videorc_kit::alert::{Alert, AlertVariant};
 use videorc_kit::button::{Button, ButtonVariant};
+use videorc_kit::field::Field as KitField;
 use videorc_kit::input::{Input, InputState};
 use videorc_kit::list_row::{GroupedList, ListRow};
 use videorc_kit::panel_section::PanelSection;
@@ -82,39 +83,47 @@ impl DestinationsPanel {
         if view.paste_shown
             && let Some(paste) = &self.discord_paste
         {
+            // Electron's `WebhookPasteField` is a plain Field: the label over
+            // a row where the input takes the room (`min-w-0 flex-1`) and
+            // Connect follows. A SettingsRow put the label beside the row,
+            // which left the input no width at all (a 24 px square).
             let mut paste_row = div().flex().flex_col().gap(px(4.)).child(
-                SettingsRow::new("discord-webhook", view.paste_label.clone()).child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(
-                            Input::new("discord-webhook-input", paste)
-                                .accessibility_label(page_copy::WEBHOOK_URL)
-                                .disabled(self.discord_memory.paste_pending)
-                                .invalid(view.paste_error.is_some()),
-                        )
-                        .child(
-                            Button::new("discord-webhook-connect")
-                                .label(if self.discord_memory.paste_pending {
-                                    page_copy::CONNECTING
-                                } else {
-                                    page_copy::CONNECT
-                                })
-                                .variant(ButtonVariant::Outline)
-                                .disabled(
-                                    self.discord_memory.paste_pending
-                                        || self.discord_memory.paste.trim().is_empty()
-                                        || view.paste_error.is_some(),
-                                )
-                                .on_click({
-                                    let entity = entity.clone();
-                                    move |_, _, cx| {
-                                        entity.update(cx, |this, cx| this.connect_webhook(cx))
-                                    }
-                                }),
-                        ),
-                ),
+                KitField::new("discord-webhook")
+                    .label(view.paste_label.clone())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    Input::new("discord-webhook-input", paste)
+                                        .accessibility_label(page_copy::WEBHOOK_URL)
+                                        .disabled(self.discord_memory.paste_pending)
+                                        .invalid(view.paste_error.is_some()),
+                                ),
+                            )
+                            .child(
+                                Button::new("discord-webhook-connect")
+                                    .label(if self.discord_memory.paste_pending {
+                                        page_copy::CONNECTING
+                                    } else {
+                                        page_copy::CONNECT
+                                    })
+                                    .variant(ButtonVariant::Outline)
+                                    .disabled(
+                                        self.discord_memory.paste_pending
+                                            || self.discord_memory.paste.trim().is_empty()
+                                            || view.paste_error.is_some(),
+                                    )
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_, _, cx| {
+                                            entity.update(cx, |this, cx| this.connect_webhook(cx))
+                                        }
+                                    }),
+                            ),
+                    ),
             );
             paste_row = paste_row.child(
                 div()
