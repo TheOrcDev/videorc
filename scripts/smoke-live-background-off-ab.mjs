@@ -12,6 +12,12 @@
 // desktop build in each, never sharing a target dir); runs use
 // VIDEORC_SMOKE_SKIP_PREBUILD=1. Usage:
 //   node scripts/smoke-live-background-off-ab.mjs --base <worktree> [--rounds 3]
+//
+// The GPUI app (VIDEORC_APP=gpui): each side runs its tree's GPUI binary, or
+// a prebuilt one (VIDEORC_GPUI_APP_BINARY_BASE / _BRANCH, its backend
+// beside it), so neither tree needs its own target dir. The clip buffer is
+// turned off through the Studio (`studio-replay-buffer`), and there is no
+// renderer process to weigh (rendererRssMb is Electron's own).
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { mkdtempSync, readFileSync } from 'node:fs'
@@ -19,12 +25,15 @@ import { loadavg, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+import { smokeAppIsGpui } from './lib/app-launcher.mjs'
+
 const branchRoot = resolve(import.meta.dirname, '..')
 const args = process.argv.slice(2)
 const baseRoot = resolve(args[args.indexOf('--base') + 1] ?? '')
 assert(args.includes('--base') && baseRoot !== branchRoot, 'pass --base <origin/main worktree>')
 const rounds = args.includes('--rounds') ? Number(args[args.indexOf('--rounds') + 1]) : 3
 const timeoutMs = 180000
+const gpuiApp = smokeAppIsGpui()
 const IDLE_MS = 30000
 const RECORD_MS = 20000
 
@@ -65,7 +74,8 @@ const metrics = [
   'recordP95Ms',
   'ownedRssMb',
   'backendRssMb',
-  'rendererRssMb'
+  // Electron's renderer; the GPUI app draws in its own process (ownedRssMb).
+  ...(gpuiApp ? [] : ['rendererRssMb'])
 ]
 const rows = metrics.map((metric) => {
   const base = results.base.map((run) => run[metric]).filter(Number.isFinite)
@@ -96,6 +106,16 @@ assert.equal(
 )
 console.log('Live background zero-cost A/B PASS')
 
+/** The side's prebuilt GPUI binary, if one is named (VIDEORC_GPUI_APP_BINARY_BASE/_BRANCH). */
+function sideEnv(root) {
+  if (!gpuiApp) return {}
+  const named =
+    process.env[
+      root === baseRoot ? 'VIDEORC_GPUI_APP_BINARY_BASE' : 'VIDEORC_GPUI_APP_BINARY_BRANCH'
+    ]
+  return named ? { VIDEORC_GPUI_APP_BINARY: named } : {}
+}
+
 async function measureTiming(root) {
   const { launchDevApp } = await import(pathToFileURL(join(root, 'scripts/lib/app-launcher.mjs')))
   const { connectBackend, request } = await import(
@@ -116,7 +136,8 @@ async function measureTiming(root) {
       VIDEORC_SMOKE_STATE_DIR: outputDirectory,
       VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
       VIDEORC_USER_DATA_DIR: userDataDir,
-      VIDEORC_DATABASE_PATH: join(userDataDir, 'videorc.sqlite3')
+      VIDEORC_DATABASE_PATH: join(userDataDir, 'videorc.sqlite3'),
+      ...sideEnv(root)
     },
     timeoutMs,
     requiredMarkers: ['backend-ready', 'preview-motion-ready']
@@ -129,13 +150,17 @@ async function measureTiming(root) {
     // session with the app's own scene, and the Record below would hand over
     // from it (refused when that scene holds a camera the dev app can't read).
     // Both sides measure with the switch off.
-    const clipsOff = await requestSmokeCommand(
-      smoke,
-      'eval-js',
-      { code: 'return window.__videorcSmokeSetReplayBuffer?.(false) ?? null' },
-      { timeoutMs }
-    )
-    assert.equal(clipsOff?.result, true, 'the renderer has no clip buffer smoke hook')
+    if (gpuiApp) {
+      await requestSmokeCommand(smoke, 'studio-replay-buffer', { armed: false }, { timeoutMs })
+    } else {
+      const clipsOff = await requestSmokeCommand(
+        smoke,
+        'eval-js',
+        { code: 'return window.__videorcSmokeSetReplayBuffer?.(false) ?? null' },
+        { timeoutMs }
+      )
+      assert.equal(clipsOff?.result, true, 'the renderer has no clip buffer smoke hook')
+    }
     const clipsDeadline = Date.now() + timeoutMs
     while ((await request(ws, timeoutMs, 'replay.status'))?.state !== 'off') {
       assert(Date.now() < clipsDeadline, 'timed out waiting for the clip buffer to turn off')
@@ -188,7 +213,7 @@ async function measureMemory(root) {
   const output = await new Promise((resolveRun, rejectRun) => {
     const child = spawn(process.execPath, [join(root, 'scripts/smoke-process-memory.mjs')], {
       cwd: root,
-      env: { ...process.env, VIDEORC_SMOKE_SKIP_PREBUILD: '1' },
+      env: { ...process.env, VIDEORC_SMOKE_SKIP_PREBUILD: '1', ...sideEnv(root) },
       stdio: ['ignore', 'pipe', 'inherit']
     })
     let text = ''
