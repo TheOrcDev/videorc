@@ -76,6 +76,11 @@ pub trait ShellSmoke: 'static {
     fn toast(&self, request: &UiToastRequest, cx: &mut App) -> Result<Value, String>;
     /// Current bell entries and actually mounted toasts; never marks them read.
     fn notifications(&self, cx: &mut App) -> Result<Value, String>;
+    /// `window-theme-tokens`: the text and ground tokens the main window
+    /// draws with now, for probes that measure captured pixels against them.
+    fn window_theme_tokens(&self, cx: &mut App) -> Result<Value, String>;
+    /// `first-run-state`: where first-run setup is and what its backdrop does.
+    fn first_run_state(&self, cx: &mut App) -> Result<Value, String>;
     /// `open-tab`: the main window shows `page`, as its sidebar row would,
     /// on `open`'s sub-tab with its dialog over it.
     fn open_page(&self, page: PageId, open: OpenTab, cx: &mut App) -> Result<(), String>;
@@ -181,6 +186,8 @@ pub struct ShellCommands {
 impl SmokeCommandHandler for ShellCommands {
     fn handles(&self, command: &str) -> bool {
         command == "drain-native-preview-host-commands"
+            || command == "first-run-state"
+            || command == "window-theme-tokens"
             || command == "notifications-state"
             || command == "open-tab"
             || command == "main-window-id"
@@ -227,6 +234,18 @@ impl SmokeCommandHandler for ShellCommands {
                     .ui
                     .run(move |cx| shell(cx)?.preview(&command, cx))
                     .await?;
+            }
+            if command == "window-theme-tokens" {
+                if !params.is_empty() {
+                    return Err("window-theme-tokens takes no parameters.".into());
+                }
+                return self.ui.run(|cx| shell(cx)?.window_theme_tokens(cx)).await?;
+            }
+            if command == "first-run-state" {
+                if !params.is_empty() {
+                    return Err("first-run-state takes no parameters.".into());
+                }
+                return self.ui.run(|cx| shell(cx)?.first_run_state(cx)).await?;
             }
             if command == "notifications-state" {
                 if !params.is_empty() {

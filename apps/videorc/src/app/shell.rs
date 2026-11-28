@@ -617,6 +617,15 @@ impl Shell {
         window.activate_window();
     }
 
+    /// `first-run-state` ([`FirstRunScreen::smoke_state`]).
+    pub(crate) fn smoke_first_run_state(
+        &self,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> serde_json::Value {
+        self.first_run.read(cx).smoke_state(window, cx)
+    }
+
     pub(crate) fn smoke_notifications(&self, cx: &gpui::App) -> serde_json::Value {
         self.notices.read(cx).smoke_snapshot(cx)
     }

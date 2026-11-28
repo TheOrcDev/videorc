@@ -105,6 +105,26 @@ pub fn output_verdict(
     OutputVerdict::Unknown
 }
 
+/// `shouldRunPerformanceCheck`: run when nothing was ever measured, or it
+/// was measured on other hardware (stale), or the result is untrusted. `None`
+/// (the backend has not answered, or an older one never does) never runs.
+pub fn should_run(state: Option<&PerformanceCheckState>) -> bool {
+    state.is_some_and(|state| {
+        !state.running && (state.result.as_ref().is_none_or(is_untrusted) || state.stale)
+    })
+}
+
+/// `firstRunSetupStartsPerformanceCheck`: first-run setup (not a replay of it
+/// from Settings) starts the check as it opens, behind the setup card, when
+/// no take is running and [`should_run`] says so.
+pub fn first_run_starts(
+    first_run: bool,
+    session_active: bool,
+    state: Option<&PerformanceCheckState>,
+) -> bool {
+    first_run && !session_active && should_run(state)
+}
+
 /// `performanceCheckCeiling`: the largest output worth testing, the
 /// selected one or the display's native size when larger (capped at 4K).
 /// `display` is in device pixels.
@@ -531,6 +551,62 @@ mod tests {
         assert_eq!(
             (huge.ceiling_width, huge.ceiling_height, huge.ceiling_fps),
             (3840, 2160, 60)
+        );
+    }
+
+    fn check_state(
+        running: bool,
+        stale: bool,
+        result: Option<PerformanceCheckResult>,
+    ) -> PerformanceCheckState {
+        serde_json::from_value(json!({
+            "running": running,
+            "stale": stale,
+            "result": result,
+        }))
+        .expect("state")
+    }
+
+    #[test]
+    fn a_check_runs_when_nothing_was_measured_it_is_stale_or_untrusted() {
+        assert!(should_run(Some(&check_state(false, false, None))));
+        let fine = result(
+            json!([rung(1920, 1080, 30, "passed")]),
+            false,
+            "performance-check-v1:mac",
+        );
+        assert!(!should_run(Some(&check_state(
+            false,
+            false,
+            Some(fine.clone())
+        ))));
+        assert!(should_run(Some(&check_state(false, true, Some(fine)))));
+        let untrusted = result(
+            json!([rung(1280, 720, 30, "failed")]),
+            true,
+            "performance-check-v1:linux",
+        );
+        assert!(should_run(Some(&check_state(
+            false,
+            false,
+            Some(untrusted)
+        ))));
+        // One already running, or no answer from the backend, never starts another.
+        assert!(!should_run(Some(&check_state(true, false, None))));
+        assert!(!should_run(None));
+    }
+
+    #[test]
+    fn only_first_run_with_no_take_starts_the_check() {
+        let fresh = check_state(false, false, None);
+        assert!(first_run_starts(true, false, Some(&fresh)));
+        assert!(
+            !first_run_starts(false, false, Some(&fresh)),
+            "a replay is not a first run"
+        );
+        assert!(
+            !first_run_starts(true, true, Some(&fresh)),
+            "a running take keeps its studio"
         );
     }
 }

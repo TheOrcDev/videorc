@@ -171,6 +171,12 @@ pub const ELECTRON_SMOKE_COMMAND_NAMES: &[&str] = &[
 /// surface) instead.
 pub const RUST_SMOKE_COMMAND_NAMES: &[&str] = &[
     "notifications-state",
+    // The first-run setup's state and its backdrop's presented frames, what
+    // Electron's smoke reads off the `[data-first-run-*]` attributes.
+    "first-run-state",
+    // The main window's text and ground tokens as drawn now (hex), for the
+    // window-only glass probe's contrast tiers.
+    "window-theme-tokens",
     // S3.0j: the account: what it did (names, plan, the sign-in that
     // waits, each link's outcome; never a code, a verifier or an email),
     // the sign-in as the menu starts it (a smoke run opens no browser; the

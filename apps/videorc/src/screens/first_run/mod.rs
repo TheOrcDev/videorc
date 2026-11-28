@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AnyElement, ColorSpace, Context, Entity, EventEmitter, FocusHandle, FontWeight, Image,
+    AnyElement, App, ColorSpace, Context, Entity, EventEmitter, FocusHandle, FontWeight, Image,
     ImageFormat, ObjectFit, SharedString, Subscription, Window, WindowControlArea, div, img,
     linear_color_stop, linear_gradient, prelude::*, px, relative,
 };
@@ -36,6 +36,7 @@ use videorc_app_core::scenes::v2::LAYOUT_PRESET_LABELS;
 use videorc_app_core::studio::audio_mixer::{
     MICROPHONE_GAIN_RANGE, MeterBallistics, MeterView, format_db,
 };
+use videorc_app_core::studio::performance_check as perf;
 use videorc_app_core::studio::settings::SettingWrite;
 use videorc_app_core::studio::source_selection::SourceKind;
 use videorc_app_core::{BackendClient, Logger, Studio};
@@ -226,6 +227,15 @@ pub struct FirstRunScreen {
     startup: Option<fr::FirstRunStartup>,
     auto_decided: bool,
     opened_at: Option<Instant>,
+    /// The performance check was decided for this opening of setup
+    /// (`performanceCheckDecided`): once, when the backend has answered.
+    performance_decided: bool,
+    /// Setup opened at any time in this process (`first-run-state`'s
+    /// `openedEver`: a finished setup must not flash open on a relaunch).
+    opened_ever: bool,
+    /// When the backdrop's first frame showed (`first-run-state`'s
+    /// mount-to-moving time); cleared with the player.
+    backdrop_moving_at: Option<Instant>,
     pending_permission: Option<SystemPermissionPane>,
     samples: Vec<fr::sound::Sample>,
     mic_meter: MeterBallistics,
@@ -334,6 +344,9 @@ impl FirstRunScreen {
             startup: None,
             auto_decided: false,
             opened_at: None,
+            backdrop_moving_at: None,
+            performance_decided: false,
+            opened_ever: false,
             pending_permission: None,
             samples: Vec::new(),
             mic_meter: MeterBallistics::default(),
@@ -426,7 +439,7 @@ impl FirstRunScreen {
     }
 
     pub fn open_replay(&mut self, return_to: PageId, cx: &mut Context<Self>) {
-        if self.studio.snapshot().session.phase.is_active() {
+        if fr::replay_locked(&self.studio.snapshot().session.status) {
             return;
         }
         let platform = Some(self.platform());
@@ -438,6 +451,7 @@ impl FirstRunScreen {
         self.step = fr::steps_for(self.goal, platform)[0];
         let was_open = self.open;
         self.open = true;
+        self.opened_ever = true;
         self.focused_step = None;
         self.opened_at = Some(Instant::now());
         self.samples.clear();
@@ -461,6 +475,7 @@ impl FirstRunScreen {
             .unwrap_or(Step::Permissions);
         let was_open = self.open;
         self.open = true;
+        self.opened_ever = true;
         self.focused_step = None;
         self.opened_at = Some(Instant::now());
         self.samples.clear();
@@ -474,14 +489,61 @@ impl FirstRunScreen {
         // A setup already open keeps its moving picture.
         if !was_open {
             self.reset_backdrop();
+            self.performance_decided = false;
         }
         cx.notify();
+    }
+
+    /// First-run setup starts the performance check as it opens, behind the
+    /// card (`first-run-setup.tsx`, `firstRunSetupStartsPerformanceCheck`):
+    /// a first run, no take running, and nothing measured on this computer
+    /// (or it changed). Decided once per opening, when the backend answers.
+    fn decide_performance_check(&mut self, window: &Window, cx: &App) {
+        if self.performance_decided || !matches!(self.mode, SetupMode::FirstRun) {
+            return;
+        }
+        let snapshot = self.studio.snapshot();
+        let Some(state) = snapshot.performance.state.as_ref() else {
+            return;
+        };
+        self.performance_decided = true;
+        let session_active = fr::replay_locked(&snapshot.session.status);
+        if !perf::first_run_starts(true, session_active, Some(state)) {
+            self.logger.info(format!(
+                "[first-run] performance check not started (running={}, take={}, measured={}, stale={})",
+                state.running,
+                session_active,
+                state.result.is_some(),
+                state.stale
+            ));
+            return;
+        }
+        let scale = window.scale_factor();
+        let display = window.display(cx).map(|display| {
+            let size = display.bounds().size;
+            (
+                (f32::from(size.width) * scale).round() as u32,
+                (f32::from(size.height) * scale).round() as u32,
+            )
+        });
+        let capture = &snapshot.settings.capture;
+        let separate_files = cfg!(target_os = "macos")
+            && capture.record_enabled
+            && capture.separate_source_recordings.enabled;
+        let params = perf::ceiling(&capture.video, display, separate_files);
+        let studio = self.studio.clone();
+        self.logger
+            .info("[first-run] performance check started with setup");
+        self.runtime.spawn(async move {
+            let _ = studio.run_performance_check(params).await;
+        });
     }
 
     /// The backdrop as a fresh opening of setup finds it, and as a closed
     /// setup leaves it: no player, no thread, nothing on the GPU.
     fn reset_backdrop(&mut self) {
         self.backdrop_mode = backdrop::Mode::Starting;
+        self.backdrop_moving_at = None;
         self.backdrop_run += 1;
         #[cfg(target_os = "macos")]
         {
@@ -512,6 +574,7 @@ impl FirstRunScreen {
             backdrop::Event::FirstFrame => {
                 if self.backdrop_mode == backdrop::Mode::Starting {
                     self.backdrop_mode = backdrop::Mode::Moving;
+                    self.backdrop_moving_at = Some(Instant::now());
                 }
             }
             backdrop::Event::Still(reason, detail) => self.backdrop_still(reason, detail),
@@ -600,6 +663,90 @@ impl FirstRunScreen {
 
     fn platform(&self) -> &'static str {
         crate::app::hotkeys::node_platform()
+    }
+
+    /// `first-run-state` (the smokes' oracle for what Electron's smoke reads
+    /// off `[data-first-run-*]`): where setup is, its primary, the backdrop
+    /// (its mode, why it is still, the frames the GPU presented, the time
+    /// from opening to the first frame), the tone the theme asks of it, the
+    /// look chosen so far and the saved record, as stored.
+    pub fn smoke_state(&self, window: &Window, cx: &App) -> serde_json::Value {
+        use serde_json::json;
+        let platform = Some(self.platform());
+        let appearance = theme::current(window, cx);
+        let tone = backdrop_rules::tone(appearance.dark, appearance.increase_contrast);
+        let (position, count) = fr::step_position(self.step, self.goal, platform);
+        let last = fr::next_step(self.step, self.goal, platform).is_none();
+        let primary = if !self.open || self.step == Step::Goal {
+            None
+        } else if self.step == Step::Permissions && !self.grants_ready() {
+            Some("Skip for now")
+        } else {
+            Some(next_label(self.mode, last))
+        };
+        let (mode, reason) = match self.backdrop_mode {
+            backdrop::Mode::Starting => ("starting", None),
+            backdrop::Mode::Moving => ("moving", None),
+            backdrop::Mode::Still(reason) => ("still", Some(reason.as_str())),
+        };
+        #[cfg(target_os = "macos")]
+        let presented = self
+            .backdrop_player
+            .as_ref()
+            .map(|player| player.presented_frames());
+        #[cfg(not(target_os = "macos"))]
+        let presented: Option<u64> = None;
+        let mount_to_moving_ms = match (self.opened_at, self.backdrop_moving_at) {
+            (Some(opened), Some(moving)) => {
+                Some(moving.saturating_duration_since(opened).as_secs_f64() * 1000.0)
+            }
+            _ => None,
+        };
+        json!({
+            "open": self.open,
+            "openedEver": self.opened_ever,
+            "mode": match self.mode {
+                SetupMode::FirstRun => "first-run",
+                SetupMode::Replay { .. } => "replay",
+            },
+            "step": self.open.then(|| self.step.id()),
+            "position": self.open.then_some(position),
+            "count": self.open.then_some(count),
+            "goal": self.goal.map(|goal| goal.id()),
+            "primary": primary,
+            "locked": fr::replay_locked(&self.studio.snapshot().session.status),
+            "backdrop": {
+                "mode": mode,
+                "reason": reason,
+                "presentedFrames": presented,
+                "mountToMovingMs": mount_to_moving_ms,
+            },
+            "tone": {
+                "theme": if appearance.dark { "dark" } else { "light" },
+                "increaseContrast": appearance.increase_contrast,
+                "inverse": tone.inverse,
+                "shaderDim": tone.shader_dim,
+                "brightness": tone.brightness,
+                "reducedMotion": !theme::motion(cx),
+            },
+            "look": {
+                "layoutPreset": self.layout_preset,
+                "liveBackground": self.live_background,
+            },
+            "layoutOptions": self.smoke_layout_options(),
+            "rowsReady": self.rows_ready(),
+            "rows": self
+                .access_rows()
+                .iter()
+                .map(|row| json!({
+                    "id": serde_json::to_value(row.id).unwrap_or_default(),
+                    "state": serde_json::to_value(row.state).unwrap_or_default(),
+                    "required": row.required,
+                    "checking": row.checking,
+                }))
+                .collect::<Vec<_>>(),
+            "record": setting_text(&self.studio, fr::FIRST_RUN_KEY),
+        })
     }
 
     /// The moving picture, once it has a frame to show.
@@ -701,7 +848,7 @@ impl FirstRunScreen {
     }
 
     fn pick_microphone(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.studio.snapshot().session.phase.is_active() {
+        if fr::replay_locked(&self.studio.snapshot().session.status) {
             return;
         }
         let studio = self.studio.clone();
@@ -717,7 +864,7 @@ impl FirstRunScreen {
     }
 
     fn set_system_audio(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.studio.snapshot().session.phase.is_active() {
+        if fr::replay_locked(&self.studio.snapshot().session.status) {
             return;
         }
         let studio = self.studio.clone();
@@ -727,13 +874,30 @@ impl FirstRunScreen {
     }
 
     fn set_layout(&mut self, preset: String, cx: &mut Context<Self>) {
-        if self.studio.snapshot().session.phase.is_active() {
+        if fr::replay_locked(&self.studio.snapshot().session.status) {
             return;
         }
         self.layout_preset = Some(preset.clone());
         let studio = self.studio.clone();
         self.runtime
             .spawn(async move { studio.apply_layout_preset(&preset).await });
+        cx.notify();
+    }
+
+    /// The Look step's background tile (`firstRunBackgroundChoice`): the
+    /// choice is committed to the working scene as the Images page's tile
+    /// commits one, not only remembered here, so what setup shows is what
+    /// Studio opens with. None takes the background off.
+    fn set_background(&mut self, id: Option<&'static str>, cx: &mut Context<Self>) {
+        if fr::replay_locked(&self.studio.snapshot().session.status) {
+            return;
+        }
+        self.live_background = id;
+        let style = id.and_then(assets::live_background_style);
+        let studio = self.studio.clone();
+        self.runtime.spawn(async move {
+            let _ = studio.apply_working_background(style.as_ref()).await;
+        });
         cx.notify();
     }
 
@@ -833,11 +997,41 @@ impl FirstRunScreen {
         cx.notify();
     }
 
-    fn grants_ready(&self) -> bool {
+    /// Look's layout cards for the orientation shown: each preset and
+    /// whether its card is disabled (a missing camera or screen), the
+    /// `[data-first-run-look-option]` Electron's smoke reads.
+    fn smoke_layout_options(&self) -> Vec<serde_json::Value> {
+        let snapshot = self.studio.snapshot();
+        let vertical = self.orientation == Orientation::Vertical;
+        let (camera_gap, screen_gap) = look_gaps(self, &snapshot);
+        let locked = fr::replay_locked(&snapshot.session.status);
+        LAYOUT_PRESET_LABELS
+            .iter()
+            .filter(|(layout, _)| layout.starts_with("vertical-") == vertical)
+            .map(|(layout, label)| {
+                let reason = if needs_camera(layout) && camera_gap.is_some() {
+                    camera_gap
+                } else if needs_screen(layout) && screen_gap.is_some() {
+                    screen_gap
+                } else {
+                    None
+                };
+                serde_json::json!({
+                    "preset": layout,
+                    "label": label,
+                    "disabled": locked || reason.is_some(),
+                    "reason": reason,
+                })
+            })
+            .collect()
+    }
+
+    /// Permissions' rows as the step reads them.
+    fn access_rows(&self) -> Vec<videorc_app_core::desktop::system_access::SystemAccessRow> {
         let snapshot = self.studio.snapshot();
         let media = self.permissions.snapshot();
         let platform = PermissionPlatform::current();
-        let rows = system_access_rows(&SystemAccessInput {
+        system_access_rows(&SystemAccessInput {
             devices: &snapshot.sources.devices.devices,
             audio_meter: None,
             platform,
@@ -848,7 +1042,11 @@ impl FirstRunScreen {
                 pending_pane: self.pending_permission,
                 ..Default::default()
             },
-        });
+        })
+    }
+
+    fn grants_ready(&self) -> bool {
+        let rows = self.access_rows();
         rows.iter().all(|row| {
             !row.required
                 || matches!(
@@ -1128,6 +1326,7 @@ impl Render for FirstRunScreen {
         let appearance = theme::current(window, cx);
         let t = appearance.theme();
         let viewport = window.viewport_size();
+        self.decide_performance_check(window, cx);
         self.sync_backdrop(
             backdrop::Frame {
                 tone: backdrop_rules::tone(appearance.dark, appearance.increase_contrast),
@@ -1149,7 +1348,7 @@ impl Render for FirstRunScreen {
         let entity = cx.entity();
         let noun = device_noun(platform);
         let snapshot = self.studio.snapshot();
-        let locked = snapshot.session.phase.is_active();
+        let locked = fr::replay_locked(&snapshot.session.status);
         let offline = !self.studio.is_connected();
         let grants_ready = self.grants_ready();
 
@@ -1269,6 +1468,7 @@ impl Render for FirstRunScreen {
         if previous.is_some() {
             actions = actions.child(
                 Button::new("first-run-back")
+                    .accessibility_label("Back")
                     .variant(ButtonVariant::Ghost)
                     .disabled(locked)
                     .child(icon(IconName::ArrowLeft, 16., hsla(t.foreground)))
@@ -1297,6 +1497,7 @@ impl Render for FirstRunScreen {
             Some(
                 Button::new("first-run-next")
                     .track_focus(&self.primary_focus)
+                    .accessibility_label(next_label(self.mode, last))
                     .variant(ButtonVariant::Default)
                     .disabled(locked)
                     .child(next_label(self.mode, last))
@@ -1692,23 +1893,12 @@ fn goal_body(
         .into_any_element()
 }
 
-fn look_body(
+/// What each missing source says (`FIRST_RUN_LOOK_REASONS`): the camera's
+/// and the screen's gap, `None` when the source is there.
+fn look_gaps(
     screen: &FirstRunScreen,
     snapshot: &videorc_app_core::studio::StudioSnapshot,
-    entity: &Entity<FirstRunScreen>,
-    locked: bool,
-    t: &Theme,
-) -> AnyElement {
-    let vertical = screen.orientation == Orientation::Vertical;
-    // The layout the step shows: the one picked here, else the Studio's own.
-    let preset: Option<String> = screen.layout_preset.clone().or_else(|| {
-        serde_json::to_value(&snapshot.settings.capture.layout.layout_preset)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_string))
-    });
-    let preset = preset.filter(|preset| preset.starts_with("vertical-") == vertical);
-
-    // What each missing source says (`FIRST_RUN_LOOK_REASONS`).
+) -> (Option<&'static str>, Option<&'static str>) {
     let media = screen.permissions.snapshot();
     let sources = &snapshot.settings.capture.sources;
     let devices = &snapshot.sources.devices.devices;
@@ -1740,11 +1930,34 @@ fn look_body(
     } else {
         Some("No screen found.")
     };
+    (camera_gap, screen_gap)
+}
+
+fn look_body(
+    screen: &FirstRunScreen,
+    snapshot: &videorc_app_core::studio::StudioSnapshot,
+    entity: &Entity<FirstRunScreen>,
+    locked: bool,
+    t: &Theme,
+) -> AnyElement {
+    let vertical = screen.orientation == Orientation::Vertical;
+    // The layout the step shows: the one picked here, else the Studio's own.
+    let preset: Option<String> = screen.layout_preset.clone().or_else(|| {
+        serde_json::to_value(&snapshot.settings.capture.layout.layout_preset)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+    });
+    let preset = preset.filter(|preset| preset.starts_with("vertical-") == vertical);
+
+    let (camera_gap, screen_gap) = look_gaps(screen, snapshot);
     let reasons: Vec<&str> = camera_gap.into_iter().chain(screen_gap).collect();
     let grant_reason = reasons.iter().any(|reason| reason.starts_with("Allow "));
     // `look-picture.tsx`: the picture places only a camera, screen or
     // window (PICTURE_KINDS). A test pattern isn't one, so with nothing
     // else chosen the picture says what it waits for, as Electron.
+    let sources = &snapshot.settings.capture.sources;
+    let chosen = |id: &Option<String>| id.as_deref().is_some_and(|id| !id.is_empty());
+    let base_chosen = chosen(&sources.screen_id) || chosen(&sources.window_id);
     let has_sources = chosen(&sources.camera_id) || base_chosen;
 
     // The picture: the layout's boxes with the camera in its shape, the
@@ -1936,12 +2149,7 @@ fn look_body(
         if !locked {
             tile = tile.on_click({
                 let entity = entity.clone();
-                move |_, _, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.live_background = id;
-                        cx.notify();
-                    })
-                }
+                move |_, _, cx| entity.update(cx, |this, cx| this.set_background(id, cx))
             });
         }
         backgrounds = backgrounds.child(tile);
