@@ -175,10 +175,23 @@ pub fn run_root(
 }
 
 /// The package's FFmpeg, for [`BUNDLED_FFMPEG_PATH_ENV`]: `None` outside a
-/// package, or when the package has none (the backend then runs the
-/// `ffmpeg` on `PATH`, as a dev build does).
+/// package (a dev build: [`workspace_ffmpeg`]), or when the package has none
+/// (the backend then runs the `ffmpeg` on `PATH`).
 pub fn bundled_ffmpeg(resources: &Path) -> Option<PathBuf> {
     let ffmpeg = resources.join(FFMPEG_IN_RESOURCES);
+    ffmpeg.is_file().then_some(ffmpeg)
+}
+
+/// A dev build's FFmpeg on Windows: the pinned vendor build in the checkout
+/// (`pnpm ffmpeg:fetch:windows`), so a dev run uses the exact binary a
+/// package ships, as Electron's dev main does (`resolvePackagedFfmpegBinDir`).
+/// `None` elsewhere (macOS and Linux keep `PATH`, unchanged by #2512's
+/// Windows fixes) and when it hasn't been fetched.
+pub fn workspace_ffmpeg(workspace_root: &Path) -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let ffmpeg = workspace_root.join("vendor/ffmpeg/windows-x64/bin/ffmpeg.exe");
     ffmpeg.is_file().then_some(ffmpeg)
 }
 
@@ -297,6 +310,19 @@ mod tests {
         std::fs::create_dir_all(ffmpeg.parent().unwrap()).unwrap();
         std::fs::write(&ffmpeg, b"").unwrap();
         assert_eq!(bundled_ffmpeg(&root), Some(ffmpeg));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_dev_build_takes_the_checkouts_pinned_ffmpeg_off_macos() {
+        let root = std::env::temp_dir().join(format!("videorc-dev-ffmpeg-{}", std::process::id()));
+        assert_eq!(workspace_ffmpeg(&root), None);
+        let ffmpeg = root.join("vendor/ffmpeg/windows-x64/bin/ffmpeg.exe");
+        std::fs::create_dir_all(ffmpeg.parent().unwrap()).unwrap();
+        std::fs::write(&ffmpeg, b"").unwrap();
+        // Windows only: macOS and Linux keep `PATH` even with one fetched.
+        let expected = cfg!(windows).then(|| ffmpeg.clone());
+        assert_eq!(workspace_ffmpeg(&root), expected);
         let _ = std::fs::remove_dir_all(root);
     }
 

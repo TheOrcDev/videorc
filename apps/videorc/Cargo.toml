@@ -107,3 +107,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_UI_Accessibility",
   "Win32_UI_WindowsAndMessaging",
 ] }
+# The camera and microphone grants (`media_access`): WinRT's
+# `DeviceAccessInformation`, what Electron's `getMediaAccessStatus` reads on
+# Windows. The backend already builds this version.
+windows = { version = "0.62", features = ["Devices_Enumeration", "Foundation"] }

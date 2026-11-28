@@ -7964,6 +7964,7 @@ dependencies = [
  "videorc-kit",
  "videorc-preview",
  "videorc-protocol",
+ "windows 0.62.2",
  "windows-sys 0.61.2",
  "x11rb",
 ]
