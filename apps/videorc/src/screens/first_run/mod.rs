@@ -533,7 +533,7 @@ impl FirstRunScreen {
         let params = perf::ceiling(&capture.video, display, separate_files);
         let studio = self.studio.clone();
         self.logger
-            .info("[first-run] performance check started with setup".to_string());
+            .info("[first-run] performance check started with setup");
         self.runtime.spawn(async move {
             let _ = studio.run_performance_check(params).await;
         });

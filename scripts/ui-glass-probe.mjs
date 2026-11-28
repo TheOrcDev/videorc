@@ -88,7 +88,7 @@ import {
   isClearGlassRun,
   pixelStability
 } from './lib/window-ground-checks.mjs'
-import { launchDevApp } from './lib/app-launcher.mjs'
+import { launchDevApp, smokeAppIsGpui } from './lib/app-launcher.mjs'
 import {
   belowSheen,
   centredRect,
@@ -121,6 +121,13 @@ import {
 } from './lib/image-stats.mjs'
 import { seedUiSettingsJs } from './lib/renderer-profile-seed.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+
+// `VIDEORC_APP=gpui`: the GPUI app has no Chromium to region-capture through
+// CDP, so its probe measures the Videorc windows alone (`screencapture -l`).
+if (smokeAppIsGpui()) {
+  const { run } = await import('./ui-glass-probe-gpui.mjs')
+  process.exit(await run(process.argv.slice(2)))
+}
 
 // Calibrated on macOS 26.5.1 / Electron 39.8.10; the raw populations live in
 // docs/acceptance/2026-09-23-real-glass-calibration.md. Transmission: the fake
