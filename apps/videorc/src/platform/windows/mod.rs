@@ -64,8 +64,8 @@ fn hwnd(window: &Window) -> OsResult<HWND> {
 /// Light/Dark/System theme changes keep every native title bar aligned with
 /// Videorc's appearance instead of sticking to Windows' OS theme.
 pub fn set_title_bar_dark_mode(window: &Window, dark: bool) -> OsResult<()> {
-    use windows_sys::Win32::Foundation::BOOL;
     use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
+    use windows_sys::core::BOOL;
     let hwnd = hwnd(window)?;
     let value: BOOL = i32::from(dark);
     // SAFETY: live HWND from this process's window; `value` is a stack `BOOL`
