@@ -539,11 +539,26 @@ describe('SessionTransport reason line (plan 174 S3.2)', () => {
     expect(setActive).toHaveBeenCalledExactlyOnceWith('live')
   })
 
-  it('keeps the reason line and its jump for every other reason', () => {
+  it('is the same button, with its own reason, for a destination still to finish', () => {
     const setActive = vi.fn()
     renderBlocked(START_BLOCKED_COPY.destinationSetup, setActive)
     const row = container.querySelector('[data-slot="session-blocked-reason"]')
-    expect(row?.textContent).toContain(START_BLOCKED_COPY.destinationSetup)
+    const buttons = row?.querySelectorAll('button') ?? []
+    expect(buttons).toHaveLength(1)
+    expect(buttons[0].textContent).toBe('Open Destinations')
+    expect(row?.querySelector('svg')).toBeNull()
+    const description = document.getElementById(buttons[0].getAttribute('aria-describedby') ?? '')
+    expect(description?.textContent).toBe(START_BLOCKED_COPY.destinationSetup)
+    act(() => buttons[0].click())
+    expect(setActive).toHaveBeenCalledExactlyOnceWith('live')
+  })
+
+  it('keeps the reason line and its jump for every other reason', () => {
+    const setActive = vi.fn()
+    const reason = 'You can stream to up to 5 destinations at once.'
+    renderBlocked(reason, setActive)
+    const row = container.querySelector('[data-slot="session-blocked-reason"]')
+    expect(row?.textContent).toContain(reason)
     const jump = row?.querySelector('button')
     expect(jump?.textContent).toBe('Open Destinations')
     expect(jump?.dataset.slot).toBeUndefined()
