@@ -295,7 +295,7 @@ pub struct PresetOptions {
 
 /// What `loadScene` reads before its request: the scene on stream and the
 /// latest intent, so a reload a switch overtook saves nothing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReloadMark {
     scene_id: Option<String>,
     intent: u64,
@@ -697,11 +697,21 @@ fn warning(title: impl Into<String>, id: &str, description: Option<&str>) -> Not
 }
 
 impl Inner {
+    /// The scene on stream and the latest intent, as one [`ReloadMark`].
+    pub(super) fn reload_mark(&self) -> ReloadMark {
+        ReloadMark {
+            scene_id: self.scenes.on_stream.clone(),
+            intent: self.scenes.switch.intent_id,
+        }
+    }
+
     /// `persistWorkingVisual`: the working setup's checkpoint
     /// (`videorc.working-scene.v1`) and, out of band, D11's autosave: a
     /// confirmed edit made while a scene is on stream saves into it (its
     /// look, and a picked screen; never its audio). A refused checkpoint
-    /// says "Couldn't remember this scene for next time".
+    /// says "Couldn't remember this scene for next time". `cause` names the
+    /// caller in the log line.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn persist_working_visual(
         &mut self,
         layout: &Value,
@@ -710,7 +720,18 @@ impl Inner {
         saved_id: Option<&str>,
         now: &str,
         logger: &Logger,
+        cause: &str,
     ) {
+        // Which scene a working look is saved into, its screen and why: a
+        // scene that later shows another window says where it got it.
+        let screen = ["windowId", "screenId"]
+            .into_iter()
+            .find_map(|key| sources.get(key).and_then(Value::as_str))
+            .unwrap_or("-");
+        logger.info(format!(
+            "[scenes] working visual persisted for {} ({cause}): screen {screen}",
+            saved_id.unwrap_or("-"),
+        ));
         let mut with_app = sources.clone();
         if let Value::Object(map) = &mut with_app {
             match &self.scenes.switch.working_app {
@@ -1914,6 +1935,7 @@ impl<B: StudioBackend> Studio<B> {
                 saved_id.as_deref(),
                 &(self.config.clock)(),
                 &self.config.logger,
+                "transaction committed",
             );
             restore
         };
@@ -2859,6 +2881,7 @@ impl<B: StudioBackend> Studio<B> {
                         on_stream.as_deref(),
                         &(self.config.clock)(),
                         &self.config.logger,
+                        "session sources confirmed",
                     );
                 }
                 true
@@ -2875,16 +2898,6 @@ impl<B: StudioBackend> Studio<B> {
     /// reloading it (`skipNextConfigSceneReloadRef`, plan 220 S3.1e).
     pub fn layout_commit_revision(&self) -> u64 {
         self.lock().scenes.switch.committed_revision()
-    }
-
-    /// What the preview feed's idle reload (`loadScene`) reads before its
-    /// request.
-    pub fn scene_reload_mark(&self) -> ReloadMark {
-        let inner = self.lock();
-        ReloadMark {
-            scene_id: inner.scenes.on_stream.clone(),
-            intent: inner.scenes.switch.intent_id,
-        }
     }
 
     /// `loadScene`'s `persistWorkingVisual`: the reload committed the
@@ -2915,6 +2928,7 @@ impl<B: StudioBackend> Studio<B> {
                 mark.scene_id.as_deref(),
                 &(self.config.clock)(),
                 &self.config.logger,
+                "reload confirmed",
             );
         }
         self.publish();

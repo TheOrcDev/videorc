@@ -2336,6 +2336,65 @@ async fn a_switch_while_recording_goes_live_and_never_crosses_orientation() {
     );
 }
 
+/// The preview feed's idle reload confirms with the mark of the snapshot it
+/// was built from. A reload built just before a switch committed carries the
+/// scene being left's setup: it saves nothing into the scene going on, idle
+/// or recording (GPUI Bug 2: the switch back never completed because the
+/// old window was saved into the new scene).
+#[tokio::test]
+async fn a_reload_from_before_a_switch_never_saves_into_the_new_scene() {
+    let (backend, studio) = scenes_studio(capture_config_with_camera()).await;
+    for (recording, from, to) in [
+        (false, "default-screen-camera", "default-screen-only"),
+        (true, "default-screen-only", "default-screen-camera"),
+    ] {
+        if recording {
+            assert_eq!(studio.start_recording().await, StartOutcome::Started);
+        }
+        let before = studio.snapshot();
+        assert_eq!(before.scenes.on_stream_id.as_deref(), Some(from));
+        let stored_to = stored_scene(&backend, to).unwrap();
+
+        assert!(apply(&studio, to).await);
+        let after = studio.snapshot();
+        assert_eq!(after.scenes.on_stream_id.as_deref(), Some(to));
+        assert_ne!(after.scenes.reload_mark, before.scenes.reload_mark);
+
+        // The reload from before the commit: its own mark, its own setup.
+        assert!(
+            !studio
+                .note_preview_scene_reloaded(
+                    before.scenes.reload_mark.clone(),
+                    &before.settings.capture_doc["layout"],
+                    &before.settings.capture_doc["sources"],
+                )
+                .await,
+            "a reload the switch overtook confirms nothing (recording: {recording})"
+        );
+        let stored_after = stored_scene(&backend, to).unwrap();
+        assert_eq!(
+            (&stored_after["horizontal"], &stored_after["shows"]),
+            (&stored_to["horizontal"], &stored_to["shows"]),
+            "the scene going on keeps its own layout and screen (recording: {recording})"
+        );
+        assert_eq!(
+            studio.snapshot().settings.capture_doc["layout"],
+            after.settings.capture_doc["layout"]
+        );
+
+        // A reload from the new snapshot confirms with its pair.
+        assert!(
+            studio
+                .note_preview_scene_reloaded(
+                    after.scenes.reload_mark.clone(),
+                    &after.settings.capture_doc["layout"],
+                    &after.settings.capture_doc["sources"],
+                )
+                .await
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_camera_only_scene_keeps_the_running_screen_capture() {
     let (backend, studio) = scenes_studio(capture_config_with_camera()).await;

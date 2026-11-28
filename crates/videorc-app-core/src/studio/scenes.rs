@@ -33,7 +33,7 @@ use serde_json::Value;
 use videorc_protocol::{Device, DeviceKind, DeviceStatus};
 
 use super::capture_config::{coerce_video_to_orientation, simulcast_armed};
-use super::scene_switch::{LayoutTarget, SwitchCore};
+use super::scene_switch::{LayoutTarget, ReloadMark, SwitchCore};
 use super::settings::{SettingWrite, StudioSettings, encode, keys};
 use super::{Inner, Studio, StudioBackend};
 use crate::notices::{NoticeCommand, ToastRequest};
@@ -110,6 +110,10 @@ pub struct ScenesView {
     /// not taken yet, or audio that differs from the audio it pins. Its
     /// screen is not part of it (D18).
     pub saved_scene_modified: bool,
+    /// The idle reload's mark, read with this snapshot's capture config: a
+    /// reload built from this snapshot confirms with this mark, never with a
+    /// newer scene on stream than the sources it carries.
+    pub reload_mark: ReloadMark,
 }
 
 impl ScenesView {
@@ -449,7 +453,10 @@ impl Inner {
     /// The scenes for the snapshot.
     pub(super) fn scenes_view(&self) -> ScenesView {
         let Some(state) = &self.scenes.state else {
-            return ScenesView::default();
+            return ScenesView {
+                reload_mark: self.reload_mark(),
+                ..ScenesView::default()
+            };
         };
         let scenes = self.listed_scenes();
         let vertical_leg = simulcast_armed(&self.capture.config);
@@ -483,6 +490,7 @@ impl Inner {
             working_background: self.scenes.switch.working_background.clone(),
             switch_progress: self.scenes.switch.progress.clone(),
             saved_scene_modified,
+            reload_mark: self.reload_mark(),
         }
     }
 
